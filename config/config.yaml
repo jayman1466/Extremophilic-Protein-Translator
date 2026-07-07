@@ -123,6 +123,8 @@ signalp:
 # --------------------------------------------------------------------------
 selection:
   max_per_lineage_rank: "family"     # cap extremophile picks per this rank for diversity
+  max_per_lineage: 5                 # max extremophiles drawn from any one lineage-rank group
+  max_total_per_class: 100           # cap selected extremophiles per class (null = no cap)
   outgroup_match_rank: "genus"       # try nearest mesophile at this rank, then walk up
   outgroup_match_fallback_ranks: ["family", "order", "class"]
 

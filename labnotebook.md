@@ -187,10 +187,81 @@ All 199,923 genome paths attached. 8 reconcile tests added; **40 tests total**.
 
 ---
 
+## Stage 03 — Combined environmental binning logic
+
+**Goal:** reconcile the two independent evidence sources (metadata flags +
+GenomeSPOT predictions) into a final per-class extremophile label with a
+confidence tier, plus a `confident_mesophile` flag for outgroup selection.
+
+**Combination rule** (`eptrans.binning.combine_label`):
+
+| metadata | prediction | → label | confidence |
+|----------|-----------|---------|-----------|
+| class X | class X | X | **high** (agree) |
+| — | class X | X | **medium** (prediction only) |
+| class X | — / conflict | X | **low** |
+| — | — | (none) | none |
+
+- `confident_mesophile` = all predicted optima inside the mesophile envelope
+  (temp 20–40 °C, pH 6–8, salinity ≤3 % w/v) **and** no metadata extremophile
+  flag — the pool from which phylogenetically-matched outgroups are drawn.
+- `scripts/03_combine_bins.py` writes `combined_labels.{parquet,tsv}` with
+  per-class booleans, final label, confidence, and mesophile flag; plus two
+  figures (class counts by tier; metadata-vs-prediction agreement per class).
+
+**Validation** (metadata flags + *synthetic* predictions, n=199,923): pipeline
+runs end-to-end; with random synthetic predictions "both agree" is minimal and
+"prediction only" dominates (expected for random data). Real GenomeSPOT
+predictions will concentrate agreement in the metadata-flagged classes. Figures:
+
+![Combined labels by confidence (synthetic)](results/combined_label_counts_SYNTH.png)
+![Evidence agreement per class (synthetic)](results/combined_agreement_SYNTH.png)
+
+> Counts are synthetic-prediction placeholders; final numbers await real
+> GenomeSPOT predictions (Supp Data 4 + delta recompute).
+
+---
+
+## Stage 04 — Phylogenetically-controlled genome selection
+
+**Goal:** satisfy the two competing methodological constraints so the downstream
+model learns the *trait*, not the *clade*:
+1. **Diversity** — extremophiles for each class span the tree (cap picks per
+   lineage so no clade dominates).
+2. **Matched outgroups** — each extremophile paired with a phylogenetically
+   *close* confident mesophile (same genus → family → … ), so extremophile and
+   mesophile can't be separated by clade alone.
+
+**What was done** (`src/eptrans/selection.py`)
+- `select_extremophiles()`: diversity cap of N per lineage-rank (default 5 per
+  family), preferring high-confidence labels.
+- `find_outgroup()`: walks genus → family → order → class → phylum, returning
+  the closest unused confident mesophile and recording the matched rank.
+- `select_with_outgroups()`: full pipeline → extremophiles, outgroups, pairs.
+- `scripts/04_select_genomes.py` writes the four tables + two figures.
+
+**Validation** (synthetic combined labels; 100 per class, cap 5/family):
+
+| metric | value |
+|--------|------:|
+| extremophiles selected | 600 |
+| outgroups matched | 598 / 600 |
+| pairs sharing **genus** | 302 |
+| pairs sharing **family** | 221 |
+| pairs sharing order/class/phylum | 41 / 25 / 9 |
+
+Selected extremophiles per class span **21–36 distinct phyla** and ~88–96
+distinct genera — high diversity with tight per-pair clade matching.
+
+![Pair phylogenetic closeness (synthetic)](results/selection_match_ranks_SYNTH.png)
+![Extremophile diversity per class (synthetic)](results/selection_phylum_spread_SYNTH.png)
+
+8 selection tests added; **48 tests total**.
+
+---
+
 ## Pending
 
-- **Stage 03** — combined environmental labels (metadata × GenomeSPOT).
-- **Stage 04** — phylogenetically-controlled genome selection.
 - **Stage 05** — SignalP secreted-protein extraction.
 - **Stage 06** — labeled dataset assembly (leakage-aware splits).
 - **Pilot** — end-to-end run on a small genome set + report.

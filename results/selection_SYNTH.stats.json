@@ -1,0 +1,39 @@
+{
+  "n_extremophiles": 600,
+  "n_outgroups": 598,
+  "n_pairs_matched": 598,
+  "n_pairs_unmatched": 2,
+  "by_class": {
+    "thermophile": {
+      "extremophiles": 100,
+      "matched": 99
+    },
+    "hyperthermophile": {
+      "extremophiles": 100,
+      "matched": 99
+    },
+    "psychrophile": {
+      "extremophiles": 100,
+      "matched": 100
+    },
+    "acidophile": {
+      "extremophiles": 100,
+      "matched": 100
+    },
+    "alkaliphile": {
+      "extremophiles": 100,
+      "matched": 100
+    },
+    "halophile": {
+      "extremophiles": 100,
+      "matched": 100
+    }
+  },
+  "match_rank_dist": {
+    "genus": 302,
+    "family": 221,
+    "order": 41,
+    "class": 25,
+    "phylum": 9
+  }
+}
