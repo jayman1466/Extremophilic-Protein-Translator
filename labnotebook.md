@@ -107,9 +107,43 @@ classes, as expected.
 
 ---
 
+## Stage 02 — GenomeSPOT wrapper + prediction parsing
+
+**Goal:** wrap GenomeSPOT to predict temperature / pH / salinity / oxygen from a
+genome's DNA + protein FASTA, and parse its output into a tidy per-genome table.
+
+**What was done**
+- Installed GenomeSPOT (Barnum et al. 2024) into a dedicated `genomespot` env
+  with the **critical** pins: `scikit-learn==1.2.2` (README: essential — models
+  mispredict on other versions) and `hmmlearn==0.3.0`.
+- Wrote `src/eptrans/genomespot.py`: subprocess wrapper around
+  `python -m genome_spot.genome_spot` + parsers for `.predictions.tsv` /
+  `.predictions.json`. Flattens 10 targets × {value, error, is_novel, warning}
+  into a per-genome row, plus a `__suspect` flag per trait.
+- Handled interpretation subtleties: `is_novel` (features unusual vs 98% of
+  training data) and `warning` clamping — a `min_exceeded` on salinity min /
+  optimum at 0 is benign and explicitly **not** flagged suspect.
+- `scripts/02_run_genomespot.py`: serial/local driver over an accession list
+  using the `GenomeIndex` accessors.
+
+**Validation** — ran on the shipped test genome `GCA_000172155.1`; output
+reproduces the README reference exactly:
+
+| target | value | error | flag |
+|--------|------:|------:|------|
+| temperature_optimum | 22.95 °C | 6.48 | — |
+| ph_optimum | 7.07 | 0.91 | — |
+| salinity_optimum | 0.20 % w/v | 1.94 | — |
+| salinity_min | 0 | 1.18 | min_exceeded (benign) |
+| oxygen | tolerant | 0.974 | — |
+
+6 parser tests added; **32 tests total passing**. GenomeSPOT repo + models
+archived as an artifact (`genomespot_repo.tar.gz`) for reproducible reuse.
+
+---
+
 ## Pending
 
-- **Stage 02** — GenomeSPOT wrapper + predictions (temperature / pH / salinity).
 - **Stage 02b** — reconcile precomputed GenomeSPOT predictions across releases;
   compute recompute delta; emit reconciled TSV with genome absolute paths.
 - **Stage 03** — combined environmental labels (metadata × GenomeSPOT).
