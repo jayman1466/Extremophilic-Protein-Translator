@@ -47,7 +47,7 @@ SLURM_TEMPLATE = """#!/bin/bash
 #SBATCH --mem={mem}
 #SBATCH --time={time}
 #SBATCH --output={log_dir}/signalp_%A_%a.out
-#SBATCH --array=0-{max_idx}%{concurrency}
+#SBATCH --array=0-{max_chunk_idx}%{concurrency}
 
 set -euo pipefail
 
@@ -60,31 +60,43 @@ PROT_DIR="{protein_faa_reps}"      # per-genome proteomes: <domain>/<GENOME>_pro
 OUT_ROOT="{out_root}"
 ORGANISM="{organism}"
 MODE="{mode}"
+CHUNK_SIZE={chunk_size}
+TORCH_THREADS={torch_threads}
+WRITE_PROCS={write_procs}
+BSIZE={bsize}
 
-# pick this task's accession
-ACC=$(sed -n "$((SLURM_ARRAY_TASK_ID+1))p" "$ACC_LIST")
-if [ -z "$ACC" ]; then echo "no accession for idx $SLURM_ARRAY_TASK_ID"; exit 0; fi
+# This task processes accessions [START, END) of the list.
+START=$((SLURM_ARRAY_TASK_ID * CHUNK_SIZE + 1))
+END=$((START + CHUNK_SIZE - 1))
+mkdir -p "$OUT_ROOT"
 
-# locate the proteome (prefix retained in filename; try bacteria/ then archaea/)
-FAA=""
-for DOM in bacteria archaea; do
-  CAND="$PROT_DIR/$DOM/${{ACC}}_protein.faa.gz"
-  if [ -f "$CAND" ]; then FAA="$CAND"; break; fi
+# SignalP batches internally: concatenate this chunk's proteomes into ONE FASTA
+# (protein ids namespaced by genome as {{GENOME}}~{{PROTID}}) and run once.
+CHUNK_FAA=$(mktemp --suffix=.faa)
+N=0
+for i in $(seq "$START" "$END"); do
+  ACC=$(sed -n "${{i}}p" "$ACC_LIST")
+  [ -z "$ACC" ] && continue
+  FAA=""
+  for DOM in bacteria archaea; do
+    CAND="$PROT_DIR/$DOM/${{ACC}}_protein.faa.gz"
+    if [ -f "$CAND" ]; then FAA="$CAND"; break; fi
+  done
+  if [ -z "$FAA" ]; then echo "proteome not found for $ACC"; continue; fi
+  # prefix each header with the genome id so proteins stay attributable
+  gunzip -c "$FAA" | awk -v g="$ACC" '/^>/{{sub(/^>/,">"g"~")}}1' >> "$CHUNK_FAA"
+  N=$((N+1))
 done
-if [ -z "$FAA" ]; then echo "proteome not found for $ACC"; exit 1; fi
+echo "chunk $SLURM_ARRAY_TASK_ID: $N genomes -> $(grep -c "^>" "$CHUNK_FAA") proteins"
 
-OUT="$OUT_ROOT/$ACC"
+OUT="$OUT_ROOT/chunk_${{SLURM_ARRAY_TASK_ID}}"
 mkdir -p "$OUT"
+signalp6 --fastafile "$CHUNK_FAA" --output_dir "$OUT" \\
+         --format none --organism "$ORGANISM" --mode "$MODE" \\
+         --torch_num_threads "$TORCH_THREADS" --write_procs "$WRITE_PROCS" --bsize "$BSIZE"
 
-# SignalP cannot read .gz directly -> decompress to a temp file
-TMP=$(mktemp --suffix=.faa)
-gunzip -c "$FAA" > "$TMP"
-
-signalp6 --fastafile "$TMP" --output_dir "$OUT" \\
-         --format none --organism "$ORGANISM" --mode "$MODE"
-
-rm -f "$TMP"
-echo "done $ACC -> $OUT"
+rm -f "$CHUNK_FAA"
+echo "done chunk $SLURM_ARRAY_TASK_ID -> $OUT"
 """
 
 
@@ -98,24 +110,34 @@ def emit_slurm(args, cfg) -> None:
     out_root = args.out_root or f"{scratch}/signalp"
     log_dir = args.log_dir or f"{scratch}/logs/signalp"
 
+    from eptrans.slurm import plan_array
+    plan = plan_array(len(accs), args.chunk_size, args.max_tasks, args.concurrency)
+    if plan.grown:
+        print(f"[05] chunk-size grown {args.chunk_size} -> {plan.chunk_size} to keep "
+              f"array <= {args.max_tasks} tasks (MaxSubmitJobs/MaxArraySize)")
+    n = len(accs)
+    n_chunks = plan.n_tasks
+    args.chunk_size = plan.chunk_size
+    args.concurrency = plan.concurrency
     script = SLURM_TEMPLATE.format(
         partition=args.partition or cfg.get_path("signalp.partition", "standard"),
         cpus=args.cpus, mem=args.mem, time=args.time,
-        log_dir=log_dir, max_idx=max(len(accs) - 1, 0), concurrency=args.concurrency,
+        log_dir=log_dir, max_chunk_idx=max(n_chunks - 1, 0), concurrency=args.concurrency,
         acc_list=str(acc_list_path),
         protein_faa_reps=cfg.get_path("biotite.protein_faa_reps"),
         out_root=out_root,
         organism=cfg.get_path("signalp.organism", "other"),
         mode=cfg.get_path("signalp.mode", "fast"),
+        chunk_size=args.chunk_size, torch_threads=args.cpus,
+        write_procs=args.cpus, bsize=args.bsize,
     )
     Path(args.slurm_out).write_text(script)
     print(f"[05] wrote SLURM script: {args.slurm_out}")
-    print(f"[05] accession list ({len(accs)}): {acc_list_path}")
-    print(f"[05] output root: {out_root}")
+    print(f"[05] accession list: {acc_list_path} ({n} genomes)")
+    print(f"[05] chunking: {n_chunks} array tasks x {args.chunk_size} genomes/task "
+          f"(concurrency {args.concurrency}, {args.cpus} threads/task)")
+    print(f"[05] output root: {out_root} (per-chunk dirs; protein ids namespaced GENOME~PROTID)")
     print(f"[05] submit with:  sbatch {args.slurm_out}")
-    print(f"[05] NOTE: SignalP model weights must be installed on the host "
-          f"(license-gated DTU download); the installed package currently has an "
-          f"empty model_weights/ dir.")
 
 
 def _load_accessions(path: str, acc_col: str) -> list[str]:
@@ -127,44 +149,66 @@ def _load_accessions(path: str, acc_col: str) -> list[str]:
     return [l.strip() for l in open(path) if l.strip()]
 
 
+def _split_genome_protein(pred_id: str, fallback_genome: str) -> tuple[str, str]:
+    """Recover (genome, protein_id) from a SignalP prediction id.
+
+    Chunked runs namespace ids as ``GENOME~PROTID`` (split on the FIRST ``~``);
+    per-genome runs have a bare protein id, so the genome comes from the dir name.
+    """
+    if "~" in pred_id:
+        genome, protid = pred_id.split("~", 1)
+        return genome, protid
+    return fallback_genome, pred_id
+
+
 def parse_and_extract(args, cfg) -> None:
     root = Path(args.signalp_out_root)
-    dirs = [d for d in root.iterdir() if d.is_dir()] if root.exists() else []
-    if not dirs:
-        raise SystemExit(f"no per-genome output dirs under {root}")
+    # find every prediction_results.txt (per-genome OR per-chunk dir)
+    res_files = sorted(root.rglob("prediction_results.txt")) if root.exists() else []
+    if not res_files:
+        raise SystemExit(f"no prediction_results.txt found under {root}")
 
-    classes = args.classes or SP_CLASSES
+    classes = set(args.classes or SP_CLASSES)
     all_rows = []
     all_secreted = []
-    combined_summary = {"n_proteins": 0, "n_secreted": 0, "by_genome": {}}
+    from collections import defaultdict
+    per_genome_preds: dict[str, list] = defaultdict(list)
 
-    for d in sorted(dirs):
-        acc = d.name
-        res_file = d / "prediction_results.txt"
-        if not res_file.exists():
-            continue
+    for res_file in res_files:
+        fallback_genome = res_file.parent.name
         preds = parse_prediction_results(res_file)
-        summ = summarize(preds)
-        combined_summary["n_proteins"] += summ["n_proteins"]
-        combined_summary["n_secreted"] += summ["n_secreted"]
-        combined_summary["by_genome"][acc] = summ
-
-        # per-protein table rows
         for p in preds:
+            genome, protid = _split_genome_protein(p.protein_id, fallback_genome)
+            per_genome_preds[genome].append((protid, p))
             if p.prediction in classes:
                 all_rows.append({
-                    "genome": acc, "protein_id": p.protein_id,
+                    "genome": genome, "protein_id": protid,
                     "signalp_class": p.prediction, "cs_after": p.cs_after,
                     "cs_prob": p.cs_prob,
                     **{f"p_{k}": v for k, v in p.probs.items()},
                 })
 
-        # sequences (need the source proteome to extract)
-        if args.protein_faa_reps or cfg.get_path("biotite.protein_faa_reps"):
-            faa = _find_proteome(acc, args.protein_faa_reps or cfg.get_path("biotite.protein_faa_reps"))
+    # per-genome summary + sequence extraction
+    combined_summary = {"n_proteins": 0, "n_secreted": 0, "by_genome": {}}
+    faa_root = args.protein_faa_reps or cfg.get_path("biotite.protein_faa_reps")
+    for genome, items in per_genome_preds.items():
+        preds = [p for _pid, p in items]
+        summ = summarize(preds)
+        combined_summary["n_proteins"] += summ["n_proteins"]
+        combined_summary["n_secreted"] += summ["n_secreted"]
+        combined_summary["by_genome"][genome] = summ
+        if faa_root:
+            faa = _find_proteome(genome, faa_root)
             if faa:
-                for pid, cls, seq in extract_secreted(preds, faa, mature=args.mature, classes=classes):
-                    all_secreted.append((f"{acc}~{pid}", cls, seq))
+                # rebuild predictions keyed by bare protid for extraction
+                bare_preds = []
+                for protid, p in items:
+                    p2 = p
+                    p2.protein_id = protid
+                    bare_preds.append(p2)
+                for pid, cls, seq in extract_secreted(bare_preds, faa, mature=args.mature,
+                                                      classes=list(classes)):
+                    all_secreted.append((f"{genome}~{pid}", cls, seq))
 
     # write per-protein table
     table = pd.DataFrame(all_rows)
@@ -209,10 +253,17 @@ def main() -> None:
     ap.add_argument("--out-root", default=None)
     ap.add_argument("--log-dir", default=None)
     ap.add_argument("--partition", default=None)
-    ap.add_argument("--cpus", type=int, default=8)
-    ap.add_argument("--mem", default="16G")
-    ap.add_argument("--time", default="04:00:00")
-    ap.add_argument("--concurrency", type=int, default=20)
+    ap.add_argument("--cpus", type=int, default=16)
+    ap.add_argument("--mem", default="24G")
+    ap.add_argument("--time", default="08:00:00")
+    ap.add_argument("--concurrency", type=int, default=10,
+                    help="max simultaneously-running array tasks (biotite standard QOS caps at 10)")
+    ap.add_argument("--chunk-size", type=int, default=1000,
+                    help="genomes per array task (keeps array size under SLURM limits)")
+    ap.add_argument("--max-tasks", type=int, default=200,
+                    help="max array tasks = min(MaxSubmitJobs, MaxArraySize); biotite=200. "
+                         "chunk-size auto-grows so n_chunks stays <= this.")
+    ap.add_argument("--bsize", type=int, default=32, help="SignalP batch size")
     # parse/extract args
     ap.add_argument("--signalp-out-root", help="root dir of per-genome SignalP outputs")
     ap.add_argument("--protein-faa-reps", default=None, help="dir of per-genome proteomes for seq extraction")
