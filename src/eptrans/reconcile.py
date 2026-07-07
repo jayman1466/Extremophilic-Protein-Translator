@@ -1,9 +1,8 @@
 """Reconcile precomputed GenomeSPOT predictions across GTDB releases.
 
-The GenomeSPOT paper (Barnum et al. 2024, bioRxiv 2024.03.22.586313) states in
-its methods that models were applied to GTDB release **r214**, and its abstract
-reports applying the models to "all 85,205 species of sequenced bacteria and
-archaea" (quote from the fetched paper abstract). The per-genome predictions themselves are NOT
+The GenomeSPOT paper (Barnum et al. 2024, bioRxiv 2024.03.22.586313) applied its
+models to the species representatives of GTDB release **r214** (order ~85k
+genomes; see the paper for the exact figure). The per-genome predictions themselves are NOT
 shipped in the GenomeSPOT repo; the ``analyze_all_species`` notebook reads them
 from a local ``data/predictions_gtdb/`` directory and merges them into a table
 the notebook names ``supplementary_data_4.tsv`` (presumed to be the paper's
