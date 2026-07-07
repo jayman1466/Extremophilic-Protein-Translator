@@ -297,10 +297,95 @@ array over the selected extremophiles. 7 signalp tests; **55 tests total**.
 
 ---
 
-## Pending
+## Stage 06 — labeled dataset assembly with leakage-aware splits
 
-- **Stage 06** — labeled dataset assembly (secreted proteins × extremophile class).
-- **Stage 07** — end-to-end local pilot + push.
+**Goal:** join secreted proteins (stage 05) to genome environmental classes
+(stage 03), producing a protein-level supervised dataset for PLM/classifier
+fine-tuning, with splits that don't leak homologs across train/val/test.
+
+**What was done**
+- `src/eptrans/dataset.py`: `assign_labels()` (each secreted protein inherits its
+  source genome's class, or `mesophile` for a confident-mesophile outgroup),
+  `stratified_group_split()` (whole groups → one split, stratified by group
+  majority label), `assemble_dataset()` (groups = mmseqs sequence clusters when a
+  cluster map is supplied, else genome-level fallback).
+- **Two leakage controls**: (1) sequence-similarity — near-duplicate secreted
+  proteins (mmseqs cluster) never span splits; (2) genome memorization — all
+  proteins of one genome share a split. Enforced by assertion
+  (`max_splits_per_group == 1`).
+- `scripts/06_assemble_dataset.py`: dataset parquet/TSV + stats.json + per-split
+  count figure.
+
+**Validation:** 5 dataset tests including the no-leakage guarantee and the
+cluster-map homolog test (a shared cluster lands entirely in one split). 60
+tests total at this stage.
+
+---
+
+## Stage 05b — SLURM scaling under biotite QOS limits
+
+**biotite `standard` QOS (verified via scontrol/sacctmgr):** MaxJobsPerUser=10
+(running array tasks), MaxSubmitJobsPerUser=200 (queued+running), MaxArraySize=1001.
+
+- `src/eptrans/slurm.py`: `plan_array()` sizes chunked arrays so n_tasks ≤ 200,
+  throttled `%10`; auto-grows chunk-size to fit.
+- `scripts/05_run_signalp.py` and `scripts/02_emit_genomespot_slurm.py` both emit
+  chunked arrays: GenomeSPOT uses `xargs -P <cpus>` intra-node (1 genome/invocation,
+  ~5s each); SignalP concatenates a chunk's proteomes into one FASTA (headers
+  namespaced `GENOME~PROTID`) and uses internal batching (`--torch_num_threads`,
+  `--write_procs`, `--bsize`).
+- Full scale (199,923 genomes): 200 tasks × 1000/task × 16 cores, `--array=0-199%10`.
+- **Compute-time note:** GenomeSPOT ~5s/genome. At 16 cores/task × 10 running
+  tasks (160-way) → ~105 min wall for all genomes; at 48 cores/task → ~35 min.
+  Reusing the paper's precomputed r214 predictions (Supp Data 4) would cut the
+  recompute to the delta (~4× saving), but recompute is cheap CPU work — the user
+  chose the recompute path.
+
+---
+
+## Stage 07 — end-to-end local pilot
+
+**Goal:** run the whole chain on a small, phylogenetically-diverse real genome
+set and confirm each stage produces sensible output.
+
+**Pilot set** (`data/pilot_genomes.tsv`, 14 genomes): 2 each of hyperthermophile,
+psychrophile, acidophile, alkaliphile, halophile + 1 thermophile + 3 mesophiles,
+spanning 4 GTDB phyla (Acidobacteriota, Actinomycetota, and two candidate phyla),
+with real isolation sources (deep-sea hydrothermal vent, ice core, acid mine
+drainage, hypersaline soda lake, alkaline hot spring). All 14 confirmed in the
+genome index (fna + proteome paths).
+
+**GenomeSPOT (real predictions):** ran locally on all 14 (repo + models + pinned
+env), 14/14 in ~45 s. Predictions are biologically sensible and demonstrate the
+value of the combination approach:
+- Acidophiles (acid mine drainage) → pH optima **3.4 / 5.0** ✓
+- Halophile (hypersaline soda lake) → salinity **6.0 %**, pH **9.2** ✓
+- Psychrophile (ice core, *Cryobacterium*) → temp optimum **17.4 °C** ✓
+- **"Hyperthermophiles"** (metadata: deep-sea vent) → GenomeSPOT predicts only
+  **40–48 °C**, *not* hyperthermophilic — the "isolated-from ≠ thrives-at" case
+  the design guards against. These correctly fall to low confidence.
+
+**Combined binning (real):** 14 genomes → confidence tiers **high 3 / low 8 /
+none 3**; 1 confident mesophile. High-confidence = the acidophiles + halophile
+where metadata and prediction agree.
+
+**Selection:** at 14-genome scale only 1 confident mesophile exists, so only 1
+extremophile could be phylo-matched to an outgroup (logic exercised; matched
+pool is a scale artifact of the pilot, not a defect).
+
+**SignalP:** the full pilot proteome is **47,972 proteins**; SignalP 6.0 fast
+mode runs at ~1.7 seq/s on CPU (~8 h for the full set), so the pilot subsamples
+to 150 proteins/genome (~2,100) and runs as a SLURM batch job on a compute node.
+(SignalP model weights confirmed installed by the user.)
+
+**Pilot figures**
+- `results/pilot_env_predictions.png` — predicted OGT / pH / salinity per genome,
+  colored by metadata-implied class, with class-threshold guide lines.
+- `results/pilot_phylo_spread.png` — phylum × class grid colored by combined
+  confidence tier.
+- `results/pilot_combined_label_counts.png`, `results/pilot_combined_agreement.png`
+  — per-class label counts and metadata/prediction agreement.
+- (secreted-protein counts figure produced once the SignalP job completes.)
 - **Stage 06** — labeled dataset assembly (leakage-aware splits).
 - **Pilot** — end-to-end run on a small genome set + report.
 
