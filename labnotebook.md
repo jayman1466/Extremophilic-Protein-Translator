@@ -142,10 +142,53 @@ archived as an artifact (`genomespot_repo.tar.gz`) for reproducible reuse.
 
 ---
 
+## Stage 02b — Reconcile precomputed GenomeSPOT predictions
+
+**Goal:** reuse the GenomeSPOT paper's precomputed predictions (GTDB **r214**)
+for r232 reps, compute the recompute **delta**, and emit a reconciled TSV with
+genome absolute paths.
+
+**What was done**
+- Established that the paper applied GenomeSPOT to GTDB **r214** (abstract:
+  "all 85,205 species"). The per-genome predictions are **not** in the repo; the
+  `analyze_all_species` notebook reads them from a local `data/predictions_gtdb/`
+  and merges to a table it calls `supplementary_data_4.tsv` (presumed the paper's
+  Supplementary Data 4).
+- Wrote `src/eptrans/reconcile.py` with **three-tier accession matching**
+  (strongest first), recording which level matched for auditability:
+  1. `exact` — full bare accession incl. source prefix + version
+  2. `noversion` — GCA/GCF + numeric, ignoring `.version` (version bumps)
+  3. `assembly` — numeric id only (bridges GenBank↔RefSeq `GCA`↔`GCF`)
+- r232 reps with no match → **delta** (need fresh GenomeSPOT); precomputed rows
+  matching no r232 rep → **dropped** (organism no longer a rep).
+- `attach_genome_paths()` adds absolute `.fna.gz` paths from `genome_index.tsv`.
+- `scripts/02b_reconcile_predictions.py` emits the reconciled TSV (+ delta
+  accession list, stats JSON, summary figure).
+
+**Validation** — the true reuse fraction needs the real Supp Data 4 (bioRxiv
+supplementary blocked from this environment; pending user download). Verified
+end-to-end on a **synthetic precomputed set** built from real r232 accessions
+with injected version-bumps and GCA↔GCF swaps (75% coverage, 3,000 dropped rows):
+
+| bucket | count | note |
+|--------|------:|------|
+| reuse: exact | 89,965 | identical accession |
+| reuse: noversion | 29,989 | version bump |
+| reuse: assembly | 29,988 | GCA↔GCF swap |
+| delta (recompute) | 49,981 | not in precomputed |
+| dropped precomputed | 3,000 | not a rep in r232 |
+
+All 199,923 genome paths attached. 8 reconcile tests added; **40 tests total**.
+
+![Reconciliation summary (synthetic validation)](results/genomespot_reconcile_summary_SYNTH.png)
+
+> **Note:** figure/counts above are the synthetic validation. Real r214→r232
+> reuse fractions will be produced once Supplementary Data 4 is loaded.
+
+---
+
 ## Pending
 
-- **Stage 02b** — reconcile precomputed GenomeSPOT predictions across releases;
-  compute recompute delta; emit reconciled TSV with genome absolute paths.
 - **Stage 03** — combined environmental labels (metadata × GenomeSPOT).
 - **Stage 04** — phylogenetically-controlled genome selection.
 - **Stage 05** — SignalP secreted-protein extraction.

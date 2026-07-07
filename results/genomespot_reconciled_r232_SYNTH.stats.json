@@ -1,0 +1,19 @@
+{
+  "n_reps": 199923,
+  "n_precomputed": 152942,
+  "n_reused": 149942,
+  "n_delta": 49981,
+  "reuse_by_level": {
+    "exact": 89965,
+    "noversion": 29989,
+    "assembly": 29988
+  },
+  "n_dropped_precomputed": 3000,
+  "precomp_key_collisions": {
+    "exact": 2,
+    "noversion": 2,
+    "assembly": 3
+  },
+  "reuse_fraction": 0.75,
+  "n_genome_paths_attached": 199923
+}

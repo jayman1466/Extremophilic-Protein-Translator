@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Stage 02 - run GenomeSPOT on a set of genomes and collect predictions.
 
-Given a list of genome accessions (and access to the GTDB genome/proteome files
-via the config'd paths or explicit --fna-dir/--faa-dir), runs GenomeSPOT on each
-and writes a tidy per-genome predictions parquet + TSV.
+Given a list of genome accessions (resolved to genome/proteome files via the
+GenomeIndex accessors / config'd paths), runs GenomeSPOT on each and writes a
+tidy per-genome predictions parquet + TSV.
 
 On biotite this is dispatched as a SLURM array; locally it runs serially. This
 script is the serial/local driver; the SLURM wrapper calls the same per-genome
