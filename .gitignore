@@ -43,3 +43,4 @@ logs/
 *.log
 scratch/
 tmp/
+results/slurm_test/

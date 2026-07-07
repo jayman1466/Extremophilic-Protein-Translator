@@ -260,9 +260,47 @@ distinct genera — high diversity with tight per-pair clade matching.
 
 ---
 
+## Stage 05 — SignalP 6.0 wrapper + secreted-protein extraction
+
+**Goal:** identify and extract secreted / cell-surface-exposed proteins (those
+carrying a signal peptide) from the selected genomes' proteomes.
+
+**Secreted definition:** SignalP 6.0 class ∈ {SP, LIPO, TAT, TATLIPO, PILIN}
+(i.e. any predicted signal peptide; class `OTHER` = not secreted).
+
+**Host reconnaissance (biotite)**
+- SignalP 6.0 is a **pyenv shim** (`/home/jayminp/.pyenv/shims/signalp6`,
+  pyenv 3.11.3), **not** on the default non-login PATH. Jobs must
+  `export PYENV_ROOT="$HOME/.pyenv"; export PATH="$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH"` first.
+- Confirmed CLI:
+  `signalp6 --fastafile <faa> --output_dir <dir> --format {txt,none} --organism other --mode {fast,slow}`.
+- ⚠️ **Model weights are not installed** — `signalp/model_weights/` contains only
+  a README (no `.pt` files), so no mode can currently run (fast mode errors on the
+  missing distilled model). The weights are license-gated (DTU academic download)
+  and must be installed on the host before real runs.
+
+**What was done**
+- `src/eptrans/signalp.py`: parser for `prediction_results.txt` (exact format
+  taken from the installed SignalP source), `SignalPrediction` dataclass with
+  `is_secreted`, `extract_secreted()` (precursor or mature chain via cleavage
+  site), `summarize()`, and command builder.
+- `scripts/05_run_signalp.py`: `--emit-slurm` writes a SLURM array job (pyenv
+  export baked in; decompresses `.gz` proteomes; one genome per array task); the
+  default mode parses per-genome outputs → secreted-protein FASTA
+  (`>{GENOME}~{PROTID}` headers) + per-protein table + summary JSON.
+
+**Validation** (parser + extraction on a synthetic SignalP output set that
+reproduces the exact 6.0 format): 2 genomes, 5 proteins → 3 secreted (60%);
+class filtering, cleavage-site math (mature = residues after cleavage), and
+`{GENOME}~{PROTID}` headers all correct. `--emit-slurm` generated a 600-task
+array over the selected extremophiles. 7 signalp tests; **55 tests total**.
+
+---
+
 ## Pending
 
-- **Stage 05** — SignalP secreted-protein extraction.
+- **Stage 06** — labeled dataset assembly (secreted proteins × extremophile class).
+- **Stage 07** — end-to-end local pilot + push.
 - **Stage 06** — labeled dataset assembly (leakage-aware splits).
 - **Pilot** — end-to-end run on a small genome set + report.
 

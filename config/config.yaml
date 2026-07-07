@@ -15,6 +15,7 @@ biotite:
   base: "/groups/cress/projects/jaymin/IS1111"
   gtdb_dir: "/groups/cress/projects/jaymin/IS1111/gtdb"
   work_dir: "/groups/cress/projects/jaymin/IS1111/work"
+  scratch_root: "/groups/cress/projects/jaymin/eptrans_scratch"   # pipeline outputs (VAST /groups)
 
   metadata:
     bacteria: "/groups/cress/projects/jaymin/IS1111/gtdb/bac120_metadata_r232.tsv.gz"
