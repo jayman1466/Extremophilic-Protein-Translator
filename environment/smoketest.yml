@@ -1,0 +1,21 @@
+# Local smoke-test environment: core pipeline + DeepSig as an open-source
+# stand-in for SignalP so the flow can be exercised without biotite.
+name: eptrans-smoke
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pip
+  - pandas
+  - numpy
+  - pyarrow
+  - biopython
+  - pyyaml
+  - matplotlib
+  - seaborn
+  - scipy
+  - tqdm
+  - mmseqs2
+  - pip:
+      - deepsig-biocomp   # DeepSig signal-peptide predictor (SignalP fallback)

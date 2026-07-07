@@ -1,0 +1,7 @@
+"""Ensure the src/ layout is importable when the package isn't pip-installed."""
+import sys
+from pathlib import Path
+
+SRC = Path(__file__).resolve().parents[1] / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))

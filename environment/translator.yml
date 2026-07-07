@@ -1,0 +1,21 @@
+# Model fine-tuning environment (downstream: ESM / PLM fine-tuning + classifier).
+# GPU host (biotite gpu / gpu_h200). Kept separate from the data-pipeline envs.
+name: eptrans-translator
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pandas
+  - numpy
+  - pyarrow
+  - scikit-learn
+  - matplotlib
+  - pip:
+      - torch
+      - transformers>=4.40
+      - fair-esm            # ESM-2 / ESM-1b
+      - datasets
+      - accelerate
+      - evaluate
+      - wandb

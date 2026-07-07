@@ -1,0 +1,16 @@
+# GenomeSPOT environment (temperature / pH / salinity / oxygen prediction).
+# GenomeSPOT requires Python >=3.8 and <3.12 and pins hmmlearn==0.3.0.
+name: genomespot
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - pandas
+  - scikit-learn
+  - biopython
+  - pip:
+      - hmmlearn==0.3.0
+      - "git+https://github.com/cultivarium/GenomeSPOT.git"

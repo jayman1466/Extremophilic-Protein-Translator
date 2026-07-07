@@ -1,0 +1,145 @@
+# ==========================================================================
+# Extremophilic Protein Translator - central configuration
+# All paths, thresholds, and conventions for the GTDB -> bin -> secrete pipeline.
+# Paths under `biotite:` are on the SLURM cluster; `local:` are workspace-relative.
+# ==========================================================================
+
+gtdb:
+  release: "r232"                       # verified on biotite 2026-07-07
+
+# --------------------------------------------------------------------------
+# On-cluster (biotite) data layout. Verified against the filesystem.
+# --------------------------------------------------------------------------
+biotite:
+  host: "ssh:biotite"
+  base: "/groups/cress/projects/jaymin/IS1111"
+  gtdb_dir: "/groups/cress/projects/jaymin/IS1111/gtdb"
+  work_dir: "/groups/cress/projects/jaymin/IS1111/work"
+
+  metadata:
+    bacteria: "/groups/cress/projects/jaymin/IS1111/gtdb/bac120_metadata_r232.tsv.gz"
+    archaea:  "/groups/cress/projects/jaymin/IS1111/gtdb/ar53_metadata_r232.tsv.gz"
+
+  # Per-genome Prodigal proteomes: <prefix>_<acc>_protein.faa.gz, prefix retained.
+  protein_faa_reps: "/groups/cress/projects/jaymin/IS1111/gtdb/protein_faa_reps"   # {archaea,bacteria}/
+
+  # Genome nucleotide FASTAs, 3-level nested under database/{GCA,GCF}/NNN/NNN/NNN/
+  genomes_root: "/groups/cress/projects/jaymin/IS1111/gtdb/gtdb_genomes_reps_r232/database"
+
+  # Pre-built work products (see conventions below).
+  combined_faa:     "/groups/cress/projects/jaymin/IS1111/work/gtdb_reps.faa"       # >{GENOME}~{PROTID}
+  protein_coords:   "/groups/cress/projects/jaymin/IS1111/work/protein_coords.tsv.gz"
+  genome_index:     "/groups/cress/projects/jaymin/IS1111/work/genome_index.tsv"    # headerless: <bare_acc>\t<abs_path>
+
+  scratch: "/groups/cress/projects/jaymin/IS1111/work/eptrans"    # pipeline outputs on cluster
+
+# --------------------------------------------------------------------------
+# Data conventions (verified). Documented here so the code is auditable.
+# --------------------------------------------------------------------------
+conventions:
+  # genome id keeps GTDB source prefix: GB_ (GenBank/GCA) or RS_ (RefSeq/GCF)
+  genome_prefixes: ["GB_", "RS_"]
+  # combined FASTA header: >{GENOME}~{PROTID}  e.g. >GB_GCA_000008085.1~AE017199.1_1
+  faa_header_sep: "~"
+  # protein_coords.tsv.gz columns:
+  coords_columns: ["tagged_id", "genome", "accession", "contig", "start", "end", "strand"]
+  # metadata representative flag (column 19): gtdb_representative == 't'
+  representative_flag_col: "gtdb_representative"
+  representative_flag_value: "t"
+
+# --------------------------------------------------------------------------
+# Metadata columns used downstream (from the 113-col bac120 / ar53 TSVs).
+# --------------------------------------------------------------------------
+metadata_columns:
+  accession: "accession"
+  gtdb_taxonomy: "gtdb_taxonomy"
+  ncbi_taxonomy: "ncbi_taxonomy"
+  isolation_source: "ncbi_isolation_source"     # primary environment proxy
+  organism_name: "ncbi_organism_name"
+  strain: "ncbi_strain_identifiers"
+  country: "ncbi_country"
+  checkm_completeness: "checkm2_completeness"
+  checkm_contamination: "checkm2_contamination"
+
+# QC filters applied to representatives before use.
+qc:
+  min_completeness: 90.0
+  max_contamination: 5.0
+
+# --------------------------------------------------------------------------
+# Environmental binning thresholds (GenomeSPOT predicted optima).
+# Units: temperature °C, pH unitless, salinity % w/v NaCl.
+# --------------------------------------------------------------------------
+thresholds:
+  temperature:
+    psychrophile_max_opt: 15.0
+    thermophile_min_opt: 50.0
+    hyperthermophile_min_opt: 80.0
+  ph:
+    acidophile_max_opt: 5.0
+    alkaliphile_min_opt: 9.0
+  salinity:
+    halophile_min_opt: 5.0        # % w/v NaCl
+  # Mesophile envelope (used to call a genome confidently non-extreme).
+  mesophile:
+    temp_min_opt: 20.0
+    temp_max_opt: 40.0
+    ph_min_opt: 6.0
+    ph_max_opt: 8.0
+    salinity_max_opt: 3.0
+
+# --------------------------------------------------------------------------
+# Confidence-combination scheme (metadata proxy x GenomeSPOT prediction).
+# --------------------------------------------------------------------------
+combination:
+  high_confidence: "metadata_and_prediction_agree"
+  medium_confidence: "prediction_only"
+  low_confidence: "metadata_only_or_conflict"
+
+# --------------------------------------------------------------------------
+# GenomeSPOT
+# --------------------------------------------------------------------------
+genomespot:
+  repo: "https://github.com/cultivarium/GenomeSPOT.git"
+  env: "genomespot"
+  # Precomputed predictions from the GenomeSPOT publication (older GTDB release).
+  # Resolved at reconciliation time; fill in once located.
+  precomputed_url: null
+  precomputed_local: "data/genomespot_precomputed"
+
+# --------------------------------------------------------------------------
+# SignalP 6.0 (installed & in PATH on biotite)
+# --------------------------------------------------------------------------
+signalp:
+  binary: "signalp6"
+  mode: "fast"
+  organism: "other"
+  partition: "standard"
+  # Signal-peptide classes reported by SignalP 6.0
+  sp_classes: ["SP", "LIPO", "TAT", "TATLIPO", "PILIN"]   # Sec/SPI, Sec/SPII, Tat/SPI, Tat/SPII, Sec/SPIII
+
+# --------------------------------------------------------------------------
+# Phylogenetically-controlled selection
+# --------------------------------------------------------------------------
+selection:
+  max_per_lineage_rank: "family"     # cap extremophile picks per this rank for diversity
+  outgroup_match_rank: "genus"       # try nearest mesophile at this rank, then walk up
+  outgroup_match_fallback_ranks: ["family", "order", "class"]
+
+# --------------------------------------------------------------------------
+# Dataset assembly
+# --------------------------------------------------------------------------
+dataset:
+  mmseqs_min_seq_id: 0.5
+  mmseqs_coverage: 0.8
+  splits: { train: 0.8, val: 0.1, test: 0.1 }
+  split_seed: 1466
+
+# --------------------------------------------------------------------------
+# SLURM defaults
+# --------------------------------------------------------------------------
+slurm:
+  account: null
+  partition_cpu: "standard"
+  partition_highmem: "memory"
+  partition_gpu: "gpu"

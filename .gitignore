@@ -1,0 +1,45 @@
+# Data & large artifacts (kept off git; live on biotite / regenerated)
+data/
+results/*.parquet
+results/*.faa
+results/*.fasta
+results/*.tsv
+results/*.tsv.gz
+models/
+*.tar.gz
+*.gz
+*.faa
+*.fna
+*.h5
+*.pt
+*.ckpt
+
+# Keep results figures and small reports tracked
+!results/*.png
+!results/*.md
+!results/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+
+# OS / editors
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Logs & scratch
+logs/
+*.log
+scratch/
+tmp/
