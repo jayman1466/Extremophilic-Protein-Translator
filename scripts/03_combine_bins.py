@@ -64,6 +64,9 @@ def main() -> None:
     ap.add_argument("--predictions", default=None,
                     help="reconciled/predicted GenomeSPOT table (stage 02b); optional")
     ap.add_argument("--acc-col", default="accession")
+    ap.add_argument("--bare-join", action="store_true",
+                    help="join flags<->predictions on bare accession (strip GB_/RS_ prefix); "
+                         "use when predictions carry bare accessions (aggregated GenomeSPOT TSV)")
     ap.add_argument("--out", default="results/combined_labels.parquet")
     ap.add_argument("--fig-counts", default="results/combined_label_counts.png")
     ap.add_argument("--fig-agree", default="results/combined_agreement.png")
@@ -77,10 +80,23 @@ def main() -> None:
     if args.predictions:
         pred = (pd.read_parquet(args.predictions) if args.predictions.endswith(".parquet")
                 else pd.read_csv(args.predictions, sep="\t"))
+        pred.columns = [c.strip() for c in pred.columns]  # tolerate CRLF-trailing header
         keep = [args.acc_col] + [c for c in pred.columns
                                  if c in set(PRED_TEMP + PRED_SAL + PRED_PH)
                                  or c in ("genomespot_reused", "genomespot_match_level", "genome_fna_path")]
-        df = df.merge(pred[keep].drop_duplicates(args.acc_col), on=args.acc_col, how="left")
+        pred = pred[keep].drop_duplicates(args.acc_col)
+        if args.bare_join:
+            # normalize both sides to bare accession (strips GB_/RS_ + keeps version).
+            # The aggregated GenomeSPOT TSV uses bare accessions; metadata flags keep
+            # the GTDB prefix. Join on the shared bare form.
+            from eptrans.gtdb import bare_accession
+            df["_bare"] = df[args.acc_col].map(bare_accession)
+            pred = pred.rename(columns={args.acc_col: "_pred_acc"})
+            pred["_bare"] = pred["_pred_acc"].map(bare_accession)
+            pred = pred.drop(columns=["_pred_acc"])
+            df = df.merge(pred, on="_bare", how="left").drop(columns=["_bare"])
+        else:
+            df = df.merge(pred, on=args.acc_col, how="left")
         have_pred = True
 
     temp = _first_present(df, PRED_TEMP)
