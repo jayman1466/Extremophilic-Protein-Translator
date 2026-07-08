@@ -49,6 +49,15 @@ def main() -> None:
                     default=cfg.get_path("selection.max_per_lineage", 5))
     ap.add_argument("--lineage-rank", default=cfg.get_path("selection.max_per_lineage_rank", "family"))
     ap.add_argument("--max-total-per-class", type=int, default=100)
+    ap.add_argument("--classes", default=None,
+                    help="comma-separated class list (default: all 6)")
+    ap.add_argument("--confidence", default=None,
+                    help="confidence tiers to keep. Global: 'high,medium'. Per-class: "
+                         "'default=high,medium;thermophile=high' (semicolon-separated, "
+                         "class=tiers, 'default' sets the fallback).")
+    ap.add_argument("--reuse-outgroups", action="store_true",
+                    help="allow one mesophile outgroup to pair across multiple classes "
+                         "(deduplicated in the final outgroup set)")
     ap.add_argument("--seed", type=int, default=cfg.get_path("dataset.split_seed", 1466))
     ap.add_argument("--fig-ranks", default="results/selection_match_ranks.png")
     ap.add_argument("--fig-spread", default="results/selection_phylum_spread.png")
@@ -57,9 +66,25 @@ def main() -> None:
     labels = (pd.read_parquet(args.labels) if args.labels.endswith(".parquet")
               else pd.read_csv(args.labels, sep="\t"))
 
+    classes = args.classes.split(",") if args.classes else None
+    conf = None
+    if args.confidence:
+        if "=" in args.confidence:
+            # per-class: 'default=high,medium;thermophile=high'
+            spec = {}
+            for part in args.confidence.split(";"):
+                k, v = part.split("=", 1)
+                spec[k.strip()] = tuple(v.split(","))
+            default = spec.pop("default", None)
+            cls_list = classes or ["thermophile", "hyperthermophile", "psychrophile",
+                                   "acidophile", "alkaliphile", "halophile"]
+            conf = {c: spec.get(c, default) for c in cls_list}
+        else:
+            conf = tuple(args.confidence.split(","))
     res = select_with_outgroups(
-        labels, max_per_lineage=args.max_per_lineage, lineage_rank=args.lineage_rank,
-        max_total_per_class=args.max_total_per_class, seed=args.seed,
+        labels, classes=classes, max_per_lineage=args.max_per_lineage,
+        lineage_rank=args.lineage_rank, max_total_per_class=args.max_total_per_class,
+        confidence_levels=conf, reuse_outgroups=args.reuse_outgroups, seed=args.seed,
     )
 
     pref = Path(args.out_prefix)

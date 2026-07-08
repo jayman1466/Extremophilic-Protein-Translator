@@ -12,6 +12,7 @@ def _genome_labels():
         "final_thermophile": [True, False, False],
         "final_halophile": [False, False, False],
         "confident_mesophile": [False, True, False],
+        "final_confidence": ["high", "none", "none"],
     })
     return df
 
@@ -33,6 +34,14 @@ def test_assign_labels():
     assert lab["c2_1"] == MESOPHILE_LABEL
     assert "c3_1" not in lab  # unlabeled genome dropped
     assert out["is_mesophile"].sum() == 1
+
+
+def test_label_confidence_propagates():
+    out = assign_labels(_secreted(), _genome_labels())
+    conf = dict(zip(out["protein_id"], out["label_confidence"]))
+    # thermophile genome was high-confidence -> both its proteins inherit "high"
+    assert conf["c1_1"] == "high"
+    assert conf["c1_2"] == "high"
 
 
 def test_no_group_spans_split():

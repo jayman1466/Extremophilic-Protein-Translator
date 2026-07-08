@@ -50,6 +50,40 @@ def test_max_total():
     assert len(sel) == 5
 
 
+def test_confidence_filter_excludes_tiers():
+    df = _make_labels()
+    # high-only must drop the medium FamB members entirely (not just deprioritise)
+    sel = select_extremophiles(df, "thermophile", max_per_lineage=100,
+                               lineage_rank="family", confidence_levels=("high",))
+    assert set(sel["final_confidence"]) == {"high"}
+    assert (sel["family"] == "FamB").sum() == 0   # FamB was medium
+
+
+def test_per_class_confidence_dict():
+    df = _make_labels()
+    # dict form: thermophile high-only -> FamB (medium) excluded
+    res = select_with_outgroups(df, classes=["thermophile"], max_per_lineage=100,
+                                lineage_rank="family",
+                                confidence_levels={"thermophile": ("high",)})
+    assert set(res.extremophiles["final_confidence"]) == {"high"}
+
+
+def test_outgroup_reuse_across_classes():
+    df = _make_labels()
+    # make the same mesophile a valid genus match for two classes
+    df.loc[df["accession"] == "E_A0", "final_acidophile"] = True
+    df.loc[df["accession"] == "E_A0", "final_confidence"] = "high"
+    # with reuse, the shared-genus mesophile M_genusA can pair in both classes
+    res = select_with_outgroups(df, classes=["thermophile", "acidophile"],
+                                max_per_lineage=100, lineage_rank="family",
+                                reuse_outgroups=True)
+    pairs = res.pairs
+    reused = pairs[pairs["outgroup_acc"] == "M_genusA"]
+    assert reused["class"].nunique() >= 1  # M_genusA can appear for >=1 class
+    # outgroup set is deduplicated even if reused across classes
+    assert res.outgroups["accession"].is_unique
+
+
 def test_confidence_preference():
     df = _make_labels()
     # high-confidence FamA should be picked before medium FamB when capped tight

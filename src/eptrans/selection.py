@@ -58,15 +58,21 @@ def select_extremophiles(
     lineage_rank: str = "family",
     max_total: int | None = None,
     confidence_col: str = "final_confidence",
+    confidence_levels: tuple | None = None,
     seed: int = 1466,
 ) -> pd.DataFrame:
     """Diversity-capped selection of extremophiles for one class.
 
     Draws at most ``max_per_lineage`` genomes from each ``lineage_rank`` group,
     preferring higher-confidence labels, until ``max_total`` is reached.
+
+    If ``confidence_levels`` is given (e.g. ``("high", "medium")``), genomes
+    outside those tiers are excluded entirely (not just deprioritised).
     """
     cls_col = f"final_{cls}"
     pool = df[df[cls_col].fillna(False)].copy()
+    if confidence_levels is not None and confidence_col in pool:
+        pool = pool[pool[confidence_col].isin(confidence_levels)]
     if pool.empty:
         return pool
 
@@ -124,6 +130,8 @@ def select_with_outgroups(
     max_total_per_class: int | None = 100,
     mesophile_col: str = "confident_mesophile",
     acc_col: str = "accession",
+    confidence_levels: tuple | None = None,
+    reuse_outgroups: bool = False,
     seed: int = 1466,
 ) -> SelectionResult:
     """Full phylo-controlled selection: diverse extremophiles + matched outgroups.
@@ -146,20 +154,29 @@ def select_with_outgroups(
     all_extremo = []
     all_outgroups = []
     pair_rows = []
-    used_outgroups: set = set()
+    used_outgroups: set = set()     # global set of outgroup indices ever chosen
 
     for cls in classes:
+        # When reuse_outgroups, each class starts fresh so the same mesophile can
+        # pair with extremophiles in multiple classes (reused, counted once in the
+        # final deduplicated outgroup set). Otherwise outgroups are used-once.
+        used_this_class: set = set() if reuse_outgroups else used_outgroups
+        # confidence_levels may be a single tuple (all classes) or a dict of
+        # per-class tuples (e.g. thermophile high-only, others high+medium).
+        conf_cls = (confidence_levels.get(cls) if isinstance(confidence_levels, dict)
+                    else confidence_levels)
         extremo = select_extremophiles(
             labels, cls, max_per_lineage=max_per_lineage, lineage_rank=lineage_rank,
-            max_total=max_total_per_class, seed=seed,
+            max_total=max_total_per_class, confidence_levels=conf_cls, seed=seed,
         )
         if extremo.empty:
             continue
         all_extremo.append(extremo)
 
         for eidx, erow in extremo.iterrows():
-            oidx, matched_rank = find_outgroup(erow, mesophile_pool, used_outgroups)
+            oidx, matched_rank = find_outgroup(erow, mesophile_pool, used_this_class)
             if oidx is not None:
+                used_this_class.add(oidx)
                 used_outgroups.add(oidx)
                 orow = mesophile_pool.loc[oidx]
                 all_outgroups.append(oidx)
@@ -168,6 +185,7 @@ def select_with_outgroups(
                     "extremophile_acc": erow[acc_col],
                     "extremophile_confidence": erow.get("final_confidence"),
                     "outgroup_acc": orow[acc_col],
+                    "outgroup_confidence": orow.get("final_confidence"),
                     "matched_rank": matched_rank,
                     f"shared_{matched_rank}": erow.get(matched_rank),
                 })

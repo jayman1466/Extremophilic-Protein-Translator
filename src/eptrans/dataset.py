@@ -86,6 +86,12 @@ def assign_labels(
     out["_bare"] = out[genome_col].astype(str).map(bare_accession)
     out["label"] = out["_bare"].map(label_map)
     out["is_mesophile"] = out["label"] == MESOPHILE_LABEL
+    # Carry the genome's environmental-label confidence tier onto each protein so
+    # downstream training can weight examples (high > medium). For mesophiles this
+    # is the confident_mesophile tier; for extremophiles the final_confidence tier.
+    if "final_confidence" in gl.columns:
+        conf_map = dict(zip(gl["_bare"], gl["final_confidence"]))
+        out["label_confidence"] = out["_bare"].map(conf_map)
     out = out.drop(columns=["_bare"])
     # keep only labeled proteins (drop genomes with no class and not mesophile)
     out = out[out["label"].notna()].reset_index(drop=True)
