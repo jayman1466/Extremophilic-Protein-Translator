@@ -1,0 +1,42 @@
+{
+  "n_proteins": 268,
+  "n_genomes": 12,
+  "n_groups": 12,
+  "group_kind": "genome",
+  "label_counts": {
+    "hyperthermophile": 66,
+    "thermophile": 65,
+    "psychrophile": 36,
+    "halophile": 34,
+    "acidophile": 33,
+    "alkaliphile": 19,
+    "mesophile": 15
+  },
+  "split_counts": {
+    "train": 268
+  },
+  "split_by_label": {
+    "acidophile": {
+      "train": 33
+    },
+    "alkaliphile": {
+      "train": 19
+    },
+    "halophile": {
+      "train": 34
+    },
+    "hyperthermophile": {
+      "train": 66
+    },
+    "mesophile": {
+      "train": 15
+    },
+    "psychrophile": {
+      "train": 36
+    },
+    "thermophile": {
+      "train": 65
+    }
+  },
+  "max_splits_per_group": 1
+}

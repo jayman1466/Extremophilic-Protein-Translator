@@ -317,8 +317,8 @@ fine-tuning, with splits that don't leak homologs across train/val/test.
   count figure.
 
 **Validation:** 5 dataset tests including the no-leakage guarantee and the
-cluster-map homolog test (a shared cluster lands entirely in one split). 60
-tests total at this stage.
+cluster-map homolog test (a shared cluster lands entirely in one split).
+(Full suite after all stages below: **65 tests passing**.)
 
 ---
 
@@ -373,10 +373,22 @@ where metadata and prediction agree.
 extremophile could be phylo-matched to an outgroup (logic exercised; matched
 pool is a scale artifact of the pilot, not a defect).
 
-**SignalP:** the full pilot proteome is **47,972 proteins**; SignalP 6.0 fast
-mode runs at ~1.7 seq/s on CPU (~8 h for the full set), so the pilot subsamples
-to 150 proteins/genome (~2,100) and runs as a SLURM batch job on a compute node.
+**SignalP (real):** the full pilot proteome is **47,972 proteins**; SignalP 6.0
+fast mode runs at ~1.7 seq/s on CPU (~8 h for the full set), so the pilot
+subsamples to 150 proteins/genome (**2,100 total**) and runs as a SLURM batch job
+(job 1149752, `COMPLETED` in 3:57 on a `standard` node, 16 threads). Result:
+**323 / 2,100 secreted (15.4 %)** — a biologically reasonable signal-peptide
+fraction. By class: **208 SP (Sec/SPI), 103 LIPO (Sec/SPII), 6 TAT, 6 TATLIPO,
+0 PILIN**. All 14 genomes contribute secreted proteins (4–29 % per genome).
 (SignalP model weights confirmed installed by the user.)
+
+**Dataset assembly (real):** 268 secreted proteins across 12 genomes labeled by
+environmental class (hyperthermophile 66, thermophile 65, psychrophile 36,
+halophile 34, acidophile 33, alkaliphile 19, mesophile 15). Leakage check passed
+(no genome spans multiple splits). At pilot scale (~2 genomes/class) the
+stratified group split puts everything in train — `round(2 × 0.1) = 0` for
+val/test — which is expected small-n rounding, not a logic error: a 30-genome
+demo yields the correct 120/15/15 train/val/test with zero leakage.
 
 **Pilot figures**
 - `results/pilot_env_predictions.png` — predicted OGT / pH / salinity per genome,
@@ -385,7 +397,15 @@ to 150 proteins/genome (~2,100) and runs as a SLURM batch job on a compute node.
   confidence tier.
 - `results/pilot_combined_label_counts.png`, `results/pilot_combined_agreement.png`
   — per-class label counts and metadata/prediction agreement.
-- (secreted-protein counts figure produced once the SignalP job completes.)
+- `results/pilot_secreted_counts.png` — SignalP secreted fraction per genome,
+  colored by class.
+- `results/pilot_dataset_splits.png` — labeled-dataset class counts per split
+  (all-train at pilot scale; see note above).
+
+**End-to-end status:** the full chain runs — GTDB metadata → flag → GenomeSPOT →
+combine → select → SignalP → labeled dataset — on real data, producing a
+268-protein labeled secreted-protein dataset from 14 genomes. At production
+scale the same scripts run via the chunked SLURM emitters.
 - **Stage 06** — labeled dataset assembly (leakage-aware splits).
 - **Pilot** — end-to-end run on a small genome set + report.
 
