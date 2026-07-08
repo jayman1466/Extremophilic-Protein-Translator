@@ -421,7 +421,9 @@ run SignalP on `standard` (CPU), not the GPU partitions** — no speedup, worse 
 **Scale consequence:** all 199,923 reps ≈ 685 M proteins → 30–80 days at any of
 these rates (infeasible). The phylo-controlled **selection** stage exists to avoid
 this: SignalP runs only on the selected subset (~100 genomes/class × 6 + outgroups
-≈ 1–1.5 k genomes ≈ 4–5 M proteins ≈ ~3 h on `standard` at 480-way). Production
+≈ 1–1.5 k genomes ≈ 4–5 M proteins). At the `standard` CPU node's measured
+480-way rate (~266 seq/s), that is **~4–5 h**; the GPU partitions are no faster
+per unit and have worse queues, so `standard` is the right target. Production
 order: GenomeSPOT-all → bin → **select** → SignalP-on-selected.
 
 **End-to-end status:** the full chain runs — GTDB metadata → flag → GenomeSPOT →
