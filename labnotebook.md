@@ -434,5 +434,34 @@ scale the same scripts run via the chunked SLURM emitters.
 - **Stage 06** — labeled dataset assembly (leakage-aware splits).
 - **Pilot** — end-to-end run on a small genome set + report.
 
+## Full-scale production run (GenomeSPOT complete)
+
+- **GenomeSPOT on all 199,923 r232 reps — DONE.** SLURM array (20 tasks ×
+  10,000 genomes × 48-way `xargs`, `%10` throttle; job 1149841). All 20 chunks
+  reported "done (10000 outputs)"; queue empty. Per-task ~46 min (~13 s/genome
+  effective on real genomes, higher than the 5 s test genome). Outputs:
+  `eptrans_scratch/genomespot/chunk_*/<acc>.predictions.tsv` (per-genome
+  long-format, 10 targets).
+- **Aggregation** (`aggregate_genomespot.py`, SLURM job 1149958): pivots the
+  ~200 k per-genome long-format files to one wide row each (10 targets ×
+  value/error/warning), joins genome absolute `.fna.gz` paths from
+  `genome_index.tsv` (this folds in the 02b path-attachment), writes
+  `genomespot_predictions_r232.tsv` with headers. Reading 200 k tiny files off
+  VAST is I/O-bound; run as a batch job, not interactive SSH.
+
+## Phase 1 localization enrichment
+
+Per user (retain signal type + mature chain; defer TM topology): added an
+`anchoring` field derived from SignalP class — **soluble** (SP, TAT: Sec/Tat
+cleaved, released) vs **membrane_anchored** (LIPO, TATLIPO, PILIN: lipobox /
+pilin, extracellular-facing but membrane-tethered) vs **none** (OTHER:
+cytoplasmic or transmembrane — indistinguishable without a topology tool). The
+secreted per-protein table now carries `signalp_class, anchoring, cs_after,
+cs_prob` + per-class probs; `dataset.assign_labels` passes these through. TM
+extracellular-loop extraction (DeepTMHMM/Phobius) is deferred to a later phase.
+
 _Infrastructure notes: biotite SSH + scratch dir + GitHub credential all
-configured. Job submission via SLURM (`standard`/`memory`/`gpu` partitions)._
+configured. Job submission via SLURM (`standard`/`memory`/`gpu` partitions).
+biotite SSH latency is intermittently high — trivial `squeue`/`find` calls can
+hang past the 560 s ceiling; prefer batch jobs over interactive SSH for anything
+touching the ~200 k-file GenomeSPOT output tree._
