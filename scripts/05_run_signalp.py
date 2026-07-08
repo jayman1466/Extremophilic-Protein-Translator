@@ -183,8 +183,8 @@ def parse_and_extract(args, cfg) -> None:
             if p.prediction in classes:
                 all_rows.append({
                     "genome": genome, "protein_id": protid,
-                    "signalp_class": p.prediction, "cs_after": p.cs_after,
-                    "cs_prob": p.cs_prob,
+                    "signalp_class": p.prediction, "anchoring": p.anchoring,
+                    "cs_after": p.cs_after, "cs_prob": p.cs_prob,
                     **{f"p_{k}": v for k, v in p.probs.items()},
                 })
 

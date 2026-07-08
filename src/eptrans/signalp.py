@@ -39,6 +39,21 @@ from pathlib import Path
 SP_CLASSES = ["SP", "LIPO", "TAT", "TATLIPO", "PILIN"]
 ALL_CLASSES = ["OTHER"] + SP_CLASSES
 
+# Anchoring / localization mode implied by the signal-peptide class.
+#   soluble           : Sec/Tat cleaved SP -> released to periplasm/extracellular
+#   membrane_anchored : lipobox (LIPO/TATLIPO) or type-IV pilin -> membrane-tethered,
+#                       extracellular-facing. For these the mature chain is exposed
+#                       but remains attached to the membrane.
+#   none              : OTHER (cytoplasmic OR transmembrane; SignalP cannot distinguish)
+ANCHORING = {
+    "SP": "soluble",
+    "TAT": "soluble",
+    "LIPO": "membrane_anchored",
+    "TATLIPO": "membrane_anchored",
+    "PILIN": "membrane_anchored",
+    "OTHER": "none",
+}
+
 # Probability column names in prediction_results.txt (organism=other).
 _PROB_COLS = ["OTHER", "SP(Sec/SPI)", "LIPO(Sec/SPII)", "TAT(Tat/SPI)",
               "TATLIPO(Tat/SPII)", "PILIN(Sec/SPIII)"]
@@ -57,6 +72,12 @@ class SignalPrediction:
     @property
     def is_secreted(self) -> bool:
         return self.prediction != "OTHER"
+
+    @property
+    def anchoring(self) -> str:
+        """Localization mode implied by the signal class: soluble /
+        membrane_anchored / none. See ANCHORING."""
+        return ANCHORING.get(self.prediction, "none")
 
 
 def parse_prediction_results(path: str | os.PathLike) -> list[SignalPrediction]:

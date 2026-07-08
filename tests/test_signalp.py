@@ -57,6 +57,16 @@ def test_is_secreted_flag(tmp_path):
     assert set(secreted) == {"prot_sp", "prot_lipo", "prot_tat"}
 
 
+def test_anchoring_mode(tmp_path):
+    rp, _ = _write(tmp_path)
+    preds = {p.protein_id: p for p in parse_prediction_results(rp)}
+    # SP/TAT are soluble secreted; LIPO is membrane-anchored; OTHER is none
+    assert preds["prot_sp"].anchoring == "soluble"
+    assert preds["prot_tat"].anchoring == "soluble"
+    assert preds["prot_lipo"].anchoring == "membrane_anchored"
+    assert preds["prot_other"].anchoring == "none"
+
+
 def test_extract_full_precursor(tmp_path):
     rp, fp = _write(tmp_path)
     preds = parse_prediction_results(rp)
