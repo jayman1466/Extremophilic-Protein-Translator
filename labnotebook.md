@@ -404,7 +404,8 @@ demo yields the correct 120/15/15 train/val/test with zero leakage.
 
 **End-to-end status:** the full chain runs — GTDB metadata → flag → GenomeSPOT →
 combine → select → SignalP → labeled dataset — on real data, producing a
-268-protein labeled secreted-protein dataset from 14 genomes. At production
+268-protein labeled secreted-protein dataset from 12 genomes (of the 14 pilot
+genomes; 2 fell outside the labeled classes). At production
 scale the same scripts run via the chunked SLURM emitters.
 - **Stage 06** — labeled dataset assembly (leakage-aware splits).
 - **Pilot** — end-to-end run on a small genome set + report.
