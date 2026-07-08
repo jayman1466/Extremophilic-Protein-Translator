@@ -78,6 +78,10 @@ Self-consistency: fold the design (ESMFold2/AF2), require high pLDDT and low
 backbone RMSD to the original. Standard de-novo validation; catches
 confident-but-wrong sequence-model output.
 
+> **Oracle 2 is elaborated in detail in Section 10** (function-retention
+> scoring): active-site ladder, MSA conservation, Foldseek structural transfer,
+> and the gated composite score.
+
 ---
 
 ## 3. Using the SignalP output for training
@@ -184,3 +188,89 @@ shown as a table (e.g. design 1: +2 stability / 3 mut / RMSD 0.4 Å; design 5: +
 stability / 25 mut / higher drift). Show the **frontier**, not 5 samples at one
 setting. Optionally collapse to a single "aggressiveness" summary or a calibrated
 predicted-ΔTm-equivalent.
+
+---
+
+## 10. Function-retention scoring (Oracle 2, detailed)
+
+Function is the one property we **cannot simulate** and have **no labeled
+training set** for. Principle: build several *interpretable, orthogonal* proxies
+with **hard gates**, not one learned/blended score, and calibrate on enzymes
+where the answer is known. The three factors fail in uncorrelated ways, which is
+why combining them works.
+
+### Factor 1 — MSA conservation (universal coverage → the backbone term)
+- Every enzyme has homologs, so this always fires; it covers what M-CSA misses.
+- **Weight sequences before scoring** (Henikoff, or cluster @~62% + weight by
+  cluster) so redundant near-duplicate homologs don't dominate.
+- Score per column as sequence-weighted information content, or better an
+  **evolutionary rate** (Rate4Site-style — accounts for phylogeny; slow columns
+  = functionally constrained).
+- **Soft penalty**, proportional to conservation, for mutating a column.
+
+### Factor 2 — active-site identification + catalytic-atom RMSD
+Active-site ID is a **confidence-tiered ladder** (take best available, record
+which tier fired):
+1. Direct **M-CSA** entry (highest confidence; ~1k curated — low recall)
+2. M-CSA **homolog transfer** (align to nearest reference, map catalytic columns)
+3. **Swiss-Prot** `ACT_SITE`/`BINDING`/`METAL` features (curated, broad)
+4. **InterPro/Pfam** active-site position annotations
+5. **Foldseek** structural-homolog transfer (the recall booster — see below)
+6. Fallback: conservation peaks ∩ folded-structure ligand-pocket residues
+   (*predicted* active site, flagged low-confidence)
+
+RMSD monitoring: after redesign, fold + superpose on wild-type, measure RMSD over
+**catalytic side-chain functional atoms** (Ser-OG, His-NE2, …), not just Cα —
+reactive-atom geometry is what activity depends on.
+
+### Factor 3 — ProteinMPNN geometry (reframed)
+MPNN gives a **sequence↔backbone compatibility** score (NLL of sequence given
+backbone) = "does this sequence plausibly fold into this shape." That is a
+*fold-integrity* signal more than a *function* one. Its function contribution is
+at **design time**: fix catalytic residues in the MPNN run (never mutated) and
+read per-residue confidence around the pocket. Score feeds Oracle 3.
+
+### The missing piece — Foldseek (structural homology)
+Fold is far more conserved than sequence: enzymes at ~15% identity (invisible to
+sequence search) can have superimposable active sites. When sequence search finds
+no M-CSA/Swiss-Prot match, **Foldseek** vs PDB + AlphaFold DB finds a structural
+homolog *with annotated catalytic residues* → transfer by superposition. This is
+what turns the ladder from "well-studied enzymes only" into "most enzymes."
+Make it first-class, not an afterthought.
+
+### Composite — gates, not a blended number
+No functional ground truth → a weighted sum is a trap (guessed weights; generator
+exploits the softest term).
+- **Hard gates (binary, reject on fail):** catalytic residue *identity* unchanged;
+  catalytic side-chain-atom RMSD < ~1–1.5 Å.
+- **Soft score (for gate-passers):** **product** of sub-scores in [0,1]
+  (conservation term × fold-compatibility term) — a product means a near-zero on
+  any factor kills the design; a sum would let a great fold paper over a destroyed
+  residue. Carry the active-site-ID tier alongside as a trust flag.
+- **Calibrate thresholds on the validation set** (mesophilic enzymes w/ known
+  thermostable homologs): known stabilizing mutations must *pass*, known
+  activity-killing mutations must *fail*. Only honest way to set the RMSD cutoff
+  and conservation scale without functional labels.
+
+### MSA tooling
+- **MMseqs2 profile pipeline** (ColabFold-style iterative profile search): near
+  HHblits sensitivity at a fraction of runtime; faster than jackhmmer/HHblits.
+- **Search DB = UniRef30 (or UniRef90)**, not raw NCBI-nr — pre-clustered →
+  deeper, less-redundant MSAs faster (redundancy removal is what conservation
+  weighting wants anyway). Existing NCBI-nr mmseqs2 DB = fine fallback.
+- **Foldseek** for the structural arm (own DB, structure input).
+- DIAMOND ultra-sensitive is an option for raw speed, but MMseqs2 profile search
+  is the better sensitivity/speed point for MSA building.
+
+### Local databases to download (biotite)
+| database | purpose | rough size |
+|---|---|---|
+| UniRef30 (or UniRef90) | fast MSA (MMseqs2 profile) | ~50–100 GB |
+| M-CSA (entries + homolog lists) | curated catalytic residues | ~MB |
+| Swiss-Prot (reviewed UniProt + features) | ACT_SITE/BINDING/METAL | ~1 GB |
+| Pfam HMMs + InterPro | domain + active-site positions | ~10–20 GB |
+| Foldseek PDB DB | structural active-site transfer | ~10 GB |
+| Foldseek AlphaFold DB (optional) | deeper structural homologs | 100s GB (subset) |
+
+Existing NCBI-nr mmseqs2 DB on biotite = fallback MSA source; add UniRef30 as
+primary (clustering makes both search and conservation weighting cleaner).
