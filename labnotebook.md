@@ -465,3 +465,55 @@ configured. Job submission via SLURM (`standard`/`memory`/`gpu` partitions).
 biotite SSH latency is intermittently high — trivial `squeue`/`find` calls can
 hang past the 560 s ceiling; prefer batch jobs over interactive SSH for anything
 touching the ~200 k-file GenomeSPOT output tree._
+
+## Full-scale binning + final 5-class selection (r232)
+
+**Combined binning** (`03_combine_bins.py --bare-join`) on the real
+GenomeSPOT predictions for all **199,923** genomes. The metadata flags keep the
+GTDB `GB_`/`RS_` prefix while the aggregated GenomeSPOT TSV uses bare
+accessions, so the merge normalizes both sides to the bare form (`--bare-join`).
+Confidence tiers: **high 3,638** (metadata + prediction agree), **medium
+18,863** (prediction-only), **low 5,499** (metadata-only / conflict), none
+171,923; **104,486 confident mesophiles** form the outgroup pool.
+
+**Final selection** (`04_select_genomes.py`) — 5 overlapping classes, chosen
+with the user for per-phenotype independent models:
+
+| class | selected | high | medium | phyla | genera |
+|---|--:|--:|--:|--:|--:|
+| acidophile | 583 | 223 | 360 | 37 | 436 |
+| alkaliphile | 476 | 101 | 375 | 32 | 385 |
+| halophile | 2,206 | 421 | 1,785 | 81 | 1,680 |
+| thermophile (≥50 °C, high-only) | 1,171 | 1,171 | 0 | 88 | 901 |
+| hyperthermophile (≥80 °C) | 216 | 76 | 140 | 25 | 161 |
+
+Rules: high+medium confidence (thermophile restricted to high-only to fit the
+wall-clock budget), cap 3 genomes/family for diversity, mesophile outgroups
+reused across classes (deduplicated). **4,498 unique extremophiles + 2,773
+outgroups = 7,271 genomes ≈ 24.9 M proteins.** Diversity is strong in every
+class (25–88 phyla, top-phylum share 16–25 %) except hyperthermophile
+(49 % Thermoproteota — real biology; hyperthermophily is concentrated in a few
+archaeal lineages, which is exactly why its matched mesophile outgroups matter).
+
+Decisions on the hyperthermophile "low" tier: **rejected** (median predicted
+optimum 35 °C — isolated-from-hot but not predicted thermophilic; these are the
+false positives the combination approach is designed to catch).
+
+**Confidence retained end-to-end** (user: high/medium tiers will weight training
+data after SignalP): extremophiles/outgroups TSVs carry `final_confidence`, the
+pairs table records both `extremophile_confidence` and `outgroup_confidence`,
+and `dataset.assign_labels` stamps `label_confidence` on every secreted protein.
+
+## SignalP production run (job 1149978)
+
+SignalP 6.0 fast mode on all 7,271 selected genomes: **10 array tasks × 750
+genomes × 48 threads** (`--array=0-9%10`, standard partition, `--time
+72:00:00`, `--mem 48G`, `--bsize 32`), out-root
+`eptrans_scratch/signalp_r232`. Estimated ~26 h at ~266 seq/s (480-way);
+72 h ceiling is a safety margin (user request). GPU gives no speedup — SignalP
+fast mode is CPU-decode-bound (benchmark: H200 only ~1.4× over 16-thread CPU).
+
+_Transfer note: `host.compute.upload()` fails on the /groups VAST mount, and
+base64-as-command-argument silently drops large payloads (>~8 KB). Reliable
+method: base64 the file, append in ≤6 KB chunks (`printf %s <chunk> >>
+file.b64`), then `base64 -d`._
