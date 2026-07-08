@@ -402,6 +402,28 @@ demo yields the correct 120/15/15 train/val/test with zero leakage.
 - `results/pilot_dataset_splits.png` — labeled-dataset class counts per split
   (all-train at pilot scale; see note above).
 
+## SignalP throughput benchmark (measured)
+
+Benchmarked SignalP 6.0 fast mode on 10,000 proteins across CPU / A5000 / H200:
+
+| Config | best seq/s | per-GPU 24 h |
+|--------|-----------:|-------------:|
+| H200 (bsize 32) | **12.75** | 1.10 M |
+| A5000 / `gpu` (bsize 64) | 9.60 | 0.83 M |
+| CPU `standard` (16 threads) | 8.86 | 0.77 M |
+
+**Key finding: GPU gives only ~1.4× over CPU (H200), ~1.1× (A5000).** SignalP 6.0
+fast mode is **CPU-decode-bound**, not GPU-bound — the transformer runs on short
+N-terminal windows, so the GPU idles while CPU-side CRF decoding and result
+assembly set the pace. Larger batch sizes were *slower* (padding waste). **Verdict:
+run SignalP on `standard` (CPU), not the GPU partitions** — no speedup, worse queue.
+
+**Scale consequence:** all 199,923 reps ≈ 685 M proteins → 30–80 days at any of
+these rates (infeasible). The phylo-controlled **selection** stage exists to avoid
+this: SignalP runs only on the selected subset (~100 genomes/class × 6 + outgroups
+≈ 1–1.5 k genomes ≈ 4–5 M proteins ≈ ~3 h on `standard` at 480-way). Production
+order: GenomeSPOT-all → bin → **select** → SignalP-on-selected.
+
 **End-to-end status:** the full chain runs — GTDB metadata → flag → GenomeSPOT →
 combine → select → SignalP → labeled dataset — on real data, producing a
 268-protein labeled secreted-protein dataset from 12 genomes (of the 14 pilot
