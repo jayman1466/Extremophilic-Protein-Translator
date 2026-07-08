@@ -137,12 +137,50 @@ through structure self-consistency (hard to game).
 
 ---
 
-## 7. Open decisions (to settle before build)
+## 7. Resolved decisions
 
-- Base PLM for fine-tuning: ESM-2 (well-supported here) vs ESMC vs external ESM3/
-  Profluent (need setup + likely license/compute).
-- One multi-class phenotype model vs **per-phenotype** models (user leans
-  per-phenotype — matches the natural-size, overlapping-class dataset design).
-- Generation: MPNN-first vs masked-fill-first for the v1 loop.
-- How aggressively to mutate (surface-only vs whole non-active-site) — trades
-  extremophilicity gain against fold-drift risk.
+- **Base PLM:** start with **ESMC** (or ESM-2) — installed, best-in-class for the
+  *scorer/embedding* role we need. ESM3 / Profluent E1 offer no expected gain here
+  because their advantage is *generation*, which MPNN now handles; they are gated
+  + need setup. **Revisit only if the generation strategy changes** to PLM-driven.
+- **Phenotype model:** **per-phenotype** classifiers (one per class), matching the
+  overlapping natural-size dataset.
+- **Generator:** **MPNN** (ProteinMPNN / LigandMPNN when cofactor/metal present).
+- **Output:** **5 designs per query** spanning a conservative→aggressive ladder
+  (Section 8), each folded + scored on all three oracles, presented as a
+  tradeoff table.
+
+## 8. Roles in the MPNN + PLM loop (the key architecture point)
+
+MPNN and the PLM do **not** compete — different stages:
+
+1. **MPNN proposes** — inverse-folds the fixed backbone, active site + ligand
+   contacts pinned, emits many candidate sequences.
+2. **PLM scores + steers** (three jobs, none generative):
+   - **embedding backbone for the phenotype classifier** (Oracle 1) — primary job;
+   - **re-rank / filter MPNN output** by fine-tuned-on-extremophiles
+     pseudo-likelihood — "looks like a natural extremophilic protein"; this is
+     where fine-tuning pays off;
+   - **mutation-effect guard** — masked-LM scores at conserved positions flag
+     family-intolerable mutations (orthogonal to the active-site mask, feeds
+     Oracle 2).
+3. **Fold to verify** (Oracle 3) → accept.
+
+Slogan: **MPNN is the hand, the PLM is the taste.**
+
+## 9. The 5-design aggressiveness ladder
+
+"Aggressiveness" = a stability↔function tradeoff sweep, not one knob. Three
+composable knobs, safest→boldest:
+
+1. **Mutable region:** surface-only → surface+second-shell → all non-active-site.
+   (Surface is where thermo/halo signatures live and is lowest fold-risk.)
+2. **MPNN sampling temperature:** low (near wild-type) → high (more mutations).
+3. **Extremophilic-bias strength:** how hard the PLM re-ranker pushes toward
+   extremophilic statistics vs staying close to the input.
+
+Deliverable: 5 designs along a conservative→aggressive path, each folded + scored,
+shown as a table (e.g. design 1: +2 stability / 3 mut / RMSD 0.4 Å; design 5: +8
+stability / 25 mut / higher drift). Show the **frontier**, not 5 samples at one
+setting. Optionally collapse to a single "aggressiveness" summary or a calibrated
+predicted-ΔTm-equivalent.
