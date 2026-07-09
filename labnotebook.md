@@ -547,3 +547,20 @@ required for active-site annotations.
 - **InterPro** (`entry.list` + `interpro.xml.gz`; optional huge `protein2ipr.dat.gz`
   ~50 GB for full local position mapping — otherwise use the protein-annotation
   MCP connector per-enzyme). Download on biotite.
+
+### Download completion (2026-07-09)
+
+Staged into `eptrans_scratch/db/` (to be relocated to a persistent reference dir):
+
+| database | version | files | size |
+|---|---|---|---|
+| Swiss-Prot flat file | Release **2026_02** (10-Jun-2026), 575,503 reviewed entries | `uniprot_sprot.dat.gz` (699 MB) + `reldate.txt` | 667 M |
+| InterPro | current (54,191 entries) | `entry.list` (2.9 MB) + `interpro.xml.gz` (42 MB) | 43 M |
+
+InterPro `protein2ipr.dat.gz` (~50 GB) intentionally NOT downloaded — per-enzyme
+annotation goes through the `mcp-protein-annotation` connector instead.
+
+**Pending relocation** (deferred until project wraps): move `db/` out of scratch
+to a persistent reference location; sweep durable scratch products
+(`genomespot_predictions_r232.tsv`, parsed SignalP secretome) to persistent
+storage; leave `chunk_*` intermediate trees in scratch.
