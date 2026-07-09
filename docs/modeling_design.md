@@ -407,3 +407,52 @@ side-chain RMSD) reject outright; then **product** of soft sub-scores
 (calibrated classifier prob × ESM pseudo-likelihood × fold-integrity). Product,
 not sum — any near-zero kills the design. Classifier factor = calibrated prob
 from Loss 2.
+
+---
+
+## 13. Incorporating conservation / active-site information
+
+Active-site + conservation information threads through the loop at **three
+stages** with escalating strictness — the RMSD gate is the *last* layer, not the
+only one.
+
+### Stage A — constrain generation (prevent the bad edit)
+Active-site residues are **frozen**: MPNN holds them fixed; ESM mask-fill never
+masks them. A mutation never proposed never needs catching. Active-site
+*identity* preserved by construction. Cheapest, most effective control.
+
+### Stage B — conservation-weighted masking (the key lever)
+Masking probability is **not uniform** — it is shaped by per-position
+conservation c_i (MSA, sequence-weighted; ideally Rate4Site evolutionary rate):
+
+    P(mask position i)  ∝  (1 - c_i)^γ
+
+- highly conserved (c_i→1): rarely/never masked — carry the constraints;
+- variable (c_i→0): preferentially masked — evolution already tolerates change
+  there, the safe places to push toward extremophilic statistics.
+
+Conservation = a **soft graded prior** complementing the two hard controls
+(active-site freeze, catalytic RMSD gate). Directs mutational pressure to
+positions that can absorb it.
+
+Refinements:
+- **Conservation appears twice:** as the mask-frequency prior (here) AND as a
+  per-fill penalty (penalize fills straying from conserved consensus at
+  moderately-conserved positions → feeds Oracle 2).
+- **Freeze is the γ→∞ limit of the same mechanism:** implement both with one mask
+  function — active-site positions hard-zero, else (1-c_i)^γ.
+
+### Stage C — gate the result (catch indirect distortion)
+Even with the active site frozen, a distant edit can *indirectly* distort the
+pocket (second-shell shift, core repack). After folding: catalytic
+side-chain-atom RMSD gate, reject on deviation (Section 10). Catches what
+freezing cannot prevent.
+
+**Summary:** freeze (A) prevents direct edits · conservation (B) softly governs
+the tolerated middle · RMSD gate (C) catches indirect distortion.
+
+### Connection to the aggressiveness ladder (Section 9)
+The conservation exponent **γ is effectively a 4th aggressiveness knob** and the
+most principled one: low γ mutates broadly (aggressive), high γ restricts edits
+to least-conserved positions (conservative). Likely **subsumes the "mutable
+region" knob** — "surface-only" ≈ "low-conservation-only" for most enzymes.
