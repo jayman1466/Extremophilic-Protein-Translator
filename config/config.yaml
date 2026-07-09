@@ -17,6 +17,25 @@ biotite:
   work_dir: "/groups/cress/projects/jaymin/IS1111/work"
   scratch_root: "/groups/cress/projects/jaymin/eptrans_scratch"   # pipeline outputs (VAST /groups)
 
+  # Persistent project home for durable products moved out of scratch (2026-07-09).
+  persist_root: "/groups/cress/projects/jaymin/IS1111/eptrans"
+  # 199,923-genome GenomeSPOT environmental predictions (moved from scratch_root).
+  genomespot_predictions: "/groups/cress/projects/jaymin/IS1111/eptrans/genomespot_predictions_r232.tsv"
+
+  # Reference databases for the function-retention oracle (moved from scratch/db).
+  # Shared, system-wide DBs stay under /shared/db; project-staged ones under db_root.
+  db_root: "/groups/cress/projects/jaymin/IS1111/eptrans/db"
+  ref_dbs:
+    uniref50:        "/shared/db/uniref/uniref50/latest/uniref50.fasta"          # 2025-11-13
+    uniprot_mmseqs:  "/shared/db/uniprot/latest/mmseqs/"                         # 2025_01
+    pfam_hmm:        "/shared/db/pfam/latest/Pfam-A.hmm"                         # r37
+    foldseek_pdb:    "/shared/db/foldseek/latest/db/pdb"                        # 2026-02-04
+    foldseek_af:     "/shared/db/foldseek/latest/db/alphafold_uniprot"         # 2026-02-04
+    swissprot_dat:   "/groups/cress/projects/jaymin/IS1111/eptrans/db/swissprot_2026_07_09/uniprot_sprot.dat.gz"  # 2026_02
+    interpro_entries: "/groups/cress/projects/jaymin/IS1111/eptrans/db/interpro_2026_07_09/entry.list"
+    # InterPro position mapping via mcp-protein-annotation connector (protein2ipr not staged)
+    # M-CSA: repo artifact data/mcsa_snapshot/mcsa_catalytic_residues.tsv (API snapshot 2026-07-09)
+
   metadata:
     bacteria: "/groups/cress/projects/jaymin/IS1111/gtdb/bac120_metadata_r232.tsv.gz"
     archaea:  "/groups/cress/projects/jaymin/IS1111/gtdb/ar53_metadata_r232.tsv.gz"

@@ -13,7 +13,9 @@
 # Run on biotite:  bash scripts/download_dbs.sh
 set -euo pipefail
 
-DB_ROOT="${DB_ROOT:-/groups/cress/projects/jaymin/eptrans_scratch/db}"
+# Persistent reference-DB home (moved out of scratch 2026-07-09 — these are
+# durable, repeatedly-invoked reference data, not disposable pipeline outputs).
+DB_ROOT="${DB_ROOT:-/groups/cress/projects/jaymin/IS1111/eptrans/db}"
 mkdir -p "$DB_ROOT"
 STAMP="$(date +%Y_%m_%d)"
 echo "[dbs] DB_ROOT=$DB_ROOT  pull-date=$STAMP"
