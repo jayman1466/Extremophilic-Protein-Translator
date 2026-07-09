@@ -517,3 +517,33 @@ _Transfer note: `host.compute.upload()` fails on the /groups VAST mount, and
 base64-as-command-argument silently drops large payloads (>~8 KB). Reliable
 method: base64 the file, append in ≤6 KB chunks (`printf %s <chunk> >>
 file.b64`), then `base64 -d`._
+
+## Reference databases (function-retention oracle)
+
+**Already staged on biotite** (system-wide `/shared/db`, recorded for provenance):
+
+| database | release / pull | path | size |
+|---|---|---|---|
+| UniRef50 (FASTA) | 2025-11-13 | `/shared/db/uniref/uniref50/latest/uniref50.fasta` | 23 G |
+| UniProtKB mmseqs DB (Swiss-Prot + TrEMBL) | 2025_01 | `/shared/db/uniprot/latest/mmseqs/` | 137 G |
+| Pfam-A HMMs | r37 | `/shared/db/pfam/latest/Pfam-A.hmm` | 3.4 G |
+| Foldseek PDB DB | 2026-02-04 | `/shared/db/foldseek/latest/db/pdb` | 71 M |
+| Foldseek AlphaFold DB | 2026-02-04 | `/shared/db/foldseek/latest/db/alphafold_uniprot` | 75 G |
+
+Note: the UniProt mmseqs DB stores **sequences only** — it does not carry the
+`ACT_SITE`/`BINDING`/`METAL` feature tables, so the Swiss-Prot flat file is still
+required for active-site annotations.
+
+**Staged for this project** (`scripts/download_dbs.sh`, `scripts/download_mcsa.py`):
+
+- **M-CSA** (snapshotted 2026-07-09 via API — flat files are frozen at EBI):
+  1,003 entries → **5,201 catalytic-residue rows**, 991 distinct UniProt
+  accessions with positions + residue codes + PDB id/chain + catalytic roles, all
+  7 EC classes. Saved as `mcsa_catalytic_residues.tsv` (+ full `mcsa_entries.json.gz`).
+  This is the tier-1/2 reference for the active-site ladder (direct match +
+  homolog transfer).
+- **Swiss-Prot flat file** (`uniprot_sprot.dat.gz`, ~950 MB gz): the annotation
+  copy with ACT_SITE/BINDING/METAL features. Download on biotite.
+- **InterPro** (`entry.list` + `interpro.xml.gz`; optional huge `protein2ipr.dat.gz`
+  ~50 GB for full local position mapping — otherwise use the protein-annotation
+  MCP connector per-enzyme). Download on biotite.
