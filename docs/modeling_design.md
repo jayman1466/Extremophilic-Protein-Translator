@@ -310,7 +310,8 @@ One backbone, two heads, **one consistent cluster split** underneath.
   - scoring: one shared adapted backbone + 5 light classifier heads (small
     classes borrow representation; boundaries stay independent).
 - **Starting hyperparameters:**
-  - backbone ESM-2 **650M** (t33); scale to 3B only if it helps + GPU allows.
+  - backbone ESM-2 **3B** (t36) — chosen (resources available); LoRA keeps it
+    single-GPU tractable (bf16 + gradient checkpointing, ~0.1% trainable).
   - LoRA rank 8–16, α 16–32, dropout 0.05, target q_proj/v_proj.
   - continued MLM 15% mask, LR 1e-4 + warmup, few epochs, early-stop on held-out
     pseudo-perplexity.
@@ -357,3 +358,52 @@ One backbone, two heads, **one consistent cluster split** underneath.
 4. Validate each head: classifier by cluster-held-out AUPRC + saliency recovering
    biophysical signatures; MLM by pseudo-perplexity drop + fill composition.
 5. Wire into MPNN-generate → ESM-rerank → fold-verify loop.
+
+---
+
+## 12. Loss functions
+
+**Three scoring objects; only two are training losses.** The generation-time
+composite (Section 10) is an *inference gate*, NOT a differentiable loss — keep
+it separate from the two head losses below.
+
+### Loss 1 — domain-adaptive MLM (shared backbone)
+Masked cross-entropy over masked positions, sequence-confidence weighted:
+
+    L_MLM = -(1/|M|) Σ_{i∈M} w_seq · log p_θ(x_i | x_\M)
+
+- BERT masking 15% (80% mask / 10% random / 10% keep).
+- **w_seq = label_confidence** — cleanest genomes drive the adaptation.
+- Optional forgetting-guard `+ β·KL(p_θ ‖ p_base)` toward base ESM-2. Tension:
+  adaptation *wants* drift → start β=0 (esp. the generation adapter), add only if
+  fills look unnatural.
+
+### Loss 2 — per-phenotype classifier (matched-pair aware)
+Combine a pointwise and a pairwise term.
+
+Pointwise — weighted BCE (imbalance via pos_weight or focal (1-p_t)^γ):
+
+    L_BCE = -Σ_i w_i [ y_i log σ(s_i) + (1-y_i) log(1-σ(s_i)) ],  w_i = label_confidence
+
+Pairwise — margin ranking on each extremophile e vs its matched outgroup m:
+
+    L_pair = Σ_{(e,m)} max(0, δ - (s_e - s_m))
+
+Forces score(extremophile) > score(matched mesophile): the two differ mainly in
+trait not clade, so this is the loss-function embodiment of the outgroup design —
+pushes the classifier onto the phenotype *delta*, not clade features.
+
+Combined:  **L_cls = L_BCE + λ · L_pair**  (pointwise = calibration, pairwise =
+matched contrast; tune λ on val).
+
+- **Calibrate** output probabilities (post-hoc temperature scaling on val) so the
+  scores are trustworthy when gating generated sequences.
+- **Model-select / early-stop on AUPRC** (per phenotype), not accuracy — heavy
+  imbalance.
+
+### Object 3 — generation-time composite (inference gate, not a loss)
+MPNN proposes → score+gate, no backprop. Hard gates (catalytic identity +
+side-chain RMSD) reject outright; then **product** of soft sub-scores
+(calibrated classifier prob × ESM pseudo-likelihood × fold-integrity). Product,
+not sum — any near-zero kills the design. Classifier factor = calibrated prob
+from Loss 2.
