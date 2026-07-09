@@ -274,3 +274,86 @@ exploits the softest term).
 
 Existing NCBI-nr mmseqs2 DB on biotite = fallback MSA source; add UniRef30 as
 primary (clustering makes both search and conservation weighting cleaner).
+
+---
+
+## 11. Fine-tuning strategy (ESM + ProteinMPNN)
+
+Fine-tuning serves two *uses* — masked fill-in (generation) and
+classifying/scoring — but that is **one shared foundation with two heads**, not
+two separate fine-tunes.
+
+### Unifying architecture: one adapted backbone, two heads, one split
+1. **Shared foundation — domain-adaptive continued pretraining.** ESM-2, MLM
+   objective, continued on the extremophile secreted-protein corpus →
+   likelihood surface shifts toward extremophilic statistics. **Unsupervised**
+   (sequences only). Powers *both* uses; the single highest-value step.
+2. **Head 1 — generation.** The MLM head is the generator: mask non-active-site
+   positions, fill in → extremophile-flavoured. Same head's pseudo-likelihood =
+   the "looks like a natural extremophile" re-ranker for MPNN output.
+3. **Head 2 — scoring.** Classifier head on the same adapted backbone,
+   supervised extremophile-vs-matched-mesophile = per-phenotype Oracle 1.
+
+One backbone, two heads, **one consistent cluster split** underneath.
+
+### ESM fine-tuning specifics
+- **Parameter-efficient (LoRA/adapters), NOT full fine-tune.** Full FT on ~10^4
+  sequences overfits AND causes catastrophic forgetting of the base model's
+  structural knowledge — the very knowledge that protects enzyme function. LoRA
+  (rank 8–16 on q/v proj) freezes the base, trains ~0.1% of params, one GPU,
+  and keeps **multiple phenotype adapters swappable on one backbone** (no 5×650M
+  copies).
+- **Per-phenotype via adapters:**
+  - generation: per-phenotype MLM adapter → *directed* fill-in. Even
+    hyperthermophile (216 genomes × few-hundred secreted ≈ 10^4 seqs) is enough
+    for LoRA (too little to train from scratch).
+  - scoring: one shared adapted backbone + 5 light classifier heads (small
+    classes borrow representation; boundaries stay independent).
+- **Starting hyperparameters:**
+  - backbone ESM-2 **650M** (t33); scale to 3B only if it helps + GPU allows.
+  - LoRA rank 8–16, α 16–32, dropout 0.05, target q_proj/v_proj.
+  - continued MLM 15% mask, LR 1e-4 + warmup, few epochs, early-stop on held-out
+    pseudo-perplexity.
+  - classifier head: mean-pool → 2-layer MLP (or attention pool); LR 1e-3 head /
+    1e-5 adapter; early-stop on val AUPRC.
+  - context: mature chains mostly fit ESM-2's **1022-residue** limit; truncate /
+    sliding-window the few that don't.
+- **Tooling note (revises earlier ESMC lean):** ESMC is stronger per-param for
+  *zero-shot inference*, but for a *fine-tuning*-heavy workflow ESM-2's ecosystem
+  maturity (LoRA recipes, HF integration) wins. Fine-tune on **ESM-2 650M**; keep
+  ESMC as an optional *frozen* inference scorer in the ensemble.
+
+### Leakage discipline (where projects like this quietly fail)
+1. **One global cluster split** (mmseqs 30–50% id, whole clusters → folds), made
+   once, read by every use (MLM adaptation, classifier, generation eval).
+2. **Domain-adaptive MLM sees TRAIN clusters only.** Most-overlooked leak: if the
+   backbone does continued MLM over sequences later in the classifier *test*
+   fold, held-out AUPRC is optimistic. Adaptation corpus = train-only.
+3. **Co-assign matched pairs.** Outgroups are close by construction; for each
+   test-fold extremophile put its mesophile outgroup in test too, else the
+   matched-pair contrast splits across folds and weakens the signal.
+- **Label noise:** label = genome phenotype stamped on each secreted protein
+  (noisy). Mitigate with `label_confidence` as sample weight + matched-mesophile
+  contrast (learn the delta, not clade).
+
+### ProteinMPNN: bias it, don't fine-tune it (at first)
+- Weight fine-tuning is the weakest-justified piece: needs **structures we don't
+  have** (would fold the whole secretome → predicted backbones, risks teaching
+  folding artifacts), and **erodes MPNN's core competence** (geometry fidelity is
+  why we use it).
+- **Cheap safe alternative — sampling bias:** MPNN accepts per-position aa bias +
+  sampling temperature. Inject an extremophilic composition bias from dataset
+  statistics (charged/salt-bridge residues for thermo; acidic surface for halo)
+  at sampling time, no retraining. ESM re-ranker does the fine-grained steering.
+- So **fine-tuning is mostly an ESM story** (both uses). MPNN steering = bias +
+  re-rank. MPNN weight FT = later experiment only if bias underperforms, and
+  needs a folded-structure training set first.
+
+### Order of operations
+1. Global cluster split (mmseqs, pairs co-assigned).
+2. Domain-adaptive continued MLM (LoRA, per-phenotype/conditional) on TRAIN-only.
+3. Branch adapted backbone: MLM head → mask-fill + re-rank; + per-phenotype
+   classifier heads (supervised, `label_confidence`-weighted).
+4. Validate each head: classifier by cluster-held-out AUPRC + saliency recovering
+   biophysical signatures; MLM by pseudo-perplexity drop + fill composition.
+5. Wire into MPNN-generate → ESM-rerank → fold-verify loop.
