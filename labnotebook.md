@@ -406,6 +406,8 @@ demo yields the correct 120/15/15 train/val/test with zero leakage.
 
 Benchmarked SignalP 6.0 fast mode on 10,000 proteins across CPU / A5000 / H200:
 
+![SignalP throughput: CPU vs A5000 vs H200 across batch sizes](results/signalp_gpu_benchmark.png)
+
 | Config | best seq/s | per-GPU 24 h |
 |--------|-----------:|-------------:|
 | H200 (bsize 32) | **12.75** | 1.10 M |
@@ -476,6 +478,9 @@ Confidence tiers: **high 3,638** (metadata + prediction agree), **medium
 18,863** (prediction-only), **low 5,499** (metadata-only / conflict), none
 171,923; **104,486 confident mesophiles** form the outgroup pool.
 
+![Combined labels by confidence tier (r232, all 199,923 genomes)](results/combined_label_counts_r232.png)
+![Metadata vs prediction agreement per class (r232)](results/combined_agreement_r232.png)
+
 **Final selection** (`04_select_genomes.py`) — 5 overlapping classes, chosen
 with the user for per-phenotype independent models:
 
@@ -503,6 +508,10 @@ false positives the combination approach is designed to catch).
 data after SignalP): extremophiles/outgroups TSVs carry `final_confidence`, the
 pairs table records both `extremophile_confidence` and `outgroup_confidence`,
 and `dataset.assign_labels` stamps `label_confidence` on every secreted protein.
+
+![Final selection summary — genomes/proteins per class (r232)](results/selection_r232_summary.png)
+![Matched-pair phylogenetic closeness by rank (r232)](results/selection_r232_match_ranks.png)
+![Extremophile phylogenetic diversity per class (r232)](results/selection_r232_phylum_spread.png)
 
 ## SignalP production run (job 1149978)
 
@@ -611,6 +620,8 @@ genome union-find; clusters already co-locate matched orthologs). Per-protein
 
 Outputs: `results/labeled_dataset_r232_clustered.parquet` (18 cols),
 `_protein_pairs.tsv` (side-car index for the pairwise margin loss).
+
+![Production labeled dataset — class × split, confidence, anchoring, pairs (r232)](results/dataset_production_r232.png)
 
 ## Modeling — design + training scaffold
 
