@@ -42,6 +42,7 @@ MESOPHILE_LABEL = "mesophile"
 class SplitResult:
     table: pd.DataFrame     # protein rows with a `split` column
     stats: dict
+    protein_pairs: pd.DataFrame | None = None  # ortholog pairs for L_pair (cluster regime)
 
 
 def assign_labels(
@@ -185,6 +186,50 @@ def _coassign_matched_pairs(
     return labeled[group_col].astype(str).map(lambda g: find(g))
 
 
+def _derive_protein_pairs(
+    labeled: pd.DataFrame,
+    group_col: str,
+    genome_col: str,
+    pairs: pd.DataFrame,
+) -> "pd.DataFrame":
+    """Derive protein-level ortholog pairs = (cluster INTERSECT matched-genome-pair).
+
+    For each matched (extremophile, outgroup) genome pair, find sequence clusters
+    that contain a protein from BOTH genomes; those co-clustered proteins are the
+    ortholog pair (>=50% id by construction). Within a (cluster, genome-pair) we
+    take one protein per genome (highest cs_prob as a stable tie-break — a cheap
+    proxy for reciprocal-best; a full RBH would need alignment scores). Both
+    members share a cluster, hence the same split, so test-fold pairs feed the
+    pairwise margin loss (Section 12, L_pair).
+
+    Returns columns: class, cluster, ext_acc, outgroup_acc, ext_id, outgroup_id.
+    """
+    from .gtdb import bare_accession
+    lab = labeled.copy()
+    lab["_bare"] = lab[genome_col].astype(str).map(bare_accession)
+    # index: (bare genome, cluster) -> best tagged_id
+    sort_col = "cs_prob" if "cs_prob" in lab.columns else group_col
+    lab = lab.sort_values(sort_col, ascending=False)
+    best = (lab.groupby(["_bare", group_col])["tagged_id"].first())
+
+    rows = []
+    for cls, e_raw, m_raw in zip(pairs.get("class", [None] * len(pairs)),
+                                 pairs["extremophile_acc"], pairs["outgroup_acc"]):
+        e, m = bare_accession(e_raw), bare_accession(m_raw)
+        if not e or not m:
+            continue
+        try:
+            e_clusters = set(best.loc[e].index)
+            m_clusters = set(best.loc[m].index)
+        except KeyError:
+            continue
+        for cl in (e_clusters & m_clusters):
+            rows.append({"class": cls, "cluster": cl, "ext_acc": e, "outgroup_acc": m,
+                         "ext_id": best.loc[(e, cl)], "outgroup_id": best.loc[(m, cl)]})
+    return pd.DataFrame(rows, columns=["class", "cluster", "ext_acc", "outgroup_acc",
+                                       "ext_id", "outgroup_id"])
+
+
 def assemble_dataset(
     secreted: pd.DataFrame,
     genome_labels: pd.DataFrame,
@@ -229,14 +274,23 @@ def assemble_dataset(
         group_col = genome_col
         group_kind = "genome"
 
-    # Co-assign matched pairs (merge base groups) before splitting.
-    if pairs is not None and len(pairs):
+    # Regime switch (see design doc Section 14):
+    #  - genome grouping (no cluster map): co-assign matched pairs by UNIONing
+    #    genome groups (bounded star components) so a pair shares a split.
+    #  - cluster grouping (cluster map present): DO NOT union genomes (would
+    #    blow up via conserved-family transitive closure). Split on clusters
+    #    directly; matched orthologs co-cluster and land together for free.
+    #    Protein-level pairs are derived separately (protein_pairs attribute).
+    protein_pairs = None
+    if pairs is not None and len(pairs) and group_kind.startswith("genome"):
         labeled["_split_group"] = _coassign_matched_pairs(
             labeled, group_col, genome_col, pairs)
         split_group_col = "_split_group"
         group_kind += "+matched_pairs"
     else:
         split_group_col = group_col
+        if pairs is not None and len(pairs) and group_kind.startswith("sequence_cluster"):
+            protein_pairs = _derive_protein_pairs(labeled, group_col, genome_col, pairs)
 
     out = stratified_group_split(labeled, group_col=split_group_col, label_col="label",
                                  splits=splits, seed=seed)
@@ -257,4 +311,13 @@ def assemble_dataset(
     # largest merged component (diagnostic: pair co-assignment can grow groups)
     comp_sizes = out.groupby(split_group_col)[genome_col].nunique()
     stats["max_genomes_per_group"] = int(comp_sizes.max()) if len(comp_sizes) else 0
-    return SplitResult(table=out, stats=stats)
+    # protein-level ortholog pairs (cluster regime): annotate split + count
+    if protein_pairs is not None and len(protein_pairs):
+        split_of = dict(zip(out["tagged_id"], out["split"]))
+        protein_pairs = protein_pairs.copy()
+        protein_pairs["ext_split"] = protein_pairs["ext_id"].map(split_of)
+        protein_pairs["out_split"] = protein_pairs["outgroup_id"].map(split_of)
+        stats["n_protein_pairs"] = int(len(protein_pairs))
+        stats["protein_pairs_same_split"] = int(
+            (protein_pairs["ext_split"] == protein_pairs["out_split"]).sum())
+    return SplitResult(table=out, stats=stats, protein_pairs=protein_pairs)

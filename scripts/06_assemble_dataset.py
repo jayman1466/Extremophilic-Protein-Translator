@@ -89,6 +89,13 @@ def main() -> None:
     assert res.stats["max_splits_per_group"] <= 1, "LEAKAGE: a group spans multiple splits!"
     print(f"[06] wrote {out} and {out.with_suffix('.tsv')}")
 
+    # Protein-level ortholog pairs (cluster regime) -> pairwise margin loss input.
+    if res.protein_pairs is not None and len(res.protein_pairs):
+        pp_path = out.with_name(out.stem + "_protein_pairs.tsv")
+        res.protein_pairs.to_csv(pp_path, sep="\t", index=False)
+        print(f"[06] protein pairs: {res.stats['n_protein_pairs']:,} "
+              f"({res.stats['protein_pairs_same_split']:,} same-split) -> {pp_path}")
+
     # Figure: label counts per split.
     tab = res.table
     labels_u = sorted(tab["label"].unique())

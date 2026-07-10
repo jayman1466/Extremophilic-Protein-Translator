@@ -133,3 +133,44 @@ def test_matched_pairs_coassigned_to_same_split():
         assert split_of[e] == split_of[m], f"pair {e}/{m} split apart"
     assert res.stats["max_splits_per_group"] == 1
     assert "matched_pairs" in res.stats["group_kind"]
+
+
+def test_cluster_regime_derives_protein_pairs_no_genome_union():
+    """With a cluster map, split on clusters (no genome union) and derive
+    protein-level ortholog pairs from cluster INTERSECT matched-genome-pair."""
+    import pandas as pd
+    # 2 matched pairs; each pair shares ONE orthologous cluster (co-clustered),
+    # plus genome-private singleton proteins in their own clusters.
+    rows, cmap = [], []
+    for gi, g in enumerate(["E0.1", "M0.1", "E1.1", "M1.1"]):
+        for p in range(2):
+            pid = f"c{p}"
+            rows.append({"genome": g, "protein_id": pid, "cs_prob": 0.9})
+            tagged = f"{g}~{pid}"
+            # p0 of a pair shares a cluster; p1 is private
+            pair_idx = gi // 2
+            clu = f"ortho_{pair_idx}" if p == 0 else f"priv_{g}_{p}"
+            cmap.append({"cluster": clu, "member": tagged})
+    secreted = pd.DataFrame(rows)
+    cluster_map = pd.DataFrame(cmap)
+    genome_labels = pd.DataFrame({
+        "accession": ["E0.1", "M0.1", "E1.1", "M1.1"],
+        "final_thermophile": [True, False, True, False],
+        "confident_mesophile": [False, True, False, True],
+        "final_confidence": ["high", "none", "high", "none"],
+    })
+    pairs = pd.DataFrame({
+        "class": ["thermophile", "thermophile"],
+        "extremophile_acc": ["E0.1", "E1.1"],
+        "outgroup_acc": ["M0.1", "M1.1"],
+    })
+    res = assemble_dataset(secreted, genome_labels, cluster_map=cluster_map,
+                           pairs=pairs, genome_col="genome", seed=5)
+    # cluster regime: group_kind must NOT carry the genome-union tag
+    assert res.stats["group_kind"] == "sequence_cluster"
+    assert "matched_pairs" not in res.stats["group_kind"]
+    # 2 ortholog pairs derived (one shared cluster per matched pair)
+    assert res.protein_pairs is not None
+    assert res.stats["n_protein_pairs"] == 2
+    # each derived pair co-clusters -> same split guaranteed
+    assert res.stats["protein_pairs_same_split"] == 2
