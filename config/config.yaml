@@ -175,6 +175,7 @@ modeling:
   lora_rank: 32                    # bumped for multi-residue coupling capacity (S15 #3)
   lora_alpha: 64
   full_attention: true             # LoRA on query/key/value + attention-output dense
+  bucket_by_length: true           # length-bucket batches to cut padding waste (~2-3x fewer tokens)
   lora_dropout: 0.05
   max_len: 1022                    # ESM-2 context; longer mature chains truncated
   mlm:
@@ -195,4 +196,5 @@ modeling:
     lam: 1.0                       # weight on the matched-pair margin term
     margin: 1.0
     select_metric: "auprc"         # model-select / early-stop on val AUPRC
+    neg_per_pos: 3.0               # cap negatives at 3x positives (bounds Stage-2 wall-clock)
   confidence_weights: { high: 1.0, medium: 0.5, none: 1.0, low: 0.25 }

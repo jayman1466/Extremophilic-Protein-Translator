@@ -83,6 +83,8 @@ def main():
             p.add_argument("--lam", type=float, default=1.0)
             p.add_argument("--margin", type=float, default=1.0)
             p.add_argument("--pos-weight", type=float, default=None)
+            p.add_argument("--neg-per-pos", type=float, default=3.0,
+                           help="cap negatives at this multiple of positives (None=all)")
         p.add_argument("--full-attention", action="store_true", default=True,
                        help="LoRA on query/key/value + attention-output dense (Section 15 #3)")
         p.add_argument("--qv-only", dest="full_attention", action="store_false",
@@ -127,8 +129,10 @@ def main():
             model.load_adapter(args.mlm_adapter, adapter_name="mlm")
         head = build_classifier_head(hidden)
         pairs = pd.read_csv(args.pairs, sep="\t") if args.pairs else None
-        tr = build_classifier_dataset(df, tok, args.phenotype, "train", max_len=args.max_len)
-        va = build_classifier_dataset(df, tok, args.phenotype, "val", max_len=args.max_len)
+        tr = build_classifier_dataset(df, tok, args.phenotype, "train", max_len=args.max_len,
+                                      neg_per_pos=args.neg_per_pos)
+        va = build_classifier_dataset(df, tok, args.phenotype, "val", max_len=args.max_len,
+                                      neg_per_pos=args.neg_per_pos)
         pair_tr = (build_pair_dataset(df, pairs, tok, args.phenotype, "train",
                                       max_len=args.max_len) if pairs is not None else None)
         n_pairs = len(pair_tr) if pair_tr is not None else 0

@@ -19,7 +19,45 @@ import json
 import math
 from pathlib import Path
 
-__all__ = ["collate_pad", "train_mlm", "train_classifier", "evaluate_auprc"]
+__all__ = ["collate_pad", "train_mlm", "train_classifier", "evaluate_auprc",
+           "LengthBucketSampler"]
+
+
+class LengthBucketSampler:
+    """Batch sampler that groups similar-length items to cut padding waste.
+
+    Random batching pads every item to the batch max; with a median-285/p95-900
+    length distribution that wastes a large fraction of tokens. This sorts a
+    shuffled pool into length order within chunks (``pool = mult * batch_size``),
+    yields contiguous same-length batches, and shuffles batch ORDER each epoch —
+    so there's still stochasticity, but each batch is length-homogeneous.
+    Reduces effective tokens ~2-3x on this corpus.
+    """
+
+    def __init__(self, lengths, batch_size, shuffle=True, pool_mult=50, seed=1466):
+        self.lengths = list(lengths)
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.pool = batch_size * pool_mult
+        self.rng = __import__("numpy").random.default_rng(seed)
+
+    def __iter__(self):
+        import numpy as np
+        idx = np.arange(len(self.lengths))
+        if self.shuffle:
+            self.rng.shuffle(idx)
+        batches = []
+        for start in range(0, len(idx), self.pool):
+            chunk = idx[start:start + self.pool]
+            chunk = chunk[np.argsort([self.lengths[i] for i in chunk])]
+            for b in range(0, len(chunk), self.batch_size):
+                batches.append(chunk[b:b + self.batch_size].tolist())
+        if self.shuffle:
+            self.rng.shuffle(batches)
+        return iter(batches)
+
+    def __len__(self):
+        return (len(self.lengths) + self.batch_size - 1) // self.batch_size
 
 
 def collate_pad(batch, pad_id: int, keys=("input_ids", "attention_mask", "labels")):
@@ -46,15 +84,20 @@ def train_mlm(peft_model, tokenizer, train_ds, val_ds=None, *, epochs: int = 3,
               lr: float = 1e-4, batch_size: int = 8, warmup_frac: float = 0.05,
               beta_kl: float = 0.0, base_model=None, device: str = "cpu",
               out_dir: str | None = None, max_steps: int | None = None,
-              log_every: int = 50):
+              log_every: int = 50, bucket_by_length: bool = True):
     """Domain-adaptive continued MLM (LoRA). Returns training history dict."""
     import torch
     from torch.utils.data import DataLoader
     from .losses import masked_mlm_loss, kl_forgetting_guard
 
     pad_id = tokenizer.pad_token_id
-    dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                    collate_fn=lambda b: collate_pad(b, pad_id))
+    if bucket_by_length and hasattr(train_ds, "items"):
+        lengths = [len(seq) for _, _, seq in train_ds.items]
+        dl = DataLoader(train_ds, batch_sampler=LengthBucketSampler(lengths, batch_size),
+                        collate_fn=lambda b: collate_pad(b, pad_id))
+    else:
+        dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                        collate_fn=lambda b: collate_pad(b, pad_id))
     peft_model.to(device).train()
     opt = torch.optim.AdamW([p for p in peft_model.parameters() if p.requires_grad], lr=lr)
     total = (max_steps or len(dl) * epochs)

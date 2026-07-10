@@ -247,8 +247,20 @@ def build_mlm_dataset(labeled_with_seq: pd.DataFrame, tokenizer, split: str = "t
 
 
 def build_classifier_dataset(labeled_with_seq: pd.DataFrame, tokenizer, phenotype: str,
-                             split: str, max_len: int = 1022):
-    """Torch Dataset for the per-phenotype classifier head (one phenotype)."""
+                             split: str, max_len: int = 1022,
+                             neg_per_pos: float | None = 3.0, seed: int = 1466):
+    """Torch Dataset for the per-phenotype classifier head (one phenotype).
+
+    ``neg_per_pos``: cap negatives at this multiple of the positive count
+    (default 3×). The full 941k-mesophile negative pool × 5 phenotypes × epochs
+    is the dominant Stage-2 cost and mostly redundant; subsampling to a few×
+    positives bounds wall-clock, and the residual imbalance is handled by
+    weighted BCE + ``pos_weight``. Set None to use all negatives. Applied to
+    TRAIN and VAL alike (val stays a fixed sample via ``seed`` for comparable
+    AUPRC across epochs); the held-out TEST split should be built with
+    ``neg_per_pos=None`` for an unbiased estimate.
+    """
+    import numpy as np
     import torch
     from torch.utils.data import Dataset
     from .losses import confidence_to_weight
@@ -257,6 +269,13 @@ def build_classifier_dataset(labeled_with_seq: pd.DataFrame, tokenizer, phenotyp
     y = phenotype_binary_labels(df, phenotype)
     df = df.assign(_y=y)
     df = df[df["_y"].notna()].reset_index(drop=True)
+    if neg_per_pos is not None:
+        pos = df[df["_y"] == 1.0]
+        neg = df[df["_y"] == 0.0]
+        cap = int(round(neg_per_pos * len(pos)))
+        if len(neg) > cap > 0:
+            neg = neg.sample(n=cap, random_state=seed)
+            df = pd.concat([pos, neg]).sort_index().reset_index(drop=True)
 
     class ClassifierDataset(Dataset):
         def __init__(self):

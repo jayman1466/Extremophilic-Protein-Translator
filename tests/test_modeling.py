@@ -266,3 +266,40 @@ def test_sliding_windows_long_seq_overlaps_and_covers():
     assert w[-1][0] + len(w[-1][1]) == len(seq)  # last window reaches the end
     starts = [s for s, _ in w]
     assert all(starts[i+1] - starts[i] == 15 for i in range(len(starts)-1))  # step = 20-5
+
+
+# ---- negative-sampling cap + length bucketing (H200 wall-clock levers) ----
+
+def test_classifier_negative_cap_bounds_negatives():
+    pd_mod = pytest.importorskip("pandas")
+    pytest.importorskip("transformers")
+    import tempfile
+    from transformers import EsmTokenizer
+    from eptrans.modeling.data import build_classifier_dataset
+    vocab = "<cls> <pad> <eos> <unk> L A G V S E R T I D P K Q N F Y M H W C X B U Z O . - <null_1> <mask>".split()
+    td = tempfile.mkdtemp(); open(f"{td}/vocab.txt", "w").write("\n".join(vocab))
+    tok = EsmTokenizer(f"{td}/vocab.txt")
+    # 5 positives, 100 negatives
+    rows = [{"tagged_id": f"P{i}~p", "sequence": "LAGV", "label": "thermophile",
+             "label_confidence": "high", "split": "train"} for i in range(5)]
+    rows += [{"tagged_id": f"N{i}~p", "sequence": "SERT", "label": "mesophile",
+              "label_confidence": "none", "split": "train"} for i in range(100)]
+    df = pd_mod.DataFrame(rows)
+    ds = build_classifier_dataset(df, tok, "thermophile", "train", max_len=32, neg_per_pos=3.0)
+    # 5 pos + 15 neg = 20
+    assert len(ds) == 20
+    # uncapped keeps all 105
+    ds_all = build_classifier_dataset(df, tok, "thermophile", "train", max_len=32, neg_per_pos=None)
+    assert len(ds_all) == 105
+
+
+def test_length_bucket_sampler_covers_all_and_batches():
+    from eptrans.modeling.train import LengthBucketSampler
+    lengths = [10, 500, 12, 480, 11, 490] * 5  # 30 items
+    s = LengthBucketSampler(lengths, batch_size=4, pool_mult=2, seed=0)
+    batches = list(iter(s))
+    flat = sorted(i for b in batches for i in b)
+    assert flat == list(range(30))          # every item exactly once
+    assert len(s) == 8                       # ceil(30/4)
+    # within-pool sorting: at least one batch is length-homogeneous
+    assert any(max(lengths[i] for i in b) - min(lengths[i] for i in b) < 5 for b in batches)
