@@ -84,11 +84,23 @@ def train_mlm(peft_model, tokenizer, train_ds, val_ds=None, *, epochs: int = 3,
               lr: float = 1e-4, batch_size: int = 8, warmup_frac: float = 0.05,
               beta_kl: float = 0.0, base_model=None, device: str = "cpu",
               out_dir: str | None = None, max_steps: int | None = None,
-              log_every: int = 50, bucket_by_length: bool = True):
-    """Domain-adaptive continued MLM (LoRA). Returns training history dict."""
+              log_every: int = 50, bucket_by_length: bool = True,
+              amp_dtype: str = "bf16"):
+    """Domain-adaptive continued MLM (LoRA). Returns training history dict.
+
+    ``amp_dtype``: "bf16" (default) wraps forward passes in
+    ``torch.autocast(dtype=bfloat16)`` — on the H200 this roughly halves memory
+    and doubles throughput, and needs no GradScaler (bf16 has fp32's dynamic
+    range). "fp32" disables autocast (CPU smoke-tests). LoRA master weights stay
+    fp32; only the compute is bf16.
+    """
     import torch
     from torch.utils.data import DataLoader
     from .losses import masked_mlm_loss, kl_forgetting_guard
+
+    use_amp = amp_dtype == "bf16" and str(device).startswith("cuda")
+    amp_ctx = (lambda: torch.autocast("cuda", dtype=torch.bfloat16)) if use_amp \
+        else __import__("contextlib").nullcontext
 
     pad_id = tokenizer.pad_token_id
     if bucket_by_length and hasattr(train_ds, "items"):
@@ -111,15 +123,16 @@ def train_mlm(peft_model, tokenizer, train_ds, val_ds=None, *, epochs: int = 3,
     for ep in range(epochs):
         for batch in dl:
             batch = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in batch.items()}
-            out = peft_model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
-            loss = masked_mlm_loss(out.logits, batch["labels"].clamp_min(0),
-                                   batch["labels"] != -100, seq_weight=batch.get("seq_weight"))
-            if beta_kl > 0 and base_model is not None:
-                with torch.no_grad():
-                    base_logits = base_model(input_ids=batch["input_ids"],
-                                             attention_mask=batch["attention_mask"]).logits
-                loss = loss + beta_kl * kl_forgetting_guard(
-                    out.logits, base_logits, mask=batch["labels"] != -100)
+            with amp_ctx():
+                out = peft_model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
+                loss = masked_mlm_loss(out.logits, batch["labels"].clamp_min(0),
+                                       batch["labels"] != -100, seq_weight=batch.get("seq_weight"))
+                if beta_kl > 0 and base_model is not None:
+                    with torch.no_grad():
+                        base_logits = base_model(input_ids=batch["input_ids"],
+                                                 attention_mask=batch["attention_mask"]).logits
+                    loss = loss + beta_kl * kl_forgetting_guard(
+                        out.logits, base_logits, mask=batch["labels"] != -100)
             opt.zero_grad(); loss.backward(); opt.step(); sched.step()
             if step % log_every == 0:
                 hist["train_loss"].append((step, float(loss.detach())))
@@ -127,7 +140,7 @@ def train_mlm(peft_model, tokenizer, train_ds, val_ds=None, *, epochs: int = 3,
             if max_steps and step >= max_steps:
                 break
         if val_ds is not None:
-            ppl = _pseudo_perplexity(peft_model, tokenizer, val_ds, device, batch_size)
+            ppl = _pseudo_perplexity(peft_model, tokenizer, val_ds, device, batch_size, amp_ctx)
             hist["val_ppl"].append((step, ppl))
             if ppl < best_ppl and out_dir:
                 best_ppl = ppl
@@ -140,12 +153,15 @@ def train_mlm(peft_model, tokenizer, train_ds, val_ds=None, *, epochs: int = 3,
     return hist
 
 
-def _pseudo_perplexity(model, tokenizer, ds, device, batch_size):
+def _pseudo_perplexity(model, tokenizer, ds, device, batch_size, amp_ctx=None):
     """Cheap MLM val metric: exp(mean masked CE) over the val set as given
     (its items already carry masked labels)."""
+    import contextlib
     import torch
     from torch.utils.data import DataLoader
     from .losses import masked_mlm_loss
+    if amp_ctx is None:
+        amp_ctx = contextlib.nullcontext
     pad_id = tokenizer.pad_token_id
     dl = DataLoader(ds, batch_size=batch_size, collate_fn=lambda b: collate_pad(b, pad_id))
     model.eval()
@@ -153,9 +169,10 @@ def _pseudo_perplexity(model, tokenizer, ds, device, batch_size):
     with torch.no_grad():
         for batch in dl:
             batch = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in batch.items()}
-            out = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
-            l = masked_mlm_loss(out.logits, batch["labels"].clamp_min(0),
-                                batch["labels"] != -100)
+            with amp_ctx():
+                out = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
+                l = masked_mlm_loss(out.logits, batch["labels"].clamp_min(0),
+                                    batch["labels"] != -100)
             tot += float(l); n += 1
     model.train()
     return math.exp(tot / max(1, n))
