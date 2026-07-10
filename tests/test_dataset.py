@@ -101,3 +101,35 @@ def test_assemble_genome_fallback():
     assert res.stats["group_kind"] == "genome"
     assert res.stats["max_splits_per_group"] == 1
     assert res.stats["n_proteins"] == 3  # c3_1 dropped
+
+
+def test_matched_pairs_coassigned_to_same_split():
+    """Each extremophile and its matched mesophile outgroup must share a split."""
+    import pandas as pd
+    # 10 extremophile genomes (even ids, thermophile) each paired to a distinct
+    # mesophile outgroup (odd ids). Without co-assignment the independent genomes
+    # could split apart; with pairs they must not.
+    rows = []
+    for g in range(20):
+        for p in range(3):
+            rows.append({"genome": f"G{g:03d}.1", "protein_id": f"p{p}"})
+    secreted = pd.DataFrame(rows)
+    genome_labels = pd.DataFrame({
+        "accession": [f"G{g:03d}.1" for g in range(20)],
+        "final_thermophile": [g % 2 == 0 for g in range(20)],
+        "confident_mesophile": [g % 2 == 1 for g in range(20)],
+        "final_confidence": ["high" if g % 2 == 0 else "none" for g in range(20)],
+    })
+    pairs = pd.DataFrame({
+        "extremophile_acc": [f"G{g:03d}.1" for g in range(0, 20, 2)],
+        "outgroup_acc":     [f"G{g:03d}.1" for g in range(1, 20, 2)],
+    })
+    res = assemble_dataset(secreted, genome_labels, pairs=pairs,
+                           genome_col="genome", seed=3)
+    tab = res.table
+    # for every pair, extremophile and outgroup share the same split
+    split_of = dict(zip(tab["genome"], tab["split"]))
+    for e, m in zip(pairs["extremophile_acc"], pairs["outgroup_acc"]):
+        assert split_of[e] == split_of[m], f"pair {e}/{m} split apart"
+    assert res.stats["max_splits_per_group"] == 1
+    assert "matched_pairs" in res.stats["group_kind"]

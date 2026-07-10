@@ -139,6 +139,52 @@ def stratified_group_split(
     return out
 
 
+def _coassign_matched_pairs(
+    labeled: pd.DataFrame,
+    group_col: str,
+    genome_col: str,
+    pairs: pd.DataFrame,
+) -> pd.Series:
+    """Union base groups so each extremophile and its matched mesophile outgroup
+    share a split group.
+
+    Uses union-find over the base groups: for every (extremophile, outgroup)
+    pairing, all base groups containing proteins of either genome are merged into
+    one component. Whole components are then assigned to a single split, so a
+    matched pair can never straddle train/val/test. Reused outgroups form a
+    "star" (one mesophile + the extremophiles it anchors) that lands together.
+
+    Returns a Series (indexed like ``labeled``) of the merged group id.
+    """
+    from .gtdb import bare_accession
+    # genome -> set of base groups its proteins occupy
+    genome_groups: dict[str, set] = {}
+    bare = labeled[genome_col].astype(str).map(bare_accession)
+    for g, grp in zip(bare, labeled[group_col].astype(str)):
+        genome_groups.setdefault(g, set()).add(grp)
+
+    parent: dict = {}
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    for e_raw, m_raw in zip(pairs["extremophile_acc"], pairs["outgroup_acc"]):
+        e, m = bare_accession(e_raw), bare_accession(m_raw)
+        # skip unmatched extremophiles (empty outgroup) — nothing to co-assign
+        if not e or not m:
+            continue
+        grps = list(genome_groups.get(e, set()) | genome_groups.get(m, set()))
+        for k in range(1, len(grps)):
+            union(grps[0], grps[k])
+
+    return labeled[group_col].astype(str).map(lambda g: find(g))
+
+
 def assemble_dataset(
     secreted: pd.DataFrame,
     genome_labels: pd.DataFrame,
@@ -149,6 +195,7 @@ def assemble_dataset(
     splits: dict | None = None,
     seed: int = 1466,
     multi_label: bool = False,
+    pairs: pd.DataFrame | None = None,
 ) -> SplitResult:
     """Full assembly: label + leakage-aware split.
 
@@ -156,6 +203,11 @@ def assemble_dataset(
         cluster_map: optional DataFrame with columns [member, cluster] mapping
             each protein (``{genome}~{protein_id}`` or protein_id) to an mmseqs
             cluster. When absent, groups = genomes.
+        pairs: optional stage-04 pairs table (cols extremophile_acc,
+            outgroup_acc). When supplied, matched extremophile/outgroup genomes
+            are co-assigned to the same split (union-find over base groups) so a
+            pair never straddles train/val/test — preserving the matched contrast
+            within each fold.
     """
     labeled = assign_labels(secreted, genome_labels, genome_col=genome_col,
                             multi_label=multi_label)
@@ -177,20 +229,32 @@ def assemble_dataset(
         group_col = genome_col
         group_kind = "genome"
 
-    out = stratified_group_split(labeled, group_col=group_col, label_col="label",
+    # Co-assign matched pairs (merge base groups) before splitting.
+    if pairs is not None and len(pairs):
+        labeled["_split_group"] = _coassign_matched_pairs(
+            labeled, group_col, genome_col, pairs)
+        split_group_col = "_split_group"
+        group_kind += "+matched_pairs"
+    else:
+        split_group_col = group_col
+
+    out = stratified_group_split(labeled, group_col=split_group_col, label_col="label",
                                  splits=splits, seed=seed)
 
     stats = {
         "n_proteins": int(len(out)),
         "n_genomes": int(out[genome_col].nunique()),
-        "n_groups": int(out[group_col].nunique()),
+        "n_groups": int(out[split_group_col].nunique()),
         "group_kind": group_kind,
         "label_counts": out["label"].value_counts().to_dict(),
         "split_counts": out["split"].value_counts().to_dict(),
         "split_by_label": (out.groupby(["split", "label"]).size()
                            .unstack(fill_value=0).to_dict()),
     }
-    # leakage assertion: no group spans multiple splits
-    spans = out.groupby(group_col)["split"].nunique()
+    # leakage assertion: no split-group spans multiple splits
+    spans = out.groupby(split_group_col)["split"].nunique()
     stats["max_splits_per_group"] = int(spans.max()) if len(spans) else 0
+    # largest merged component (diagnostic: pair co-assignment can grow groups)
+    comp_sizes = out.groupby(split_group_col)[genome_col].nunique()
+    stats["max_genomes_per_group"] = int(comp_sizes.max()) if len(comp_sizes) else 0
     return SplitResult(table=out, stats=stats)

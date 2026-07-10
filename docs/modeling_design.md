@@ -456,3 +456,48 @@ The conservation exponent **γ is effectively a 4th aggressiveness knob** and th
 most principled one: low γ mutates broadly (aggressive), high γ restricts edits
 to least-conserved positions (conservative). Likely **subsumes the "mutable
 region" knob** — "surface-only" ≈ "low-conservation-only" for most enzymes.
+
+---
+
+## 14. Matched pairs vs. protein-level clustering (split reconciliation)
+
+**Problem.** Matched pairs are genome-level; leakage clustering is protein-level.
+Naively co-assigning "all clusters touched by extremophile E" with "all clusters
+touched by outgroup M" causes transitive-closure blowup once base groups are
+sequence clusters: conserved secreted families link many genomes, reused
+outgroups form stars, and the dataset collapses into one giant component that
+must occupy a single split.
+
+**Two regimes:**
+
+### Interim (genome-level grouping — implemented, `pairs=` in assemble_dataset)
+Base group = genome. Union-find merges each extremophile's genome group with its
+matched outgroup's. Components stay bounded (reused-outgroup star = one mesophile
++ its 1-3 matched extremophiles). On r232 data: **max component = 17 genomes**,
+3,987 pairs same-split / 0 split apart. Prevents genome memorization + keeps
+pairs together. Safe ONLY because base group = genome.
+
+### Production (protein-cluster grouping — planned, after mmseqs)
+DROP the genome union. Instead:
+1. **Split on sequence clusters** (mmseqs 30-50% id). A genome's proteins may
+   spread across folds — fine, no individual protein leaks.
+2. **The contrast lives between orthologs, which co-cluster for free.** Matched
+   genomes are phylogenetically close, so an ortholog pair (E protein / M
+   protein) is usually >50% id -> same cluster -> same split automatically. No
+   genome co-assignment needed.
+3. **Derive protein-level pairs = (cluster INTERSECT matched-genome-pair):**
+   within each cluster, members whose genomes form a matched E/M pair are the
+   ortholog pairs that feed the pairwise margin loss (Section 12, L_pair).
+   Guaranteed same-fold because same cluster. Emit as `protein_pairs.tsv`.
+
+**Caveats:**
+- **Paralogs:** a cluster may hold several E and several M proteins; take the
+  reciprocal-best / highest-identity 1:1 match per (cluster, genome-pair), not
+  the cross product.
+- **Orthologs that diverged across clusters (<50% id):** either accept (a
+  sub-50% pair is a weak contrast anyway) or do a *targeted* cluster-merge —
+  union just those two clusters, keyed by a real homolog link. This is bounded
+  (cluster-pair granularity), unlike the genome-level union that explodes.
+
+So the genome pairing's role **changes** between regimes: a split constraint in
+the interim, a *filter for building protein-level pairs* in production.

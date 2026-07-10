@@ -52,7 +52,12 @@ _PREFIX_RE = re.compile(r"^(GB_|RS_)")
 # Accession helpers
 # --------------------------------------------------------------------------
 def bare_accession(genome_id: str) -> str:
-    """Strip the GTDB source prefix: 'RS_GCF_000005845.2' -> 'GCF_000005845.2'."""
+    """Strip the GTDB source prefix: 'RS_GCF_000005845.2' -> 'GCF_000005845.2'.
+
+    Non-string input (e.g. a NaN from an unmatched outgroup cell) returns "".
+    """
+    if not isinstance(genome_id, str):
+        return ""
     return _PREFIX_RE.sub("", genome_id)
 
 

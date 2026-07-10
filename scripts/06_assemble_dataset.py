@@ -42,6 +42,9 @@ def main() -> None:
     ap.add_argument("--labels", required=True, help="combined labels parquet/TSV (stage 03)")
     ap.add_argument("--cluster-map", default=None,
                     help="mmseqs cluster TSV (cols: cluster_rep<TAB>member); optional")
+    ap.add_argument("--pairs", default=None,
+                    help="stage-04 pairs TSV (extremophile_acc, outgroup_acc); "
+                         "co-assigns matched pairs to the same split")
     ap.add_argument("--protein-id-col", default="protein_id")
     ap.add_argument("--genome-col", default="genome")
     ap.add_argument("--multi-label", action="store_true")
@@ -60,8 +63,12 @@ def main() -> None:
         cm = pd.read_csv(args.cluster_map, sep="\t", header=None, names=["cluster", "member"])
         cluster_map = cm
 
+    pairs = None
+    if args.pairs:
+        pairs = pd.read_csv(args.pairs, sep="\t", dtype=str)
+
     res = assemble_dataset(
-        secreted, labels, cluster_map=cluster_map,
+        secreted, labels, cluster_map=cluster_map, pairs=pairs,
         protein_id_col=args.protein_id_col, genome_col=args.genome_col,
         splits=cfg.get_path("dataset.splits", {"train": 0.8, "val": 0.1, "test": 0.1}),
         seed=cfg.get_path("dataset.split_seed", 1466),
