@@ -203,14 +203,19 @@ def build_pair_dataset(labeled_with_seq: pd.DataFrame, pairs: pd.DataFrame, toke
     """Torch Dataset of matched (extremophile, outgroup) protein pairs for L_pair.
 
     Restricts the stage-06 protein-pairs table to (a) this phenotype's `class`
-    and (b) pairs whose BOTH members fall in ``split`` (they co-cluster, so this
-    is essentially all of them — the ``ext_split``/``out_split`` columns make it
-    explicit). Each item returns the two tokenized proteins so the training loop
-    scores them and applies the margin term ``max(0, δ - (s_ext - s_out))``.
+    and (b) pairs whose BOTH members fall in ``split``. These are the DERIVED
+    protein-level ortholog pairs (cluster INTERSECT matched-genome-pair), so both
+    members share a cluster and hence the same split by construction; the
+    ``ext_split``/``out_split`` filter is a guard that also drops any pair whose
+    member was absent from the labeled table. (This is distinct from genome-level
+    matched pairs, which do NOT co-locate naturally — those rely on the Stage-06
+    union-find co-assignment; see design doc Section 14.) Each item returns the
+    two tokenized proteins so the training loop scores them and applies the
+    margin term ``max(0, δ - (s_ext - s_out))``.
 
-    The split is unchanged by this — pairs are a side-car index used only to
-    co-load matched proteins into a batch (answering: pairing need not be
-    "retained" in the split itself; the pooled split + this index suffice).
+    The split is unchanged by this — the pairs table is a side-car index used
+    only to co-load matched proteins into a batch (pairing need not be "retained"
+    in the split itself; the pooled split + this index suffice).
     """
     import torch
     from torch.utils.data import Dataset

@@ -538,14 +538,21 @@ that enzyme's variable positions while freezing conserved/active-site ones
 (§13 Stage A/B). So §13 belongs to per-enzyme design, downstream of the
 enzyme-agnostic backbone trained here.
 
-**Matched-pair co-loading (wired).** The split needs nothing beyond the pooled
-train/val/test set + label column — clustering already co-locates each matched
-pair in one fold (verified 100% same-split). The `_protein_pairs.tsv` table is a
-**side-car index**, not a structural part of the split: `build_pair_dataset`
-filters it to (phenotype class, split) and `train_classifier(pair_ds=...)` runs
-a pair loader in lockstep (cycling, since pairs are fewer than singletons),
-scoring both members through the same backbone+head and adding
-`max(0, margin - (s_ext - s_out))`. λ=0 recovers pure pointwise BCE.
+**Matched-pair co-loading (wired).** Genome-level matched pairs are NOT
+guaranteed to land in the same split — that is exactly why Stage 06 carries the
+union-find co-assignment safeguard for the genome-grouping regime (Section 14).
+The pairs loaded for `L_pair`, however, are the **derived protein-level ortholog
+pairs** (`_protein_pairs.tsv`), each defined as cluster ∩ matched-genome-pair —
+so both members share a cluster, and since the cluster is the split unit they
+are same-split **by construction**. The Stage-06 production run reported this
+consistency directly (`protein_pairs_same_split == n_protein_pairs`, 90,984 of
+90,984) — which is the by-construction identity, not evidence that arbitrary
+genome pairs co-locate naturally. The `_protein_pairs.tsv` table is a **side-car
+index**, not a structural part of the split: `build_pair_dataset` filters it to
+(phenotype class, split) and `train_classifier(pair_ds=...)` runs a pair loader
+in lockstep (cycling, since pairs are fewer than singletons), scoring both
+members through the same backbone+head and adding `max(0, margin - (s_ext -
+s_out))`. λ=0 recovers pure pointwise BCE.
 
 Both §13-Stage-B and the pairwise term are now connected; MSA-conservation
 per query enzyme is deferred to the generation module (a separate build).
