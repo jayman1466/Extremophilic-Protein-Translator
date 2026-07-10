@@ -56,7 +56,7 @@ non-learnable biophysical layer.
 - **Mitigations (already in the pipeline):**
   - Phylogenetically-matched mesophile **outgroups** — force the model onto the
     trait, not the clade. (This is *why* the outgroup design exists.)
-  - **Cluster-based splits** (mmseqs ~30–50% id) — no train/test homolog leak.
+  - **Cluster-based splits** (mmseqs 50% id / 80% cov) — no train/test homolog leak.
 - **Biophysical layer (cheap, non-gameable secondary score):** thermophile →
   more charged surface / salt bridges; halophile → strongly acidic surface
   (Asp/Glu excess); acido-/alkaliphile → pH-tuned surface charge. If classifier
@@ -325,7 +325,7 @@ One backbone, two heads, **one consistent cluster split** underneath.
   ESMC as an optional *frozen* inference scorer in the ensemble.
 
 ### Leakage discipline (where projects like this quietly fail)
-1. **One global cluster split** (mmseqs 30–50% id, whole clusters → folds), made
+1. **One global cluster split** (mmseqs 50% id / 80% cov, whole clusters → folds), made
    once, read by every use (MLM adaptation, classifier, generation eval).
 2. **Domain-adaptive MLM sees TRAIN clusters only.** Most-overlooked leak: if the
    backbone does continued MLM over sequences later in the classifier *test*
@@ -479,7 +479,7 @@ pairs together. Safe ONLY because base group = genome.
 
 ### Production (protein-cluster grouping — planned, after mmseqs)
 DROP the genome union. Instead:
-1. **Split on sequence clusters** (mmseqs 30-50% id). A genome's proteins may
+1. **Split on sequence clusters** (mmseqs 50% id / 80% cov). A genome's proteins may
    spread across folds — fine, no individual protein leaks.
 2. **The contrast lives between orthologs, which co-cluster for free.** Matched
    genomes are phylogenetically close, so an ortholog pair (E protein / M
