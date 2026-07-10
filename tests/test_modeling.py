@@ -111,11 +111,19 @@ def test_weighted_bce_reduces_to_mean_when_unweighted():
 
 
 def test_sample_weight_upweights_high_confidence():
-    s = torch.tensor([5.0, 5.0]); y = torch.tensor([0.0, 0.0])  # both wrong
-    # weight the second example more -> loss closer to its per-example loss
-    w_lo = L.weighted_bce_loss(s, y, sample_weight=torch.tensor([1.0, 0.0]))
-    w_hi = L.weighted_bce_loss(s, y, sample_weight=torch.tensor([0.0, 1.0]))
-    assert abs(float(w_lo) - float(w_hi)) < 1e-5  # symmetric here (same loss)
+    import torch.nn.functional as F
+    # two examples with DIFFERENT per-example loss: idx0 nearly correct (tiny
+    # loss), idx1 badly wrong (large loss).
+    s = torch.tensor([5.0, -5.0]); y = torch.tensor([1.0, 1.0])
+    per = F.binary_cross_entropy_with_logits(s, y, reduction="none")
+    assert float(per[1]) > float(per[0])  # sanity: idx1 is the hard one
+    # weighting the hard example -> weighted mean == its per-example loss; the
+    # two weightings must DIFFER, and up-weighting the hard one gives more loss.
+    w_easy = L.weighted_bce_loss(s, y, sample_weight=torch.tensor([1.0, 0.0]))
+    w_hard = L.weighted_bce_loss(s, y, sample_weight=torch.tensor([0.0, 1.0]))
+    assert float(w_hard) > float(w_easy)
+    assert abs(float(w_easy) - float(per[0])) < 1e-5   # picks out idx0's loss
+    assert abs(float(w_hard) - float(per[1])) < 1e-5   # picks out idx1's loss
 
 
 def test_masked_mlm_loss_ignores_unmasked():
