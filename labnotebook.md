@@ -564,3 +564,95 @@ annotation goes through the `mcp-protein-annotation` connector instead.
 to a persistent reference location; sweep durable scratch products
 (`genomespot_predictions_r232.tsv`, parsed SignalP secretome) to persistent
 storage; leave `chunk_*` intermediate trees in scratch.
+
+## SignalP merge → master secretome (job 1151569)
+
+The 10 SignalP chunks (job 1149978) were merged into one secretome table +
+mature-chain FASTA by `scripts/merge_signalp_chunks.py` (stdlib-only, SLURM job
+1151569, `--mature`).
+
+| metric | value |
+|---|---|
+| proteins scanned | 17,603,649 |
+| secreted written (class ≠ OTHER) | **1,985,508** (11.3%) |
+| genomes | 7,268 |
+| by class | SP 1,270,289 · LIPO 570,012 · TAT 78,884 · PILIN 49,691 · TATLIPO 16,689 |
+
+Outputs in `IS1111/eptrans/`: `secreted_proteins_r232.tsv` (12 cols, 221 MB),
+`secreted_proteins_r232.faa` (mature chains, headers `GENOME~PROTID class=… anchoring=…`, 865 MB).
+
+## Stage 07 — mmseqs clustering for leakage-controlled splits (job 1151585)
+
+`mmseqs easy-cluster` at **50% identity / 80% coverage** (cov-mode 0) on the
+secreted mature chains → cluster map used as the split grouping (no homolog
+leaks across train/val/test).
+
+| metric | value |
+|---|---|
+| input proteins | 1,985,508 |
+| clusters | 1,253,362 |
+| redundancy | 1.58 members/cluster (1.00M singletons, max 987) |
+
+Output: `secreted_clusters_r232_cluster.tsv` (`cluster_rep<TAB>member`, 156 MB).
+
+## Stage 06 (production) — cluster-level labeled dataset
+
+`06_assemble_dataset.py` in cluster regime: split on **clusters** (drop the
+genome union-find; clusters already co-locate matched orthologs). Per-protein
+`label_confidence` (high/medium/none) retained for training-time weighting.
+
+| metric | value |
+|---|---|
+| proteins | 1,985,508 |
+| split | train 1,590,716 · val 198,322 · test 196,470 |
+| derived ortholog pairs (`L_pair`) | **90,984**, 100% same-split by construction |
+| pairs by class | halophile 63,846 · thermophile 15,604 · alkaliphile 6,314 · acidophile 5,051 · hyperthermophile 169 |
+| extremophile / mesophile proteins | 1,044,442 / 941,066 |
+
+Outputs: `results/labeled_dataset_r232_clustered.parquet` (18 cols),
+`_protein_pairs.tsv` (side-car index for the pairwise margin loss).
+
+## Modeling — design + training scaffold
+
+Full design in `docs/modeling_design.md`. Goal: input an enzyme, output the same
+activity on a more extremophilic scaffold. Two-stage, per-phenotype design
+(§11): **one shared LoRA-adapted ESM-2 3B backbone** (label-agnostic MLM domain
+adaptation) → **5 per-phenotype classifier heads** (thermophile,
+hyperthermophile, acidophile, alkaliphile, halophile), each vs matched
+mesophiles.
+
+`src/eptrans/modeling/` (env `eptrans-ml`: torch / transformers 5.13 / peft 0.19):
+- **`masking.py`** — §13 conservation-weighted mask `(1−c)^γ`; active-site freeze
+  = γ→∞ limit; **coupling-aware masking** (span + contact-pair via ESM-2's contact
+  head) so disulfides/salt-bridges/local structure are masked jointly.
+- **`losses.py`** — §12 confidence-weighted masked CE (+ KL guard); weighted/focal
+  BCE; matched-pair margin; `L_cls = L_BCE + λ·L_pair`.
+- **`model.py`** — LoRA ESM-2 3B, full-attention targets (q/k/v + attention-output
+  dense), rank 32 / α 64; mean-pool classifier head.
+- **`data.py`** — FASTA join by `tagged_id`; MLM / classifier / pair datasets;
+  negative-sampling cap (3× positives); sliding-window truncation guard
+  (65,199 chains > 1022, max 30,084).
+- **`train.py`** — MLM (bf16 autocast, length-bucket batching, early-stop on val
+  pseudo-perplexity) + classifier (model-select on val AUPRC, pair co-loading).
+
+CLI `scripts/08_train_backbone.py` (mlm | classifier), SLURM
+`scripts/slurm/08_train_backbone.sbatch`. 27 modeling + 72 pipeline tests pass.
+
+## Stage-1 MLM launch (job 1151972)
+
+Cluster-stratified subsample (`scripts/09_subsample_mlm.py`): dedupe to one
+representative per cluster, then **400k train + 20k fixed val**. Domain
+adaptation only needs the dominant distributional shift, which a rank-32 LoRA
+extracts from a de-redundant fraction of the 1.59M corpus (≈4–5 h/epoch on one
+H200 vs ~18 h for the full set). All 420k join cleanly to the mature FASTA;
+median mature length 269 aa.
+
+Config: ESM-2 3B, LoRA rank 32 / α 64, bf16, 3 epochs, keep best-by-val-PPL,
+gpu:1 on `gpu_h200`. ESM-2 3B weights (11 GB) pre-staged to `$HF_HOME` on the
+login node. Submitted as **job 1151972**.
+
+## Background master-secretome fill (job 1151578)
+
+190-task array (`0-189%5`, ~1014 genomes/task) applying SignalP to the remaining
+192,652 GTDB representatives, building a whole-GTDB master secretome over ~1–2
+months without crowding foreground work. Resumable (per-chunk `.done` sentinel).
