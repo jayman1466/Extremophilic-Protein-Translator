@@ -525,8 +525,27 @@ trainable, bf16 + gradient checkpointing → single-GPU. Config block `modeling:
 2. `sbatch 08_train_backbone.sbatch classifier <phenotype>` — per-phenotype head
    branched from the MLM adapter → `models/clf_<phenotype>/`.
 
-**Conservation (γ) fallback:** with no MSA column yet, conservation defaults to
-zeros → uniform masking at `mask_rate` (γ inert). Wiring the Rate4Site/MSA
-conservation vector per protein (§13 Stage B) and the in-batch matched-pair
-margin sampler (currently the classifier's pairwise term is scaffolded but fed
-None per-batch) are the two remaining connections before production training.
+**Conservation (γ) is an inference-time object, not a training input.** Training
+(MLM + classifier) is enzyme-agnostic: it pools the whole 1.99M-protein
+secretome across thousands of families, so there is no single MSA and no
+per-position conservation to apply. Domain-adaptive MLM therefore uses **uniform
+BERT masking** (conservation defaults to zeros → `(1-c)^γ` collapses to uniform,
+γ inert) — this is the correct behaviour for training, not a stub. The `(1-c)^γ`
+machinery in `masking.py` is shared, but its real caller is the **generation
+loop**: given one query enzyme, build an MSA of its homologs (MMseqs2 vs
+UniRef30, §10), compute per-position conservation / Rate4Site rate, and mask
+that enzyme's variable positions while freezing conserved/active-site ones
+(§13 Stage A/B). So §13 belongs to per-enzyme design, downstream of the
+enzyme-agnostic backbone trained here.
+
+**Matched-pair co-loading (wired).** The split needs nothing beyond the pooled
+train/val/test set + label column — clustering already co-locates each matched
+pair in one fold (verified 100% same-split). The `_protein_pairs.tsv` table is a
+**side-car index**, not a structural part of the split: `build_pair_dataset`
+filters it to (phenotype class, split) and `train_classifier(pair_ds=...)` runs
+a pair loader in lockstep (cycling, since pairs are fewer than singletons),
+scoring both members through the same backbone+head and adding
+`max(0, margin - (s_ext - s_out))`. λ=0 recovers pure pointwise BCE.
+
+Both §13-Stage-B and the pairwise term are now connected; MSA-conservation
+per query enzyme is deferred to the generation module (a separate build).

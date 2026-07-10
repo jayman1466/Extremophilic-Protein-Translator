@@ -28,6 +28,8 @@ __all__ = [
     "phenotype_binary_labels",
     "build_mlm_dataset",
     "build_classifier_dataset",
+    "build_pair_dataset",
+    "collate_pairs",
 ]
 
 # 20 standard aa tokens used for BERT random-replacement (ids resolved via the
@@ -194,3 +196,73 @@ def build_classifier_dataset(labeled_with_seq: pd.DataFrame, tokenizer, phenotyp
                     "tagged_id": row["tagged_id"]}
 
     return ClassifierDataset()
+
+
+def build_pair_dataset(labeled_with_seq: pd.DataFrame, pairs: pd.DataFrame, tokenizer,
+                       phenotype: str, split: str, max_len: int = 1022):
+    """Torch Dataset of matched (extremophile, outgroup) protein pairs for L_pair.
+
+    Restricts the stage-06 protein-pairs table to (a) this phenotype's `class`
+    and (b) pairs whose BOTH members fall in ``split`` (they co-cluster, so this
+    is essentially all of them — the ``ext_split``/``out_split`` columns make it
+    explicit). Each item returns the two tokenized proteins so the training loop
+    scores them and applies the margin term ``max(0, δ - (s_ext - s_out))``.
+
+    The split is unchanged by this — pairs are a side-car index used only to
+    co-load matched proteins into a batch (answering: pairing need not be
+    "retained" in the split itself; the pooled split + this index suffice).
+    """
+    import torch
+    from torch.utils.data import Dataset
+
+    seqmap = dict(zip(labeled_with_seq["tagged_id"].astype(str),
+                      labeled_with_seq["sequence"]))
+    p = pairs.copy()
+    if "class" in p.columns:
+        p = p[p["class"] == phenotype]
+    if "ext_split" in p.columns and "out_split" in p.columns:
+        p = p[(p["ext_split"] == split) & (p["out_split"] == split)]
+    # both members must have a sequence
+    p = p[p["ext_id"].astype(str).isin(seqmap) & p["outgroup_id"].astype(str).isin(seqmap)]
+    p = p.reset_index(drop=True)
+
+    def _tok(seq):
+        enc = tokenizer(seq[:max_len], return_tensors="pt", truncation=True,
+                        max_length=max_len + 2)
+        return enc["input_ids"][0], enc["attention_mask"][0]
+
+    class PairDataset(Dataset):
+        def __init__(self):
+            self.p = p
+
+        def __len__(self):
+            return len(self.p)
+
+        def __getitem__(self, i):
+            row = self.p.iloc[i]
+            ei, ea = _tok(seqmap[str(row["ext_id"])])
+            oi, oa = _tok(seqmap[str(row["outgroup_id"])])
+            return {"ext_input_ids": ei, "ext_attention_mask": ea,
+                    "out_input_ids": oi, "out_attention_mask": oa}
+
+    return PairDataset()
+
+
+def collate_pairs(batch, pad_id: int):
+    """Pad a batch of pair items on both the ext and out sides independently."""
+    import torch
+
+    def _pad(key_ids, key_attn):
+        maxlen = max(x[key_ids].shape[0] for x in batch)
+        ids = torch.stack([
+            torch.cat([x[key_ids], torch.full((maxlen - x[key_ids].shape[0],), pad_id,
+                                              dtype=x[key_ids].dtype)]) for x in batch])
+        attn = torch.stack([
+            torch.cat([x[key_attn], torch.zeros(maxlen - x[key_attn].shape[0],
+                                               dtype=x[key_attn].dtype)]) for x in batch])
+        return ids, attn
+
+    ei, ea = _pad("ext_input_ids", "ext_attention_mask")
+    oi, oa = _pad("out_input_ids", "out_attention_mask")
+    return {"ext_input_ids": ei, "ext_attention_mask": ea,
+            "out_input_ids": oi, "out_attention_mask": oa}

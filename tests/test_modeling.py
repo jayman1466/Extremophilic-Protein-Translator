@@ -144,3 +144,37 @@ def test_classifier_loss_combines_terms():
                                    lam=1.0, margin=1.0)
     # total == bce + 1.0*pair
     assert abs(float(tot) - (parts["bce"] + parts["pair"])) < 1e-5
+
+
+# ---- matched-pair co-loading (data plumbing, needs a tokenizer via transformers) ----
+
+def test_build_pair_dataset_filters_by_class_and_split():
+    pd_mod = pytest.importorskip("pandas")
+    pytest.importorskip("transformers")
+    import tempfile
+    from transformers import EsmTokenizer
+    from eptrans.modeling.data import build_pair_dataset, collate_pairs
+    vocab = "<cls> <pad> <eos> <unk> L A G V S E R T I D P K Q N F Y M H W C X B U Z O . - <null_1> <mask>".split()
+    td = tempfile.mkdtemp(); open(f"{td}/vocab.txt", "w").write("\n".join(vocab))
+    tok = EsmTokenizer(f"{td}/vocab.txt")
+    labeled = pd_mod.DataFrame({
+        "tagged_id": ["E0~p", "M0~p", "E1~p", "M1~p", "E2~p", "M2~p"],
+        "sequence": ["LAGV", "SERT", "IDPK", "QNFY", "MHWC", "LAGA"],
+    })
+    pairs = pd_mod.DataFrame({
+        "class": ["thermophile", "thermophile", "halophile"],
+        "ext_id": ["E0~p", "E1~p", "E2~p"],
+        "outgroup_id": ["M0~p", "M1~p", "M2~p"],
+        "ext_split": ["train", "val", "train"],
+        "out_split": ["train", "val", "train"],
+    })
+    # thermophile + train -> only the E0/M0 pair (E1/M1 is val, E2/M2 is halophile)
+    ds = build_pair_dataset(labeled, pairs, tok, "thermophile", "train", max_len=32)
+    assert len(ds) == 1
+    item = ds[0]
+    assert set(item) == {"ext_input_ids", "ext_attention_mask",
+                         "out_input_ids", "out_attention_mask"}
+    batch = collate_pairs([ds[0]], pad_id=tok.pad_token_id)
+    # ext and out padded independently; batch dim 1
+    assert batch["ext_input_ids"].shape[0] == 1
+    assert batch["out_input_ids"].shape[0] == 1

@@ -119,24 +119,34 @@ def _pseudo_perplexity(model, tokenizer, ds, device, batch_size):
 
 
 def train_classifier(backbone, head, tokenizer, train_ds, val_ds=None, *,
-                     pairs=None, epochs: int = 5, lr_head: float = 1e-3,
-                     lr_adapter: float = 1e-5, batch_size: int = 16, lam: float = 1.0,
+                     pair_ds=None, epochs: int = 5, lr_head: float = 1e-3,
+                     lr_adapter: float = 1e-5, batch_size: int = 16,
+                     pair_batch_size: int | None = None, lam: float = 1.0,
                      margin: float = 1.0, pos_weight: float | None = None,
                      device: str = "cpu", out_dir: str | None = None,
                      max_steps: int | None = None):
     """Per-phenotype classifier head on the adapted backbone (§12 Loss 2).
 
-    ``pairs``: optional dict mapping tagged_id -> tagged_id for the matched
-    outgroup, used to build the pairwise margin term from ids present in a batch.
-    Returns history with val AUPRC.
+    ``pair_ds``: optional matched-pair Dataset (build_pair_dataset). When given,
+    a pair loader runs in lockstep with the main loader (cycling if shorter);
+    each step scores both members through the same backbone+head and adds the
+    margin term ``max(0, margin - (s_ext - s_out))``. When None, only the
+    pointwise BCE is used. Returns history with val AUPRC.
     """
+    import itertools
     import torch
     from torch.utils.data import DataLoader
     from .losses import classifier_loss
+    from .data import collate_pairs
 
     pad_id = tokenizer.pad_token_id
     dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                     collate_fn=lambda b: collate_pad(b, pad_id))
+    pair_iter = None
+    if pair_ds is not None and len(pair_ds) > 0:
+        pdl = DataLoader(pair_ds, batch_size=(pair_batch_size or batch_size), shuffle=True,
+                         collate_fn=lambda b: collate_pairs(b, pad_id))
+        pair_iter = itertools.cycle(pdl)  # cycle: pairs usually fewer than singles
     backbone.to(device); head.to(device)
     params = [{"params": [p for p in backbone.parameters() if p.requires_grad], "lr": lr_adapter},
               {"params": head.parameters(), "lr": lr_head}]
@@ -152,7 +162,14 @@ def train_classifier(backbone, head, tokenizer, train_ds, val_ds=None, *,
             batch = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in batch.items()}
             h = _encode(backbone, batch["input_ids"], batch["attention_mask"])
             s = head(h, batch["attention_mask"])
-            pe = po = None  # (pair term wiring: caller supplies aligned batches in production)
+            pe = po = None
+            if pair_iter is not None:
+                pb = next(pair_iter)
+                pb = {k: v.to(device) for k, v in pb.items()}
+                pe = head(_encode(backbone, pb["ext_input_ids"], pb["ext_attention_mask"]),
+                          pb["ext_attention_mask"])
+                po = head(_encode(backbone, pb["out_input_ids"], pb["out_attention_mask"]),
+                          pb["out_attention_mask"])
             loss, parts = classifier_loss(s, batch["label"], sample_weight=batch.get("weight"),
                                           pos_weight=pw, pair_ext=pe, pair_out=po,
                                           lam=lam, margin=margin)

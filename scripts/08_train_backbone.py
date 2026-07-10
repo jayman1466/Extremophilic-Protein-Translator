@@ -100,21 +100,24 @@ def main():
         print(f"[08] done; val_ppl trace: {hist['val_ppl']}")
     else:
         from eptrans.modeling.model import build_lora_backbone, build_classifier_head
-        from eptrans.modeling.data import build_classifier_dataset
+        from eptrans.modeling.data import build_classifier_dataset, build_pair_dataset
         from eptrans.modeling.train import train_classifier
         model, tok, hidden = build_lora_backbone(
             size=args.backbone_size, lora_rank=args.lora_rank, lora_alpha=args.lora_alpha,
             for_mlm=False)
         if args.mlm_adapter:
-            from peft import PeftModel
             print(f"[08] loading MLM adapter weights from {args.mlm_adapter}")
             model.load_adapter(args.mlm_adapter, adapter_name="mlm")
         head = build_classifier_head(hidden)
         pairs = pd.read_csv(args.pairs, sep="\t") if args.pairs else None
         tr = build_classifier_dataset(df, tok, args.phenotype, "train", max_len=args.max_len)
         va = build_classifier_dataset(df, tok, args.phenotype, "val", max_len=args.max_len)
-        print(f"[08] classifier[{args.phenotype}]: train {len(tr):,} / val {len(va):,}")
-        hist = train_classifier(model, head, tok, tr, va, pairs=pairs, epochs=args.epochs,
+        pair_tr = (build_pair_dataset(df, pairs, tok, args.phenotype, "train",
+                                      max_len=args.max_len) if pairs is not None else None)
+        n_pairs = len(pair_tr) if pair_tr is not None else 0
+        print(f"[08] classifier[{args.phenotype}]: train {len(tr):,} / val {len(va):,} "
+              f"| matched pairs {n_pairs:,}")
+        hist = train_classifier(model, head, tok, tr, va, pair_ds=pair_tr, epochs=args.epochs,
                                 lr_head=args.lr_head, lr_adapter=args.lr_adapter,
                                 batch_size=args.batch_size, lam=args.lam, margin=args.margin,
                                 pos_weight=args.pos_weight, device=args.device,
