@@ -165,3 +165,28 @@ slurm:
   partition_cpu: "standard"
   partition_highmem: "memory"
   partition_gpu: "gpu"
+
+# --------------------------------------------------------------------------
+# Modeling (design doc Section 11-13): shared LoRA-adapted ESM-2 backbone,
+# two heads, §12 losses, §13 conservation-weighted masking.
+# --------------------------------------------------------------------------
+modeling:
+  backbone_size: "3B"              # ESM-2 t36 (chosen); 35M/150M for CPU smoke-tests
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  max_len: 1022                    # ESM-2 context; longer mature chains truncated
+  mlm:
+    epochs: 3
+    lr: 1.0e-4
+    mask_rate: 0.15                # BERT 80/10/10
+    gamma: 1.0                     # conservation-mask exponent (uniform until MSA available)
+    beta_kl: 0.0                   # forgetting-guard off by default
+  classifier:
+    epochs: 5
+    lr_head: 1.0e-3
+    lr_adapter: 1.0e-5
+    lam: 1.0                       # weight on the matched-pair margin term
+    margin: 1.0
+    select_metric: "auprc"         # model-select / early-stop on val AUPRC
+  confidence_weights: { high: 1.0, medium: 0.5, none: 1.0, low: 0.25 }

@@ -501,3 +501,32 @@ DROP the genome union. Instead:
 
 So the genome pairing's role **changes** between regimes: a split constraint in
 the interim, a *filter for building protein-level pairs* in production.
+
+---
+
+## 15. Training scaffold (implemented)
+
+Section 11-13 are now code under `src/eptrans/modeling/` + `scripts/08_train_backbone.py`.
+
+| module | contents | tested |
+|---|---|---|
+| `masking.py` | §13 conservation-weighted mask `(1-c_i)^γ`, active-site freeze = γ→∞ hard-zero, BERT 80/10/10 assignment | 8 tests (weightless) |
+| `losses.py` | §12 L1 confidence-weighted masked CE + KL guard; L2 weighted/focal BCE + matched-pair margin; `L_cls = L_BCE + λ·L_pair` | 7 tests (torch) |
+| `model.py` | LoRA-wrapped ESM-2 backbone (`query`/`value` targets, base frozen), mean-pool classifier head; `ESM2_CHECKPOINTS` (35M→3B) | forward/backward verified |
+| `data.py` | join sequences from mature-chain FASTA by `tagged_id`; MLM dataset (train-only), per-phenotype classifier dataset, conservation-mask integration | join verified |
+| `train.py` | `train_mlm` (early-stop val pseudo-perplexity), `train_classifier` (model-select val AUPRC), padding collate | CPU end-to-end smoke-test |
+
+**Backbone: ESM-2 3B** (`facebook/esm2_t36_3B_UR50D`), LoRA rank 16 / α 32, ~0.1%
+trainable, bf16 + gradient checkpointing → single-GPU. Config block `modeling:`.
+
+**Run (biotite GPU, `scripts/slurm/08_train_backbone.sbatch`):**
+1. `sbatch 08_train_backbone.sbatch mlm` — domain-adaptive MLM on train-only
+   clusters → `models/mlm_adapt/mlm_adapter_best`.
+2. `sbatch 08_train_backbone.sbatch classifier <phenotype>` — per-phenotype head
+   branched from the MLM adapter → `models/clf_<phenotype>/`.
+
+**Conservation (γ) fallback:** with no MSA column yet, conservation defaults to
+zeros → uniform masking at `mask_rate` (γ inert). Wiring the Rate4Site/MSA
+conservation vector per protein (§13 Stage B) and the in-batch matched-pair
+margin sampler (currently the classifier's pairwise term is scaffolded but fed
+None per-batch) are the two remaining connections before production training.
