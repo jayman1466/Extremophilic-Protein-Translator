@@ -33,6 +33,10 @@ __all__ = [
     "mask_weights",
     "sample_mask_positions",
     "bert_mask_assignment",
+    "contact_pairs_from_map",
+    "make_span_units",
+    "build_mask_units",
+    "sample_mask_units",
 ]
 
 
@@ -141,3 +145,135 @@ def bert_mask_assignment(
         keep[idx[u >= p_mask + p_random]] = True
     return {"loss": masked, "replace_mask": replace_mask,
             "replace_random": replace_random, "keep": keep}
+
+
+# ---------------------------------------------------------------------------
+# Coupling-aware masking (design doc Section 15 workaround #1).
+#
+# i.i.d. masking rarely masks BOTH partners of a coupled feature (disulfide,
+# salt bridge, local secondary structure) at once, so the model reconstructs one
+# partner by copying the visible one and never adapts the JOINT distribution.
+# Coupling-aware masking groups coupled positions into *units* and masks each
+# unit as a whole, forcing joint reconstruction. Units come from:
+#   - contact-pair mode: index pairs from ESM-2's own contact head (residues
+#     that co-vary / are spatially close — where disulfides & salt bridges live);
+#   - span mode: contiguous blocks (local secondary-structure elements).
+# Everything here is numpy / framework-light and unit-testable without a GPU.
+# ---------------------------------------------------------------------------
+
+
+def contact_pairs_from_map(contacts: np.ndarray, threshold: float = 0.5,
+                           min_sep: int = 6, top_k: int | None = None) -> list[tuple[int, int]]:
+    """Extract coupled residue pairs from a contact-probability matrix.
+
+    ``contacts`` is an ``L x L`` symmetric probability matrix (e.g. ESM-2's
+    ``predict_contacts`` output, residue coordinates). A pair ``(i, j)`` with
+    ``i < j`` is kept when ``contacts[i, j] >= threshold`` and ``j - i >=
+    min_sep`` (skip trivial local i,i+1 contacts — those are covered by span
+    mode). If ``top_k`` is given, keep only the ``top_k`` highest-probability
+    pairs. Returned indices are in the SAME coordinate system as ``contacts``
+    (residue coords); the caller offsets for special tokens.
+    """
+    c = np.asarray(contacts, dtype=float)
+    L = c.shape[0]
+    iu, ju = np.triu_indices(L, k=max(1, min_sep))
+    probs = c[iu, ju]
+    keep = probs >= threshold
+    iu, ju, probs = iu[keep], ju[keep], probs[keep]
+    if top_k is not None and len(probs) > top_k:
+        order = np.argsort(probs)[::-1][:top_k]
+        iu, ju = iu[order], ju[order]
+    return [(int(i), int(j)) for i, j in zip(iu, ju)]
+
+
+def make_span_units(L: int, span_len: int = 3, offset: int = 0) -> list[list[int]]:
+    """Partition positions ``[offset, L)`` into consecutive blocks of ``span_len``.
+
+    Each block is a masking unit (span mode). ``offset`` skips a leading special
+    token (CLS) so blocks align to residues; the trailing special token (EOS) is
+    handled by ``build_mask_units`` excluding it.
+    """
+    if span_len < 1:
+        raise ValueError("span_len must be >= 1")
+    return [list(range(s, min(s + span_len, L))) for s in range(offset, L, span_len)]
+
+
+def build_mask_units(L: int, special: np.ndarray | None = None,
+                     frozen: np.ndarray | None = None,
+                     contact_pairs=None, spans=None) -> list[list[int]]:
+    """Build the set of maskable units covering all non-excluded positions.
+
+    Coupled groups (``contact_pairs`` and/or ``spans``, each an iterable of
+    index iterables) are formed FIRST; a group contributes a unit only for its
+    members that are neither excluded (frozen/special) nor already assigned, and
+    only if >= 2 such members remain (a lone survivor is not a "couple"). Every
+    remaining maskable position becomes its own singleton unit. A position lands
+    in at most one unit.
+    """
+    excluded = np.zeros(L, dtype=bool)
+    if special is not None:
+        excluded |= np.asarray(special, dtype=bool)
+    if frozen is not None:
+        excluded |= np.asarray(frozen, dtype=bool)
+    assigned = np.zeros(L, dtype=bool)
+    units: list[list[int]] = []
+
+    groups = list(contact_pairs or []) + list(spans or [])
+    for grp in groups:
+        members = [int(p) for p in grp if 0 <= int(p) < L and not excluded[int(p)]
+                   and not assigned[int(p)]]
+        if len(members) >= 2:
+            for p in members:
+                assigned[p] = True
+            units.append(members)
+    for p in range(L):
+        if not excluded[p] and not assigned[p]:
+            assigned[p] = True
+            units.append([p])
+    return units
+
+
+def sample_mask_units(conservation: np.ndarray, units: list[list[int]],
+                      mask_rate: float = 0.15, gamma: float = 1.0,
+                      rng: np.random.Generator | None = None) -> np.ndarray:
+    """Mask whole units until ~``mask_rate`` of maskable positions are covered.
+
+    Units are drawn WITHOUT replacement with probability proportional to their
+    mean conservation-derived weight (``mean_i (1 - c_i)^gamma`` over members),
+    so a coupled pair/span is masked as a unit and variable regions are still
+    preferred (Section 13 prior carries through). The position budget is
+    ``round(mask_rate * n_maskable_positions)``; selection stops once the budget
+    is reached (whole final unit included, so slight overshoot is possible).
+
+    Returns a boolean array (length L), True where masked.
+    """
+    rng = rng or np.random.default_rng()
+    c = np.clip(np.asarray(conservation, dtype=float), 0.0, 1.0)
+    posw = np.power(1.0 - c, gamma)
+    L = len(c)
+    out = np.zeros(L, dtype=bool)
+    if not units:
+        return out
+    uw = np.array([posw[u].mean() if len(u) else 0.0 for u in units])
+    n_maskable = sum(len(u) for u in units)
+    budget = int(round(mask_rate * n_maskable))
+    if budget <= 0 or uw.sum() <= 0:
+        return out
+    # weighted sampling WITHOUT replacement via the exponential race
+    # (Efraimidis-Spirakis): key_i = -ln(U_i)/w_i, ascending order. Zero-weight
+    # units get key=+inf and sort last, so fully-conserved regions are only ever
+    # masked if the budget exceeds all positive-weight positions.
+    u_rand = rng.random(len(units))
+    with np.errstate(divide="ignore"):
+        keys = -np.log(u_rand) / uw
+    order = np.argsort(keys)
+    n = 0
+    for idx in order:
+        u = units[idx]
+        if uw[idx] <= 0 and n > 0:
+            break  # don't spend budget on zero-weight units unless nothing else
+        out[u] = True
+        n += len(u)
+        if n >= budget:
+            break
+    return out

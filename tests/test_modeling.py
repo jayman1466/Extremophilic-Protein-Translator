@@ -178,3 +178,91 @@ def test_build_pair_dataset_filters_by_class_and_split():
     # ext and out padded independently; batch dim 1
     assert batch["ext_input_ids"].shape[0] == 1
     assert batch["out_input_ids"].shape[0] == 1
+
+
+# ---- coupling-aware masking (Section 15 workaround #1) ----
+
+def test_contact_pairs_threshold_and_minsep():
+    L = 10
+    c = np.zeros((L, L))
+    c[0, 8] = c[8, 0] = 0.9   # long-range, above thresh -> kept
+    c[0, 2] = c[2, 0] = 0.9   # sep 2 < min_sep 6 -> dropped
+    c[1, 9] = c[9, 1] = 0.3   # below thresh -> dropped
+    pairs = masking.contact_pairs_from_map(c, threshold=0.5, min_sep=6)
+    assert pairs == [(0, 8)]
+
+
+def test_contact_pairs_top_k():
+    L = 20
+    c = np.zeros((L, L))
+    for k, (i, j, p) in enumerate([(0, 10, 0.9), (1, 11, 0.8), (2, 12, 0.7)]):
+        c[i, j] = c[j, i] = p
+    pairs = masking.contact_pairs_from_map(c, threshold=0.5, min_sep=6, top_k=2)
+    assert set(pairs) == {(0, 10), (1, 11)}  # two highest
+
+
+def test_make_span_units_partitions():
+    units = masking.make_span_units(10, span_len=3, offset=1)
+    flat = [p for u in units for p in u]
+    assert flat == list(range(1, 10))  # covers 1..9, no gaps/dupes
+    assert units[0] == [1, 2, 3]
+
+
+def test_build_mask_units_couples_first_then_singletons():
+    L = 12
+    special = np.zeros(L, dtype=bool); special[0] = special[-1] = True
+    pairs = [(2, 9)]  # one coupled pair
+    units = masking.build_mask_units(L, special=special, contact_pairs=pairs)
+    assert [2, 9] in units
+    # every non-special position assigned exactly once
+    flat = sorted(p for u in units for p in u)
+    assert flat == list(range(1, 11))
+
+
+def test_build_mask_units_respects_frozen_and_lone_survivor():
+    L = 10
+    frozen = np.zeros(L, dtype=bool); frozen[5] = True
+    # pair (5,8): 5 is frozen -> only 8 survives -> not a couple, becomes singleton
+    units = masking.build_mask_units(L, frozen=frozen, contact_pairs=[(5, 8)])
+    assert [5, 8] not in units and [8] in units
+    assert not any(5 in u for u in units)  # frozen never masked
+
+
+def test_sample_mask_units_masks_whole_units():
+    L = 30
+    units = [[i, i + 15] for i in range(3)] + [[j] for j in range(6, 15)]
+    cons = np.zeros(L)
+    m = masking.sample_mask_units(cons, units, mask_rate=0.3,
+                                  rng=np.random.default_rng(0))
+    # any masked coupled unit is masked as a whole
+    for u in units:
+        masked_members = [p for p in u if m[p]]
+        assert len(masked_members) in (0, len(u))
+
+
+def test_sample_mask_units_prefers_variable_regions():
+    L = 40
+    units = [[i] for i in range(L)]
+    cons = np.zeros(L); cons[:20] = 1.0  # first half fully conserved
+    m = masking.sample_mask_units(cons, units, mask_rate=0.25, gamma=1.0,
+                                  rng=np.random.default_rng(1))
+    assert m[20:].sum() > m[:20].sum()  # variable half masked more
+
+
+# ---- truncation guard ----
+
+def test_sliding_windows_short_seq_single_window():
+    from eptrans.modeling.data import sliding_windows
+    w = sliding_windows("ACDEFG", max_len=10)
+    assert w == [(0, "ACDEFG")]
+
+
+def test_sliding_windows_long_seq_overlaps_and_covers():
+    from eptrans.modeling.data import sliding_windows
+    seq = "".join("ACDEFGHIKL"[i % 10] for i in range(50))
+    w = sliding_windows(seq, max_len=20, overlap=5)
+    # windows cover the whole sequence; consecutive windows overlap
+    assert w[0][0] == 0
+    assert w[-1][0] + len(w[-1][1]) == len(seq)  # last window reaches the end
+    starts = [s for s, _ in w]
+    assert all(starts[i+1] - starts[i] == 15 for i in range(len(starts)-1))  # step = 20-5

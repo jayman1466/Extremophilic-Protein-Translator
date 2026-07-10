@@ -65,6 +65,12 @@ def main():
             p.add_argument("--mask-rate", type=float, default=0.15)
             p.add_argument("--gamma", type=float, default=1.0,
                            help="conservation-mask exponent (Section 13); uniform if no MSA")
+            p.add_argument("--coupling-mode", default=None,
+                           choices=[None, "span", "contact", "both"],
+                           help="mask coupled positions jointly (Section 15 #1)")
+            p.add_argument("--span-len", type=int, default=3)
+            p.add_argument("--contact-threshold", type=float, default=0.5)
+            p.add_argument("--contact-min-sep", type=int, default=6)
             p.add_argument("--beta-kl", type=float, default=0.0)
         else:
             p.add_argument("--phenotype", required=True)
@@ -77,6 +83,10 @@ def main():
             p.add_argument("--lam", type=float, default=1.0)
             p.add_argument("--margin", type=float, default=1.0)
             p.add_argument("--pos-weight", type=float, default=None)
+        p.add_argument("--full-attention", action="store_true", default=True,
+                       help="LoRA on query/key/value + attention-output dense (Section 15 #3)")
+        p.add_argument("--qv-only", dest="full_attention", action="store_false",
+                       help="lighter LoRA: query/value only")
     args = ap.parse_args()
 
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
@@ -88,11 +98,18 @@ def main():
         from eptrans.modeling.train import train_mlm
         model, tok, hidden = build_lora_backbone(
             size=args.backbone_size, lora_rank=args.lora_rank, lora_alpha=args.lora_alpha,
-            for_mlm=True)
+            for_mlm=True, full_attention=args.full_attention)
+        contact_model = model if args.coupling_mode in ("contact", "both") else None
         tr = build_mlm_dataset(df, tok, "train", max_len=args.max_len,
-                               gamma=args.gamma, mask_rate=args.mask_rate)
+                               gamma=args.gamma, mask_rate=args.mask_rate,
+                               coupling_mode=args.coupling_mode, span_len=args.span_len,
+                               contact_threshold=args.contact_threshold,
+                               contact_min_sep=args.contact_min_sep, contact_model=contact_model)
         va = build_mlm_dataset(df, tok, "val", max_len=args.max_len,
-                               gamma=args.gamma, mask_rate=args.mask_rate)
+                               gamma=args.gamma, mask_rate=args.mask_rate,
+                               coupling_mode=args.coupling_mode, span_len=args.span_len,
+                               contact_threshold=args.contact_threshold,
+                               contact_min_sep=args.contact_min_sep, contact_model=contact_model)
         print(f"[08] MLM: train {len(tr):,} / val {len(va):,} (train-only clusters)")
         hist = train_mlm(model, tok, tr, va, epochs=args.epochs, lr=args.lr,
                          batch_size=args.batch_size, beta_kl=args.beta_kl,
@@ -104,7 +121,7 @@ def main():
         from eptrans.modeling.train import train_classifier
         model, tok, hidden = build_lora_backbone(
             size=args.backbone_size, lora_rank=args.lora_rank, lora_alpha=args.lora_alpha,
-            for_mlm=False)
+            for_mlm=False, full_attention=args.full_attention)
         if args.mlm_adapter:
             print(f"[08] loading MLM adapter weights from {args.mlm_adapter}")
             model.load_adapter(args.mlm_adapter, adapter_name="mlm")

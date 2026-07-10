@@ -41,9 +41,22 @@ ESM2_CHECKPOINTS = {
 DEFAULT_BACKBONE = "3B"
 
 
-def lora_target_modules() -> list[str]:
-    """ESM-2 attention projection module names LoRA adapts (q_proj / v_proj)."""
-    return ["query", "value"]  # HF EsmSelfAttention uses .query/.key/.value
+def lora_target_modules(full_attention: bool = True) -> list[str]:
+    """ESM-2 attention module names LoRA adapts.
+
+    Pairwise residue interactions (disulfides, salt bridges, local structure)
+    live in the attention map, so adapting the FULL attention pathway — not just
+    query/value — gives the fine-tuning room to re-route which residues attend to
+    which (design doc Section 15 workaround #3). ``full_attention=True`` (default)
+    adds ``key`` and the attention output projection ``dense``; set False for the
+    lighter q/v-only set. HF ``EsmSelfAttention`` exposes ``.query/.key/.value``
+    and ``EsmSelfOutput`` exposes ``.dense``.
+    """
+    if full_attention:
+        # "attention.output.dense" targets ONLY the attention output projection,
+        # not the two feed-forward "dense" layers (intermediate.dense/output.dense).
+        return ["query", "key", "value", "attention.output.dense"]
+    return ["query", "value"]
 
 
 def build_classifier_head(hidden_size: int, n_hidden: int = 512, dropout: float = 0.1):
@@ -75,9 +88,10 @@ def build_classifier_head(hidden_size: int, n_hidden: int = 512, dropout: float 
     return MeanPoolClassifierHead(hidden_size, n_hidden, dropout)
 
 
-def build_lora_backbone(size: str = DEFAULT_BACKBONE, lora_rank: int = 16,
-                        lora_alpha: int = 32, lora_dropout: float = 0.05,
-                        for_mlm: bool = True, gradient_checkpointing: bool = True):
+def build_lora_backbone(size: str = DEFAULT_BACKBONE, lora_rank: int = 32,
+                        lora_alpha: int = 64, lora_dropout: float = 0.05,
+                        for_mlm: bool = True, gradient_checkpointing: bool = True,
+                        full_attention: bool = True):
     """Load ESM-2 (``size``) and wrap it with a LoRA adapter (base frozen).
 
     Args:
@@ -107,7 +121,8 @@ def build_lora_backbone(size: str = DEFAULT_BACKBONE, lora_rank: int = 16,
 
     lconf = LoraConfig(
         task_type=task, r=lora_rank, lora_alpha=lora_alpha,
-        lora_dropout=lora_dropout, target_modules=lora_target_modules(),
+        lora_dropout=lora_dropout,
+        target_modules=lora_target_modules(full_attention=full_attention),
         bias="none",
     )
     model = get_peft_model(base, lconf)

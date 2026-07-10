@@ -556,3 +556,36 @@ s_out))`. λ=0 recovers pure pointwise BCE.
 
 Both §13-Stage-B and the pairwise term are now connected; MSA-conservation
 per query enzyme is deferred to the generation module (a separate build).
+
+### Multi-residue coupling (workarounds implemented)
+
+Masked-LM fine-tuning has a coupling blind spot: i.i.d. masking rarely masks
+*both* partners of a disulfide / salt bridge / secondary-structure element at
+once, so the model reconstructs one partner by copying the visible one and never
+adapts the *joint* distribution. Three training-side levers now address this
+(generation-side levers — iterative Gibbs decoding, structural aux heads, and
+MPNN carrying the geometry — belong to the not-yet-built generation module):
+
+1. **Coupling-aware masking** (`masking.py`, `build_mlm_dataset(coupling_mode=)`).
+   Positions are grouped into *units* masked as a whole:
+   - `span` — contiguous blocks of `span_len` (local secondary structure);
+   - `contact` — index pairs from ESM-2's own contact head above
+     `contact_threshold` with residue separation ≥ `contact_min_sep` (where
+     disulfides & salt bridges sit);
+   - `both` — union.
+   Units are drawn without replacement (exponential race) with probability ∝
+   mean `(1-c)^γ` over members, so the §13 conservation prior still steers
+   *which* units get masked while each coupled unit is masked jointly. Default
+   `coupling_mode: null` (uniform) — the mode is opt-in per run.
+2. **LoRA on the full attention pathway** (`lora_target_modules(full_attention=True)`,
+   default). Pairwise interactions live in the attention map, so LoRA now adapts
+   `query`/`key`/`value` **and** the attention-output projection
+   (`attention.output.dense`), not just q/v — the FFN `dense` layers are
+   explicitly excluded. Default rank bumped 16→32 (α 32→64) for coupling
+   capacity. `--qv-only` restores the lighter set.
+3. **Truncation guard** (`sliding_windows`, applied in `build_mlm_dataset`).
+   65,199 mature chains (3.3%) exceed the 1022 context and max out at 30,084 aa;
+   hard truncation drops the C-terminal tail and can orphan a long-range
+   coupled partner. Over-length chains are instead split into windows of
+   `max_len` with `overlap` (default 256) shared residues, so a pair straddling
+   a naive cut still co-occurs in at least one window.

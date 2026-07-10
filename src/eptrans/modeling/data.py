@@ -105,9 +105,57 @@ def phenotype_binary_labels(labeled: pd.DataFrame, phenotype: str,
     return y
 
 
+def sliding_windows(seq: str, max_len: int = 1022, overlap: int = 256):
+    """Split an over-length sequence into overlapping windows (truncation guard).
+
+    Hard truncation at ``max_len`` silently drops the C-terminal tail, which can
+    orphan one partner of a long-range coupled feature (a disulfide can span
+    >1022 residues). Instead, sequences longer than ``max_len`` are cut into
+    windows of ``max_len`` with ``overlap`` residues shared between consecutive
+    windows, so a coupled pair straddling a naive cut still co-occurs in at
+    least one window. Sequences within ``max_len`` return a single window.
+
+    Returns a list of ``(start, subseq)`` with 0-based residue start offsets.
+    """
+    if len(seq) <= max_len:
+        return [(0, seq)]
+    step = max(1, max_len - overlap)
+    out = []
+    start = 0
+    while start < len(seq):
+        out.append((start, seq[start:start + max_len]))
+        if start + max_len >= len(seq):
+            break
+        start += step
+    return out
+
+
+def _predict_contacts(model, tokenizer, seq: str):
+    """Residue x residue contact probabilities from an ESM model's contact head.
+
+    ``model`` is a fair-esm ESM-2 (has ``.predict_contacts``) OR any object
+    exposing ``predict_contacts(tokens)`` returning an ``L x L`` map for the
+    residue coordinates (special tokens already stripped). Returns a numpy
+    array, or None if the model can't produce contacts.
+    """
+    import numpy as np
+    import torch
+    try:
+        enc = tokenizer(seq, return_tensors="pt", truncation=True)
+        with torch.no_grad():
+            out = model.predict_contacts(enc["input_ids"])
+        arr = out[0] if hasattr(out, "__getitem__") else out
+        return np.asarray(arr.detach().cpu() if hasattr(arr, "detach") else arr, dtype=float)
+    except Exception:
+        return None
+
+
 def build_mlm_dataset(labeled_with_seq: pd.DataFrame, tokenizer, split: str = "train",
                       max_len: int = 1022, gamma: float = 1.0, mask_rate: float = 0.15,
-                      conservation_col: str | None = None, seed: int = 1466):
+                      conservation_col: str | None = None, seed: int = 1466,
+                      coupling_mode: str | None = None, span_len: int = 3,
+                      contact_col: str | None = None, contact_threshold: float = 0.5,
+                      contact_min_sep: int = 6, contact_model=None):
     """Torch Dataset for domain-adaptive MLM over one split (default train-only).
 
     Each item tokenizes a sequence, samples mask positions with the
@@ -119,24 +167,37 @@ def build_mlm_dataset(labeled_with_seq: pd.DataFrame, tokenizer, split: str = "t
     import numpy as np
     import torch
     from torch.utils.data import Dataset
-    from .masking import sample_mask_positions, bert_mask_assignment
+    from .masking import (sample_mask_positions, bert_mask_assignment,
+                          build_mask_units, sample_mask_units, make_span_units,
+                          contact_pairs_from_map)
     from .losses import confidence_to_weight
 
     sub = labeled_with_seq[labeled_with_seq["split"] == split].reset_index(drop=True)
     aa_ids = tokenizer.convert_tokens_to_ids(list(STANDARD_AA))
     mask_id = tokenizer.mask_token_id
+    if coupling_mode not in (None, "span", "contact", "both"):
+        raise ValueError("coupling_mode must be None|'span'|'contact'|'both'")
+
+    # Truncation guard: expand over-length sequences into overlapping windows
+    # (row_index, window_start, subseq) so no coupled partner is silently dropped.
+    _items = []
+    for ridx in range(len(sub)):
+        s = sub.iloc[ridx]["sequence"]
+        for wstart, subseq in sliding_windows(s, max_len=max_len, overlap=min(256, max_len // 4)):
+            _items.append((ridx, wstart, subseq))
 
     class MlmSequenceDataset(Dataset):
         def __init__(self):
             self.df = sub
+            self.items = _items
             self.rng = np.random.default_rng(seed)
 
         def __len__(self):
-            return len(self.df)
+            return len(self.items)
 
         def __getitem__(self, i):
-            row = self.df.iloc[i]
-            seq = row["sequence"][:max_len]
+            ridx, _wstart, seq = self.items[i]
+            row = self.df.iloc[ridx]
             enc = tokenizer(seq, return_tensors="pt", truncation=True, max_length=max_len + 2)
             input_ids = enc["input_ids"][0]
             attn = enc["attention_mask"][0]
@@ -148,8 +209,28 @@ def build_mlm_dataset(labeled_with_seq: pd.DataFrame, tokenizer, split: str = "t
                 cons = np.pad(cons, (1, L - 1 - len(cons)))[:L] if len(cons) < L else cons[:L]
             else:
                 cons = np.zeros(L)
-            masked = sample_mask_positions(cons, mask_rate=mask_rate, gamma=gamma,
-                                           special=special, rng=self.rng)
+            if coupling_mode is None:
+                masked = sample_mask_positions(cons, mask_rate=mask_rate, gamma=gamma,
+                                               special=special, rng=self.rng)
+            else:
+                # residue span [1, L-1) excludes CLS(0) and trailing EOS/pad
+                res_end = L - 1
+                spans = (make_span_units(res_end, span_len=span_len, offset=1)
+                         if coupling_mode in ("span", "both") else None)
+                cpairs = None
+                if coupling_mode in ("contact", "both"):
+                    cm = None
+                    if contact_col and contact_col in row and row[contact_col] is not None:
+                        cm = np.asarray(row[contact_col], dtype=float)
+                    elif contact_model is not None:
+                        cm = _predict_contacts(contact_model, tokenizer, seq)
+                    if cm is not None:
+                        # residue coords -> token coords (+1 for CLS)
+                        cpairs = [(a + 1, b + 1) for a, b in contact_pairs_from_map(
+                            cm, threshold=contact_threshold, min_sep=contact_min_sep)]
+                units = build_mask_units(L, special=special, contact_pairs=cpairs, spans=spans)
+                masked = sample_mask_units(cons, units, mask_rate=mask_rate,
+                                           gamma=gamma, rng=self.rng)
             assign = bert_mask_assignment(masked, rng=self.rng)
             labels = torch.full_like(input_ids, -100)
             labels[torch.from_numpy(assign["loss"])] = input_ids[torch.from_numpy(assign["loss"])]
