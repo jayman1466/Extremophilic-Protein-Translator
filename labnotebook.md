@@ -583,9 +583,10 @@ mature-chain FASTA by `scripts/merge_signalp_chunks.py` (stdlib-only, SLURM job
 | metric | value |
 |---|---|
 | proteins scanned | 17,603,649 |
-| secreted written (class ≠ OTHER) | **1,985,508** (11.3%) |
+| secreted classified (class ≠ OTHER) | 1,985,565 (11.3%) |
+| secreted written to FASTA | **1,985,508** (57 fewer: dropped empty/degenerate mature chains) |
 | genomes | 7,268 |
-| by class | SP 1,270,289 · LIPO 570,012 · TAT 78,884 · PILIN 49,691 · TATLIPO 16,689 |
+| by class (of 1,985,565 classified) | SP 1,270,289 · LIPO 570,012 · TAT 78,884 · PILIN 49,691 · TATLIPO 16,689 |
 
 Outputs in `IS1111/eptrans/`: `secreted_proteins_r232.tsv` (12 cols, 221 MB),
 `secreted_proteins_r232.faa` (mature chains, headers `GENOME~PROTID class=… anchoring=…`, 865 MB).
