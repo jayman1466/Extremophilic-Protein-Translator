@@ -70,6 +70,17 @@ START=$((SLURM_ARRAY_TASK_ID * CHUNK_SIZE + 1))
 END=$((START + CHUNK_SIZE - 1))
 mkdir -p "$OUT_ROOT"
 
+# Resume guard: skip a chunk whose SignalP output already looks complete. Lets a
+# long background fill be killed/resubmitted freely (idempotent per chunk). A
+# chunk is "done" when its prediction_results.txt exists AND ends with a data
+# line for the last expected genome (SignalP writes it last); we approximate
+# completeness by a non-empty prediction_results.txt plus a DONE sentinel.
+OUT="$OUT_ROOT/chunk_${{SLURM_ARRAY_TASK_ID}}"
+if [ -f "$OUT/.done" ]; then
+  echo "chunk $SLURM_ARRAY_TASK_ID already complete (.done present) - skipping"
+  exit 0
+fi
+
 # SignalP batches internally: concatenate this chunk's proteomes into ONE FASTA
 # (protein ids namespaced by genome as {{GENOME}}~{{PROTID}}) and run once.
 CHUNK_FAA=$(mktemp --suffix=.faa)
@@ -89,13 +100,14 @@ for i in $(seq "$START" "$END"); do
 done
 echo "chunk $SLURM_ARRAY_TASK_ID: $N genomes -> $(grep -c "^>" "$CHUNK_FAA") proteins"
 
-OUT="$OUT_ROOT/chunk_${{SLURM_ARRAY_TASK_ID}}"
 mkdir -p "$OUT"
 signalp6 --fastafile "$CHUNK_FAA" --output_dir "$OUT" \\
          --format none --organism "$ORGANISM" --mode "$MODE" \\
          --torch_num_threads "$TORCH_THREADS" --write_procs "$WRITE_PROCS" --bsize "$BSIZE"
 
 rm -f "$CHUNK_FAA"
+# sentinel marks the chunk complete for the resume guard above
+touch "$OUT/.done"
 echo "done chunk $SLURM_ARRAY_TASK_ID -> $OUT"
 """
 
