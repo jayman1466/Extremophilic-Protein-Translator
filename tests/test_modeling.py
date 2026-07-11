@@ -303,3 +303,55 @@ def test_length_bucket_sampler_covers_all_and_batches():
     assert len(s) == 8                       # ceil(30/4)
     # within-pool sorting: at least one batch is length-homogeneous
     assert any(max(lengths[i] for i in b) - min(lengths[i] for i in b) < 5 for b in batches)
+
+
+# ---- spot-safe step checkpointing ----
+
+def _tiny_mlm_setup(tmp):
+    import numpy as np, torch, pandas as pd
+    from transformers import EsmConfig, EsmForMaskedLM, EsmTokenizer
+    from peft import LoraConfig, get_peft_model, TaskType
+    from eptrans.modeling.model import lora_target_modules
+    from eptrans.modeling.data import build_mlm_dataset
+    vocab = "<cls> <pad> <eos> <unk> L A G V S E R T I D P K Q N F Y M H W C X B U Z O . - <null_1> <mask>".split()
+    open(f"{tmp}/vocab.txt", "w").write("\n".join(vocab))
+    tok = EsmTokenizer(f"{tmp}/vocab.txt")
+    def mk():
+        cfg = EsmConfig(vocab_size=len(vocab), hidden_size=32, num_hidden_layers=2,
+                        num_attention_heads=2, intermediate_size=64, max_position_embeddings=256,
+                        pad_token_id=1, mask_token_id=len(vocab) - 1, position_embedding_type="rotary")
+        torch.manual_seed(0)
+        return get_peft_model(EsmForMaskedLM(cfg), LoraConfig(
+            task_type=TaskType.FEATURE_EXTRACTION, r=4, lora_alpha=8, lora_dropout=0.0,
+            target_modules=lora_target_modules(True), bias="none"))
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame([dict(tagged_id=f"g{i}~p",
+                            sequence="".join(rng.choice(list("LAGVSERTIDPKQNF"), rng.integers(15, 60))),
+                            split="train", label_confidence="high") for i in range(40)])
+    return tok, mk, build_mlm_dataset(df, tok, "train", max_len=64, mask_rate=0.15)
+
+
+def test_mlm_step_checkpoint_and_resume():
+    import tempfile, os, torch
+    from eptrans.modeling.train import train_mlm
+    pytest.importorskip("peft")
+    tmp = tempfile.mkdtemp()
+    tok, mk, tr = _tiny_mlm_setup(tmp)
+    out = tempfile.mkdtemp()
+    # 40 items / batch 8 = 5 steps/epoch, 3 epochs => 15 total steps.
+    # phase 1: run to a MID-epoch checkpoint (step 6 = epoch 1, batch 1), ckpt every 3.
+    train_mlm(mk(), tok, tr, epochs=3, batch_size=8, device="cpu",
+              out_dir=out, ckpt_every=3, max_steps=6, resume=False)
+    ck = torch.load(f"{out}/mlm_ckpt.pt", map_location="cpu")
+    assert ck["step"] == 6 and len(ck["trainable"]) > 0
+    assert "opt" in ck and "sched" in ck
+    # checkpoint records mid-epoch position, not just epoch granularity
+    assert ck["epoch"] == 1 and ck["batch_in_epoch"] == 1   # 5 in ep0 + 1 in ep1
+    # phase 2: resume to completion. step is DERIVED from (epoch, batch), so the
+    # final step must be exactly the schedule total (15), NOT overshoot it.
+    train_mlm(mk(), tok, tr, epochs=3, batch_size=8, device="cpu",
+              out_dir=out, ckpt_every=3, resume=True)
+    ck2 = torch.load(f"{out}/mlm_ckpt.pt", map_location="cpu")
+    # last ckpt-divisible step before the 15-step end; must never exceed total (15)
+    assert ck2["step"] <= 15, f"resume overshot schedule total: {ck2['step']}"
+    assert ck2["step"] == 15                                  # 5*3 epochs, exact

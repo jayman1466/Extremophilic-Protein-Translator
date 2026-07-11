@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 
 __all__ = ["collate_pad", "train_mlm", "train_classifier", "evaluate_auprc",
@@ -85,7 +86,7 @@ def train_mlm(peft_model, tokenizer, train_ds, val_ds=None, *, epochs: int = 3,
               beta_kl: float = 0.0, base_model=None, device: str = "cpu",
               out_dir: str | None = None, max_steps: int | None = None,
               log_every: int = 50, bucket_by_length: bool = True,
-              amp_dtype: str = "bf16"):
+              amp_dtype: str = "bf16", ckpt_every: int = 0, resume: bool = True):
     """Domain-adaptive continued MLM (LoRA). Returns training history dict.
 
     ``amp_dtype``: "bf16" (default) wraps forward passes in
@@ -93,10 +94,33 @@ def train_mlm(peft_model, tokenizer, train_ds, val_ds=None, *, epochs: int = 3,
     and doubles throughput, and needs no GradScaler (bf16 has fp32's dynamic
     range). "fp32" disables autocast (CPU smoke-tests). LoRA master weights stay
     fp32; only the compute is bf16.
+
+    ``ckpt_every``: if >0, write a resumable step-checkpoint (trainable LoRA
+    weights + optimizer/scheduler state + epoch + batch-in-epoch + best_ppl +
+    history) to ``<out_dir>/mlm_ckpt.pt`` every N optimizer steps. On a spot
+    preemption the replacement instance resumes mid-epoch: it restores the
+    interrupted epoch and skips the batches already done, so lost work is bounded
+    by the ckpt interval — at most N steps back to the last checkpoint, not a
+    whole epoch. ``step`` is derived from ``(epoch, batch_index)`` rather than a
+    free-running counter, so a resume can never overshoot the LR schedule's
+    ``total`` (which would zero the learning-rate tail and trip the max_steps
+    break early). ``resume``: if True and the checkpoint exists, load and continue.
+    Only trainable params are saved, so the file is small (LoRA-sized).
     """
     import torch
     from torch.utils.data import DataLoader
     from .losses import masked_mlm_loss, kl_forgetting_guard
+
+    def _trainable_sd():
+        return {n: p.detach().cpu() for n, p in peft_model.named_parameters() if p.requires_grad}
+
+    def _save_ckpt(path, step, ep, batch_in_epoch, best_ppl, hist):
+        tmp = str(path) + ".tmp"
+        torch.save({"trainable": _trainable_sd(), "opt": opt.state_dict(),
+                    "sched": sched.state_dict(), "step": step, "epoch": ep,
+                    "batch_in_epoch": batch_in_epoch, "best_ppl": best_ppl,
+                    "hist": hist}, tmp)
+        os.replace(tmp, path)  # atomic: a preemption mid-write can't corrupt the ckpt
 
     use_amp = amp_dtype == "bf16" and str(device).startswith("cuda")
     amp_ctx = (lambda: torch.autocast("cuda", dtype=torch.bfloat16)) if use_amp \
@@ -112,16 +136,38 @@ def train_mlm(peft_model, tokenizer, train_ds, val_ds=None, *, epochs: int = 3,
                         collate_fn=lambda b: collate_pad(b, pad_id))
     peft_model.to(device).train()
     opt = torch.optim.AdamW([p for p in peft_model.parameters() if p.requires_grad], lr=lr)
-    total = (max_steps or len(dl) * epochs)
+    steps_per_epoch = len(dl)
+    total = (max_steps or steps_per_epoch * epochs)
     warmup = max(1, int(warmup_frac * total))
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, s / warmup) * max(0.0, (total - s) / max(1, total - warmup)))
 
     hist = {"train_loss": [], "val_ppl": []}
-    step = 0
     best_ppl = math.inf
-    for ep in range(epochs):
-        for batch in dl:
+    start_ep = 0
+    resume_skip = 0          # batches already completed in the interrupted epoch
+    ckpt_path = Path(out_dir) / "mlm_ckpt.pt" if out_dir else None
+    if resume and ckpt_path and ckpt_path.exists():
+        ck = torch.load(ckpt_path, map_location=device)
+        missing = peft_model.load_state_dict(ck["trainable"], strict=False)
+        opt.load_state_dict(ck["opt"]); sched.load_state_dict(ck["sched"])
+        start_ep = ck["epoch"]; resume_skip = ck.get("batch_in_epoch", 0)
+        best_ppl = ck["best_ppl"]; hist = ck.get("hist", hist)
+        print(f"[train_mlm] resumed at epoch {start_ep}, batch {resume_skip} "
+              f"(step {start_ep * steps_per_epoch + resume_skip}); "
+              f"{len(missing.unexpected_keys)} unexpected keys")
+
+    # ``step`` is DERIVED from (epoch, batch index), never incremented on top of a
+    # restored value — so a resume cannot overshoot ``total`` (which would zero the
+    # LR tail and fire the max_steps break early). Mid-epoch resume skips only the
+    # batches already done in the interrupted epoch; later epochs run fresh from 0.
+    stop = False
+    for ep in range(start_ep, epochs):
+        skip = resume_skip if ep == start_ep else 0
+        for bi, batch in enumerate(dl):
+            if bi < skip:
+                continue
+            step = ep * steps_per_epoch + bi
             batch = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in batch.items()}
             with amp_ctx():
                 out = peft_model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
@@ -136,8 +182,11 @@ def train_mlm(peft_model, tokenizer, train_ds, val_ds=None, *, epochs: int = 3,
             opt.zero_grad(); loss.backward(); opt.step(); sched.step()
             if step % log_every == 0:
                 hist["train_loss"].append((step, float(loss.detach())))
-            step += 1
-            if max_steps and step >= max_steps:
+            done = step + 1                       # optimizer steps completed
+            if ckpt_every and ckpt_path and done % ckpt_every == 0:
+                _save_ckpt(ckpt_path, done, ep, bi + 1, best_ppl, hist)
+            if max_steps and done >= max_steps:
+                stop = True
                 break
         if val_ds is not None:
             ppl = _pseudo_perplexity(peft_model, tokenizer, val_ds, device, batch_size, amp_ctx)
@@ -145,7 +194,7 @@ def train_mlm(peft_model, tokenizer, train_ds, val_ds=None, *, epochs: int = 3,
             if ppl < best_ppl and out_dir:
                 best_ppl = ppl
                 peft_model.save_pretrained(str(Path(out_dir) / "mlm_adapter_best"))
-        if max_steps and step >= max_steps:
+        if stop:
             break
     if out_dir:
         peft_model.save_pretrained(str(Path(out_dir) / "mlm_adapter_last"))

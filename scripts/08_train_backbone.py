@@ -72,6 +72,10 @@ def main():
             p.add_argument("--contact-threshold", type=float, default=0.5)
             p.add_argument("--contact-min-sep", type=int, default=6)
             p.add_argument("--beta-kl", type=float, default=0.0)
+            p.add_argument("--ckpt-every", type=int, default=0,
+                           help="write a resumable step-checkpoint every N steps (spot preemption safety)")
+            p.add_argument("--no-resume", dest="resume", action="store_false",
+                           help="ignore any existing mlm_ckpt.pt and start fresh")
         else:
             p.add_argument("--phenotype", required=True)
             p.add_argument("--pairs", default=None)
@@ -115,7 +119,8 @@ def main():
         print(f"[08] MLM: train {len(tr):,} / val {len(va):,} (train-only clusters)")
         hist = train_mlm(model, tok, tr, va, epochs=args.epochs, lr=args.lr,
                          batch_size=args.batch_size, beta_kl=args.beta_kl,
-                         device=args.device, out_dir=args.out_dir, max_steps=args.max_steps)
+                         device=args.device, out_dir=args.out_dir, max_steps=args.max_steps,
+                         ckpt_every=args.ckpt_every, resume=args.resume)
         print(f"[08] done; val_ppl trace: {hist['val_ppl']}")
     else:
         from eptrans.modeling.model import build_lora_backbone, build_classifier_head
