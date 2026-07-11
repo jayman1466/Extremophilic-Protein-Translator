@@ -305,6 +305,38 @@ def test_length_bucket_sampler_covers_all_and_batches():
     assert any(max(lengths[i] for i in b) - min(lengths[i] for i in b) < 5 for b in batches)
 
 
+def test_mlm_adapter_transfers_into_classifier():
+    """The MLM adapter (EsmForMaskedLM, esm.-prefixed keys) must actually load
+    into the classifier backbone (EsmModel). Plain load_adapter silently drops
+    the mismatched keys; load_mlm_adapter_into_classifier remaps + verifies."""
+    import tempfile, torch
+    from transformers import EsmConfig, EsmForMaskedLM, EsmModel
+    from peft import LoraConfig, get_peft_model, TaskType
+    from eptrans.modeling.model import lora_target_modules, load_mlm_adapter_into_classifier
+    pytest.importorskip("safetensors")
+    tmp = tempfile.mkdtemp()
+    vocab = "<cls> <pad> <eos> <unk> L A G V S E R T I D P K Q N F Y M H W C X B U Z O . - <null_1> <mask>".split()
+    cfg = dict(vocab_size=len(vocab), hidden_size=32, num_hidden_layers=2, num_attention_heads=2,
+               intermediate_size=64, max_position_embeddings=64, pad_token_id=1,
+               mask_token_id=len(vocab) - 1, position_embedding_type="rotary")
+    tgt = lora_target_modules(True)
+    lc = LoraConfig(task_type=TaskType.FEATURE_EXTRACTION, r=4, lora_alpha=8,
+                    lora_dropout=0.0, target_modules=tgt, bias="none")
+    mlm = get_peft_model(EsmForMaskedLM(EsmConfig(**cfg)), lc)
+    # tweak a LoRA weight so transfer is detectable
+    tw = [n for n, _ in mlm.named_parameters() if "lora_A" in n][0]
+    with torch.no_grad():
+        dict(mlm.named_parameters())[tw].add_(1.234)
+    mlm.save_pretrained(f"{tmp}/mlm_adapter_best")
+    clf = get_peft_model(EsmModel(EsmConfig(**cfg), add_pooling_layer=False), lc)
+    n = load_mlm_adapter_into_classifier(clf, f"{tmp}/mlm_adapter_best", adapter_name="mlm")
+    assert n > 0
+    clf.set_adapter("mlm")
+    maxv = max(float(p.detach().abs().max()) for nm, p in clf.named_parameters()
+               if "lora_A" in nm and "mlm" in nm)
+    assert maxv >= 1.234, f"trained weight not transferred (max {maxv:.3f})"
+
+
 def test_precomputed_contact_pairs_consumed():
     """build_mlm_dataset consumes cached residue-coord pairs via contact_pairs_col
     instead of recomputing, and remaps them to token coords (+1 for CLS)."""

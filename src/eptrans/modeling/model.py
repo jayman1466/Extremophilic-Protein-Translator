@@ -132,3 +132,62 @@ def build_lora_backbone(size: str = DEFAULT_BACKBONE, lora_rank: int = 32,
 def add_classifier_head(hidden_size: int, **kwargs):
     """Convenience wrapper: build a classifier head for a given hidden size."""
     return build_classifier_head(hidden_size, **kwargs)
+
+
+def load_mlm_adapter_into_classifier(clf_peft_model, adapter_dir: str,
+                                     adapter_name: str = "mlm"):
+    """Load a Stage-1 MLM LoRA adapter into a Stage-2 classifier backbone.
+
+    The MLM adapter is trained on ``EsmForMaskedLM`` (keys namespaced
+    ``base_model.model.esm.encoder...``) while the classifier backbone is a bare
+    ``EsmModel`` (keys ``base_model.model.encoder...`` — no ``esm.`` prefix).
+    A plain ``peft`` ``load_adapter`` does NOT raise on this mismatch: it creates
+    the adapter slots but silently drops every non-matching weight, so the
+    classifier would train from a randomly-initialised adapter and inherit NONE
+    of the coupling-aware Stage-1 adaptation.
+
+    This loader remaps the saved keys (strips the ``esm.`` submodule prefix),
+    loads them into a freshly-added adapter, and VERIFIES that a non-trivial
+    fraction of LoRA tensors actually received the trained values — raising if
+    the transfer was empty. Returns the number of LoRA weight tensors populated.
+    """
+    import glob
+    import torch
+    from safetensors.torch import load_file
+
+    files = (glob.glob(f"{adapter_dir}/*.safetensors")
+             or glob.glob(f"{adapter_dir}/adapter_model.bin"))
+    if not files:
+        raise FileNotFoundError(f"no adapter weights found under {adapter_dir}")
+    saved = (load_file(files[0]) if files[0].endswith(".safetensors")
+             else torch.load(files[0], map_location="cpu"))
+
+    # add an (empty) adapter with the same config, then overwrite its weights
+    clf_peft_model.load_adapter(adapter_dir, adapter_name=adapter_name)
+    target = dict(clf_peft_model.named_parameters())
+
+    def _remap(k: str) -> str:
+        # base_model.model.esm.encoder...  ->  base_model.model.encoder...
+        k = k.replace("base_model.model.esm.", "base_model.model.")
+        # peft stores runtime weights with the active adapter name in the path
+        k = k.replace(".lora_A.weight", f".lora_A.{adapter_name}.weight")
+        k = k.replace(".lora_B.weight", f".lora_B.{adapter_name}.weight")
+        return k
+
+    n_ok, n_miss = 0, 0
+    with torch.no_grad():
+        for sk, sv in saved.items():
+            tk = _remap(sk)
+            if tk in target and target[tk].shape == sv.shape:
+                target[tk].copy_(sv.to(target[tk].dtype))
+                n_ok += 1
+            else:
+                n_miss += 1
+    if n_ok == 0:
+        raise RuntimeError(
+            f"MLM->classifier adapter transfer matched 0 tensors "
+            f"({n_miss} unmatched) — key remap failed; classifier would train "
+            f"from a random adapter. Check the esm.-prefix convention.")
+    print(f"[adapter] transferred {n_ok} LoRA tensors "
+          f"({n_miss} unmatched) from {adapter_dir}")
+    return n_ok

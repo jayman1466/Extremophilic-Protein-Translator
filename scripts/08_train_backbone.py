@@ -134,7 +134,8 @@ def main():
                          ckpt_every=args.ckpt_every, resume=args.resume)
         print(f"[08] done; val_ppl trace: {hist['val_ppl']}")
     else:
-        from eptrans.modeling.model import build_lora_backbone, build_classifier_head
+        from eptrans.modeling.model import (build_lora_backbone, build_classifier_head,
+                                             load_mlm_adapter_into_classifier)
         from eptrans.modeling.data import build_classifier_dataset, build_pair_dataset
         from eptrans.modeling.train import train_classifier
         model, tok, hidden = build_lora_backbone(
@@ -142,7 +143,10 @@ def main():
             for_mlm=False, full_attention=args.full_attention)
         if args.mlm_adapter:
             print(f"[08] loading MLM adapter weights from {args.mlm_adapter}")
-            model.load_adapter(args.mlm_adapter, adapter_name="mlm")
+            # NOT model.load_adapter: the MLM adapter's esm.-prefixed keys silently
+            # drop against the classifier's EsmModel tree. This remaps + verifies.
+            load_mlm_adapter_into_classifier(model, args.mlm_adapter, adapter_name="mlm")
+            model.set_adapter("mlm")
         head = build_classifier_head(hidden)
         pairs = pd.read_csv(args.pairs, sep="\t") if args.pairs else None
         tr = build_classifier_dataset(df, tok, args.phenotype, "train", max_len=args.max_len,
