@@ -5,8 +5,9 @@ Contact-mode coupling-aware masking (design §15 #1) needs, per sequence, the se
 of coupled residue pairs (i, j) where the ESM-2 contact head predicts
 p_contact >= threshold and |i-j| >= min_sep. Deriving these inside the training
 DataLoader recomputes a 3B forward pass per item per epoch — infeasible at 420k x
-3. This script runs the contact head ONCE per unique sequence on GPU and writes a
-parquet (tagged_id, contact_pairs) that build_mlm_dataset consumes via
+3. This script runs the contact head ONCE per training row (keyed by tagged_id,
+the dataset's unique id and the merge key back in 08) on GPU and writes a parquet
+(tagged_id, contact_pairs) that build_mlm_dataset consumes via
 ``contact_pairs_col`` for free across all epochs.
 
 Pairs are stored in FULL-sequence residue coordinates (0-based, CLS excluded);
@@ -54,7 +55,8 @@ def main():
     from eptrans.modeling.model import ESM2_CHECKPOINTS
 
     df = attach_sequences(pd.read_parquet(args.labeled), args.fasta)
-    # unique sequences only (many tagged_ids may share a cluster rep sequence)
+    # one row per tagged_id (the dataset's unique key / merge key back in 08);
+    # each tagged_id already maps to a single cluster-rep sequence
     uniq = df.drop_duplicates(subset=["tagged_id"])[["tagged_id", "sequence"]].reset_index(drop=True)
 
     done = set()
@@ -65,7 +67,12 @@ def main():
 
     ckpt = ESM2_CHECKPOINTS[args.backbone_size]
     tok = EsmTokenizer.from_pretrained(ckpt)
-    model = EsmForMaskedLM.from_pretrained(ckpt, torch_dtype=torch.bfloat16).to(args.device).eval()
+    # predict_contacts stacks per-layer attention matrices; the default SDPA/flash
+    # backend returns no attentions (empty stack -> RuntimeError). eager is the only
+    # backend that materializes them.
+    model = EsmForMaskedLM.from_pretrained(
+        ckpt, torch_dtype=torch.bfloat16,
+        attn_implementation="eager").to(args.device).eval()
 
     rows, n = [], 0
     for _, r in uniq.iterrows():
