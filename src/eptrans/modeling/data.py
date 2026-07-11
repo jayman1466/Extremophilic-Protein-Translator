@@ -38,9 +38,17 @@ STANDARD_AA = "ACDEFGHIKLMNPQRSTVWY"
 
 
 def iter_fasta(path: str | os.PathLike) -> Iterator[tuple[str, str]]:
-    """Yield ``(header_id, sequence)`` where header_id is the first token."""
+    """Yield ``(header_id, sequence)`` where header_id is the first token.
+
+    Transparently reads gzip-compressed FASTA (``.gz``) as well as plain text,
+    detected by the gzip magic bytes rather than the extension.
+    """
+    import gzip
+    with open(path, "rb") as _probe:
+        is_gz = _probe.read(2) == b"\x1f\x8b"
+    opener = (lambda p: gzip.open(p, "rt")) if is_gz else (lambda p: open(p))
     hid, seq = None, []
-    with open(path) as fh:
+    with opener(path) as fh:
         for line in fh:
             if line.startswith(">"):
                 if hid is not None:

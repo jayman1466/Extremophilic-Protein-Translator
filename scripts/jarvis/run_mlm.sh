@@ -16,14 +16,14 @@ export HF_HOME=$FS/hf_cache            # 3B weights live here (survives preempti
 cd "$REPO"
 # venv built once on the filesystem; reused across preemption restarts
 if [ ! -d "$FS/venv" ]; then
-  python -m venv "$FS/venv"
-  "$FS/venv/bin/pip" install -q -r requirements.txt
+  python -m venv --system-site-packages "$FS/venv"
+  "$FS/venv/bin/pip" install -q -r "$REPO/scripts/jarvis/requirements.txt"
 fi
 source "$FS/venv/bin/activate"
 
 python "$REPO/scripts/08_train_backbone.py" mlm \
-  --labeled "$FS/labeled_mlm_subsample.parquet" \
-  --fasta   "$FS/secreted_proteins_r232.faa" \
+  --labeled "$FS/data/labeled_mlm_subsample.parquet" \
+  --fasta   "$FS/data/mlm_subsample_mature.faa.gz" \
   --backbone-size 3B --lora-rank 32 --lora-alpha 64 \
   --epochs 3 --lr 1e-4 --mask-rate 0.15 --gamma 1.0 \
   --batch-size 16 --max-len 1022 --device cuda \
