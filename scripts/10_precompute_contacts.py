@@ -72,7 +72,8 @@ def main():
         seq = r["sequence"][: args.max_len]
         enc = tok(seq, return_tensors="pt", truncation=True, max_length=args.max_len + 2).to(args.device)
         with torch.no_grad():
-            cm = model.predict_contacts(enc["input_ids"])[0].float().cpu().numpy()
+            cm = model.predict_contacts(enc["input_ids"],
+                                        enc["attention_mask"])[0].float().cpu().numpy()
         pairs = contact_pairs_from_map(cm, threshold=args.threshold,
                                        min_sep=args.min_sep, top_k=args.top_k)
         rows.append({"tagged_id": r["tagged_id"],

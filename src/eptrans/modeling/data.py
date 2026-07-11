@@ -151,7 +151,12 @@ def _predict_contacts(model, tokenizer, seq: str):
     try:
         enc = tokenizer(seq, return_tensors="pt", truncation=True)
         with torch.no_grad():
-            out = model.predict_contacts(enc["input_ids"])
+            # HF EsmForMaskedLM.predict_contacts requires attention_mask; fair-esm
+            # takes tokens only — try the two-arg form first, fall back to one.
+            try:
+                out = model.predict_contacts(enc["input_ids"], enc["attention_mask"])
+            except TypeError:
+                out = model.predict_contacts(enc["input_ids"])
         arr = out[0] if hasattr(out, "__getitem__") else out
         return np.asarray(arr.detach().cpu() if hasattr(arr, "detach") else arr, dtype=float)
     except Exception:
