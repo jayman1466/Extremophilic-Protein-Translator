@@ -1,0 +1,13 @@
+# Stage-1 MLM stack for a Jarvislabs H200 spot instance.
+# Pinned to the versions validated on biotite's eptrans_ml env.
+# torch is installed with the cu124 index (H200 = CUDA 12.x); the Jarvis
+# `pytorch` template already ships a CUDA torch, but we pin explicitly so the
+# venv on the persistent filesystem is reproducible across preemption restarts.
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+transformers==5.13.0
+peft==0.19.1
+scikit-learn==1.9.0
+pandas==3.0.3
+pyarrow==25.0.0
+numpy==2.4.6
