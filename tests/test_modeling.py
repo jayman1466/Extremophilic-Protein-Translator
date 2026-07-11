@@ -305,6 +305,37 @@ def test_length_bucket_sampler_covers_all_and_batches():
     assert any(max(lengths[i] for i in b) - min(lengths[i] for i in b) < 5 for b in batches)
 
 
+def test_precomputed_contact_pairs_consumed():
+    """build_mlm_dataset consumes cached residue-coord pairs via contact_pairs_col
+    instead of recomputing, and remaps them to token coords (+1 for CLS)."""
+    import numpy as np, pandas as pd
+    from transformers import EsmTokenizer
+    from eptrans.modeling.data import build_mlm_dataset
+    import tempfile
+    tmp = tempfile.mkdtemp()
+    vocab = "<cls> <pad> <eos> <unk> L A G V S E R T I D P K Q N F Y M H W C X B U Z O . - <null_1> <mask>".split()
+    open(f"{tmp}/vocab.txt", "w").write("\n".join(vocab))
+    tok = EsmTokenizer(f"{tmp}/vocab.txt")
+    seq = "LAGVSERTIDPKQNFLAGVSE"  # 21 residues, single window at max_len=64
+    # residue-coord pair (2, 12): distal, > min_sep; should mask jointly
+    df = pd.DataFrame([dict(tagged_id="g0~p", sequence=seq, split="train",
+                            label_confidence="high", contact_pairs=[[2, 12]])])
+    ds = build_mlm_dataset(df, tok, "train", max_len=64, mask_rate=0.15,
+                           coupling_mode="contact", contact_pairs_col="contact_pairs",
+                           seed=1)
+    # sample many times; whenever one partner is in the loss set, the other must be too
+    both_seen = False
+    for _ in range(200):
+        item = ds[0]
+        loss_pos = set(np.where(item["labels"].numpy() != -100)[0].tolist())
+        # token coords: residue 2 -> 3, residue 12 -> 13 (CLS offset +1)
+        a, b = 3, 13
+        if a in loss_pos or b in loss_pos:
+            assert a in loss_pos and b in loss_pos, "coupled pair must mask jointly"
+            both_seen = True
+    assert both_seen, "the cached contact pair was never selected across 200 draws"
+
+
 # ---- spot-safe step checkpointing ----
 
 def _tiny_mlm_setup(tmp):

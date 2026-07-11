@@ -163,7 +163,8 @@ def build_mlm_dataset(labeled_with_seq: pd.DataFrame, tokenizer, split: str = "t
                       conservation_col: str | None = None, seed: int = 1466,
                       coupling_mode: str | None = None, span_len: int = 3,
                       contact_col: str | None = None, contact_threshold: float = 0.5,
-                      contact_min_sep: int = 6, contact_model=None):
+                      contact_min_sep: int = 6, contact_model=None,
+                      contact_pairs_col: str | None = None):
     """Torch Dataset for domain-adaptive MLM over one split (default train-only).
 
     Each item tokenizes a sequence, samples mask positions with the
@@ -227,15 +228,30 @@ def build_mlm_dataset(labeled_with_seq: pd.DataFrame, tokenizer, split: str = "t
                          if coupling_mode in ("span", "both") else None)
                 cpairs = None
                 if coupling_mode in ("contact", "both"):
-                    cm = None
-                    if contact_col and contact_col in row and row[contact_col] is not None:
-                        cm = np.asarray(row[contact_col], dtype=float)
-                    elif contact_model is not None:
-                        cm = _predict_contacts(contact_model, tokenizer, seq)
-                    if cm is not None:
-                        # residue coords -> token coords (+1 for CLS)
-                        cpairs = [(a + 1, b + 1) for a, b in contact_pairs_from_map(
-                            cm, threshold=contact_threshold, min_sep=contact_min_sep)]
+                    # Preferred path: precomputed residue-coordinate pairs cached
+                    # once on GPU (contact_pairs_col). These are in FULL-sequence
+                    # residue coords; remap into THIS window's local residue coords
+                    # (subtract window start _wstart, keep only pairs fully inside
+                    # the window), then +1 for the CLS token. No per-item model call.
+                    if (contact_pairs_col and contact_pairs_col in row
+                            and row[contact_pairs_col] is not None):
+                        wlen = L - 2  # residues in this window (excl CLS/EOS)
+                        local = []
+                        for a, b in row[contact_pairs_col]:
+                            la, lb = int(a) - _wstart, int(b) - _wstart
+                            if 0 <= la < wlen and 0 <= lb < wlen:
+                                local.append((la + 1, lb + 1))  # +1 CLS
+                        cpairs = local
+                    else:
+                        cm = None
+                        if contact_col and contact_col in row and row[contact_col] is not None:
+                            cm = np.asarray(row[contact_col], dtype=float)
+                        elif contact_model is not None:
+                            cm = _predict_contacts(contact_model, tokenizer, seq)
+                        if cm is not None:
+                            # residue coords -> token coords (+1 for CLS)
+                            cpairs = [(a + 1, b + 1) for a, b in contact_pairs_from_map(
+                                cm, threshold=contact_threshold, min_sep=contact_min_sep)]
                 units = build_mask_units(L, special=special, contact_pairs=cpairs, spans=spans)
                 masked = sample_mask_units(cons, units, mask_rate=mask_rate,
                                            gamma=gamma, rng=self.rng)

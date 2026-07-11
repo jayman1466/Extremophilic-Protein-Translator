@@ -71,6 +71,10 @@ def main():
             p.add_argument("--span-len", type=int, default=3)
             p.add_argument("--contact-threshold", type=float, default=0.5)
             p.add_argument("--contact-min-sep", type=int, default=6)
+            p.add_argument("--contact-pairs", default=None,
+                           help="parquet of precomputed (tagged_id, contact_pairs) "
+                                "from scripts/10_precompute_contacts.py; avoids the "
+                                "per-item 3B contact forward pass")
             p.add_argument("--beta-kl", type=float, default=0.0)
             p.add_argument("--ckpt-every", type=int, default=0,
                            help="write a resumable step-checkpoint every N steps (spot preemption safety)")
@@ -105,17 +109,24 @@ def main():
         model, tok, hidden = build_lora_backbone(
             size=args.backbone_size, lora_rank=args.lora_rank, lora_alpha=args.lora_alpha,
             for_mlm=True, full_attention=args.full_attention)
-        contact_model = model if args.coupling_mode in ("contact", "both") else None
-        tr = build_mlm_dataset(df, tok, "train", max_len=args.max_len,
-                               gamma=args.gamma, mask_rate=args.mask_rate,
-                               coupling_mode=args.coupling_mode, span_len=args.span_len,
-                               contact_threshold=args.contact_threshold,
-                               contact_min_sep=args.contact_min_sep, contact_model=contact_model)
-        va = build_mlm_dataset(df, tok, "val", max_len=args.max_len,
-                               gamma=args.gamma, mask_rate=args.mask_rate,
-                               coupling_mode=args.coupling_mode, span_len=args.span_len,
-                               contact_threshold=args.contact_threshold,
-                               contact_min_sep=args.contact_min_sep, contact_model=contact_model)
+        # Contact pairs: prefer the precomputed cache (fast); fall back to the
+        # per-item 3B contact head only if no cache is supplied.
+        cpairs_col = None
+        if args.coupling_mode in ("contact", "both") and args.contact_pairs:
+            cp = pd.read_parquet(args.contact_pairs)
+            df = df.merge(cp, on="tagged_id", how="left")
+            cpairs_col = "contact_pairs"
+            n_cached = int(df["contact_pairs"].notna().sum())
+            print(f"[08] contact-pair cache: {n_cached:,}/{len(df):,} rows have pairs")
+        contact_model = (model if args.coupling_mode in ("contact", "both")
+                         and not args.contact_pairs else None)
+        _dk = dict(max_len=args.max_len, gamma=args.gamma, mask_rate=args.mask_rate,
+                   coupling_mode=args.coupling_mode, span_len=args.span_len,
+                   contact_threshold=args.contact_threshold,
+                   contact_min_sep=args.contact_min_sep, contact_model=contact_model,
+                   contact_pairs_col=cpairs_col)
+        tr = build_mlm_dataset(df, tok, "train", **_dk)
+        va = build_mlm_dataset(df, tok, "val", **_dk)
         print(f"[08] MLM: train {len(tr):,} / val {len(va):,} (train-only clusters)")
         hist = train_mlm(model, tok, tr, va, epochs=args.epochs, lr=args.lr,
                          batch_size=args.batch_size, beta_kl=args.beta_kl,
