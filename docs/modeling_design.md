@@ -589,3 +589,88 @@ MPNN carrying the geometry — belong to the not-yet-built generation module):
    coupled partner. Over-length chains are instead split into windows of
    `max_len` with `overlap` (default 256) shared residues, so a pair straddling
    a naive cut still co-occurs in at least one window.
+
+---
+
+## 16. Masked generation engine
+
+The fine-tuned MLM is not only a scorer (§8) — with coupling-aware training it
+also earns a role as a **sequence proposer**. §4 ranked plain masked-fill below
+MPNN precisely because it "struggles with coordinated multi-residue changes";
+coupling-aware masking (§15 #1) targets that weakness, so masked generation is
+promoted here from "good v1" to a first-class proposer in the loop.
+
+**Note on status:** this section is the *design*. Whether the trained adapter
+actually exhibits learned coordinated substitution is an empirical question,
+tested after Stage-1 completes (val pseudo-perplexity, then a coupling probe:
+mask one partner of a known salt-bridge/disulfide pair and check the other
+co-varies). The design stands on the training *objective*, not a validated
+capability.
+
+### 16.1 The loop
+
+```
+input enzyme →
+  1. freeze immutable set: catalytic (M-CSA) + ligand-contact + high-conservation
+  2. select mutable positions (aggressiveness axis, §16.3)
+  3. Gibbs + contact-pair sampling from the adapted MLM (§16.2)
+  4. per-phenotype classifier scores → direction toward target phenotype
+  5. structural gate: fold-free MPNN screen → refold + catalytic-RMSD on survivors
+  6. accept/reject; iterate (directed evolution)
+```
+
+Division of labor: **PLM proposes → classifier scores → MPNN gates.** The active
+site is protected both *preventively* (frozen, never masked/mutated) and
+*verificationally* (catalytic-atom RMSD gate after refold). LigandMPNN replaces
+ProteinMPNN when a cofactor/metal is present.
+
+### 16.2 Sampling — Gibbs + contact-pair (committed)
+
+Single-pass parallel fill is rejected: it fills all masked positions
+independently, so coupled features are averaged away even when the model knows
+them. Instead:
+
+- **Iterative masked-predict-remask (Gibbs):** fill a subset, re-contextualize,
+  remask others, converge over K passes — filled residues condition later ones.
+- **Contact-pair joint decode:** coupled positions (ESM-2 contact head,
+  `threshold=0.5`, `min_sep=6`) are masked and decoded *together*, the
+  inference-time twin of coupling-aware training.
+
+### 16.3 Aggressiveness ladder (maps to §9)
+
+Three composable knobs → 5 designs on a conservative→aggressive frontier:
+1. **Mutable region** — surface-only → +second-shell → all-non-immutable.
+2. **Gibbs iterations / sampling temperature** — near-wild-type → bolder.
+3. **Steering strength** — how hard the phenotype signal pushes (see §16.4).
+
+### 16.4 Steering — classifier-guided (primary), contrastive (optional, validate first)
+
+The **per-phenotype classifier** is the directional oracle: it is trained to
+separate one phenotype from mesophile, so it — not the bulk MLM — tells the loop
+which way "more acidophilic" is. This dissolves the pooling problem below.
+
+A **contrastive delta-logit** term (`logit_adapted − logit_base` against frozen
+ESM-2) is an *optional* additive prior, **to validate before trusting**: Stage-1
+pooled all 5 phenotypes into one bucket, so the bulk delta is muddy for **pH**
+specifically — acidophile vs alkaliphile signatures point opposite ways and
+cancel. Temperature and salinity are more directionally coherent (no cold bucket;
+monotonic halophile surface acidification). Test on the trained model: measure
+per-phenotype delta-logit distributions and confirm acido/alkali anti-correlate
+while thermo is coherent, before adding any contrastive term.
+
+### 16.5 Structural gate (Oracle 3, two tiers)
+
+MPNN inverse-folds, it does not fold — it gates two ways at very different cost:
+- **Fold-free MPNN score (cheap):** run MPNN once on the wild-type backbone; a
+  PLM-proposed residue the backbone assigns near-zero probability is a structural
+  red flag → trash. Screens thousands without folding.
+- **Fold-then-verify (survivors only):** ESMFold/AF2 the passers, align to
+  wild-type, gate on **catalytic-atom RMSD** at the active site.
+
+### 16.6 Open decision
+
+**Standalone vs MPNN-coupled generation** — whether masked-gen is a co-equal
+proposer or the fold-free fallback for structure-poor inputs. The tightly-coupled
+PLM→classifier→MPNN path is the high-quality route (needs a trustworthy backbone
+to inverse-fold against); MLM-standalone is the degraded-input path. Pending user
+decision; both share the same oracle stack (§2).

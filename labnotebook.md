@@ -668,3 +668,98 @@ login node. Submitted as **job 1151972**.
 190-task array (`0-189%5`, ~1014 genomes/task) applying SignalP to the remaining
 192,652 GTDB representatives, building a whole-GTDB master secretome over ~1–2
 months without crowding foreground work. Resumable (per-chunk `.done` sentinel).
+
+## Stage-1 MLM — Jarvis H200 spot migration
+
+The biotite `gpu_h200` queue was not moving, so Stage-1 training moved to a
+**Jarvislabs H200 spot instance** ($1.99/hr, region `india-noida-01`) with a
+**persistent 150 GB filesystem** (`fs_id=2829`) so spot preemption never loses
+staged data or checkpoints. Training runs (`scripts/jarvis/run_mlm.sh`) off the
+filesystem: repo clone + 400k/20k subsample parquet + gzipped mature FASTA +
+ESM-2 3B weights (HF cache) all live on `/home/jl_fs/`.
+
+Operational notes for future Jarvis work:
+- **Spot vs on-demand:** the SDK books spot with `is_spot=True`. A paused
+  instance **resumes as on-demand** — to keep spot pricing after any stop, destroy
+  and re-`create` rather than resume. Verify via `jl list` (`Type` column) and the
+  cumulative `cost` slope (~$0.03/min at spot vs ~$0.07/min on-demand).
+- **SSH:** register a public key account-wide (`jl ssh-key add`) *before* creating
+  the instance; a key added afterward only injects on a fresh create.
+- **Environment:** the `pytorch` template ships torch 2.11+cu130 (H200 driver);
+  keeping it and pinning only `transformers==5.13.0 peft==0.19.1 pyarrow` (the libs
+  the code depends on) is more robust than forcing the older cu124 torch. sklearn
+  1.9 needs Python ≥3.11 (template is 3.10) — a Stage-2 dep only, deferred.
+- **Spot safety:** `train_mlm(ckpt_every=200, resume=True)` writes a LoRA-sized
+  step-checkpoint to the filesystem; a preemption costs ≤200 steps.
+
+Measured throughput: **~1.94 step/s (31 seq/s) at batch 16**, ~25k steps/epoch →
+**~3.6 h/epoch, ~10.7 h for 3 epochs (~$21 spot)**.
+
+## Coupling-aware masking — thresholds and the contact-pair cache
+
+The masked-LM objective masks positions to reconstruct; **coupling-aware masking**
+(design §15 #1) additionally masks *coupled* positions jointly so multi-residue
+features (salt bridges, disulfides, local secondary structure) are learned as
+units rather than reconstructed by copying a visible partner. Thresholds
+(`config/config.yaml → modeling.mlm`, all now wired through `08_train_backbone.py`):
+
+| Parameter | Value | Meaning |
+|---|---|---|
+| `mask_rate` | 0.15 | fraction of positions masked (BERT 80/10/10 corruption) |
+| `gamma` | 1.0 | conservation exponent in `P(mask) ∝ (1−c)^γ`; **uniform until MSA conservation is wired** (single-sequence training → `c=0`) |
+| `coupling_mode` | `both` | mask span **and** contact-pair units jointly |
+| `span_len` | 3 | contiguous block length (local secondary structure) |
+| `contact_threshold` | 0.5 | ESM-2 contact-head probability to call a coupled pair |
+| `contact_min_sep` | 6 | min residue separation (skip trivial i,i+1; those are span mode) |
+| `top_k` | 128 | max contact pairs cached per sequence (bounds storage) |
+| **immutable/frozen** | boolean | active-site/ligand residues, `γ→∞` limit — never masked; applied at *generation* time, not Stage-1 pretraining |
+
+**Cost fix (`scripts/10_precompute_contacts.py`):** contact-pair derivation was
+coded to run a 3B contact-head forward pass *per item per epoch* inside the
+DataLoader — infeasible at 420k×3. Contacts are now **precomputed once on GPU**
+(keyed by `tagged_id`, residue coords, top-128) into `contact_pairs.parquet`;
+`build_mlm_dataset(contact_pairs_col=…)` consumes them for free, remapping
+full-sequence coords into each sliding window. Two required fixes surfaced on the
+real 3B model: `predict_contacts` needs `attention_mask`, and the contact head
+needs `attn_implementation="eager"` (the default SDPA backend returns no
+attentions → empty stack). First launch used baseline i.i.d. masking (flag
+omitted); relaunched with `--coupling-mode both --contact-pairs …`.
+
+## §16 — Masked generation engine (design)
+
+Settled pipeline for PLM-driven masked generation (the fine-tuned MLM as a
+*proposer*, complementing MPNN):
+
+1. **Freeze the immutable set** — catalytic (M-CSA) + ligand-contacting +
+   (once available) high-conservation columns. Never masked.
+2. **Select mutable positions** — the aggressiveness axis: surface-only →
+   +second-shell → all-non-immutable, conservation-gated.
+3. **Gibbs + contact-pair sampling** (committed, replaces single-pass): iterative
+   masked-predict-remask, decoding contact-paired positions *jointly* (same ESM-2
+   contact head as training), so coupled substitutions co-emerge instead of being
+   filled independently.
+4. **Score** — per-phenotype classifier gives the *directional* signal (is it
+   moving toward the target phenotype).
+5. **Structural gate (MPNN)** — fold-free MPNN score against the wild-type
+   backbone screens structurally implausible proposals cheaply; survivors are
+   refolded (ESMFold/AF2) and gated on **catalytic-atom RMSD** vs wild-type.
+
+Division of labor: **PLM proposes → classifier scores → MPNN gates**, with the
+active site protected preventively (frozen, never mutated) *and* verificationally
+(catalytic-RMSD gate).
+
+**Deferred / to test after the adapter lands:**
+- **Contrastive steering** (delta-logit `logit_adapted − logit_base`): flagged as
+  an *optional, validate-first* prior. Stage-1 pooled all 5 phenotypes into one
+  bucket, so the bulk delta-logit is muddy for **pH** specifically — acidophile and
+  alkaliphile signatures point opposite ways and cancel. Temp/salinity are more
+  directionally coherent (no cold bucket, monotonic halophile surface). Plan:
+  measure per-phenotype delta-logit distributions on the trained model — confirm
+  acido/alkali anti-correlate before trusting any contrastive term. Default steering
+  comes from the per-phenotype classifier, not the bulk MLM.
+- **Standalone vs MPNN-coupled generation** (open): whether masked-gen is a
+  co-equal proposer or the fold-free fallback for structure-poor inputs. User
+  deciding; tightly-coupled PLM→classifier→MPNN is the high-quality path,
+  MLM-standalone the degraded-input path.
+- **Contact-precompute batching** — current precompute is single-sequence
+  (~25 seq/s, GPU ~47%); batched inference would cut the ~4.5 h one-time pass.
