@@ -1,123 +1,175 @@
-/* Extremophilic Protein Translator — light body, black header
-   accents: magma #5B1226 · red #C1352B · hot orange #EE6C2B · amber #F6B23C
-   cream #FBF8F2 (surfaces) · white body. Teal token retained but unused. */
+/* Extremophilic Protein Translator — modern light UI, black header.
+   Warm lava accents on neutral space: color accents, hairline borders, soft
+   layered shadows, squared corners, quiet section headers.
+   accents: magma #5B1226 · red #C1352B · hot orange #EE6C2B · amber #F6B23C */
 :root {
   --ept-bg: #000000;
-  --ept-magma: #5B1226;   /* default body accent */
+  --ept-magma: #5B1226;
   --ept-red: #C1352B;
   --ept-orange: #EE6C2B;
   --ept-amber: #F6B23C;
-  --ept-cream: #FBF8F2;   /* lighter cream */
-  --ept-teal: #28C2A8;    /* retained as a token but no longer used in the UI */
-  --ept-panel: #13202e;   /* slightly lifted card surface on the dark bg */
-  --ept-panel-2: #1b2a3a;
+  --ept-cream: #FBF8F2;
+  --ept-teal: #28C2A8;    /* retained token, unused */
+
+  /* modern neutral system */
+  --ink: #1b1613;                    /* warm near-black text */
+  --ink-soft: rgba(27,22,19,0.60);   /* secondary text */
+  --surface: #ffffff;
+  --surface-2: #faf7f3;              /* subtle warm lift */
+  --line: rgba(27,22,19,0.10);       /* hairline border */
+  --radius: 0px;                     /* rectangles */
+  --radius-ctl: 2px;                 /* barely-there on controls */
+  --shadow-sm: 0 1px 2px rgba(27,22,19,0.05), 0 2px 6px rgba(27,22,19,0.05);
+  --shadow-md: 0 1px 2px rgba(27,22,19,0.06), 0 8px 24px rgba(27,22,19,0.08);
+  --magma-tint: rgba(91,18,38,0.07);
+  --amber-tint: rgba(246,178,60,0.14);
 }
 
 body {
-  background-color: #ffffff;
-  color: #1a1a1a;
+  background-color: var(--surface);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
 }
 
 /* ---- header (only the header is dark) ---- */
 .ept-navbar {
   background-color: #000;
   min-height: 252px;
-  border-bottom: 3px solid var(--ept-magma);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 1px 0 var(--ept-magma);   /* thin magma seam instead of a thick bar */
 }
 .ept-navbar .navbar-brand { display: flex; align-items: center; gap: 0.6rem; }
 .ept-logo { height: 156px; width: auto; }
 .brand-text { color: var(--ept-cream); font-weight: 700; font-size: 2rem; letter-spacing: 0.3px; }
 
-/* toolbar buttons with mouseover fade */
+/* toolbar buttons — quiet, letter-spaced, subtle hover */
 .nav-btn {
   color: var(--ept-cream);
   text-decoration: none;
   padding: 0.4rem 0.9rem;
-  border-radius: 6px;
-  transition: background-color 0.35s ease, color 0.35s ease;
+  border-radius: var(--radius-ctl);
+  font-size: 0.82rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: background-color 0.25s ease, color 0.25s ease;
 }
-.nav-btn:hover { background-color: var(--ept-magma); color: var(--ept-cream); }
+.nav-btn:hover { background-color: rgba(255,255,255,0.10); color: #fff; }
 
 /* ---- links & buttons ---- */
-a { color: var(--ept-red); }
-a:hover { color: var(--ept-magma); }
+a { color: var(--ept-red); text-decoration: none; }
+a:hover { color: var(--ept-magma); text-decoration: underline; text-underline-offset: 2px; }
+
+.btn { border-radius: var(--radius-ctl); font-weight: 600; letter-spacing: 0.01em; }
 
 .btn-ept {
   background-color: var(--ept-magma);
   border-color: var(--ept-magma);
   color: var(--ept-cream);
-  transition: background-color 0.3s ease, border-color 0.3s ease;
+  transition: background-color 0.2s ease, box-shadow 0.2s ease, transform 0.05s ease;
 }
-.btn-ept:hover { background-color: var(--ept-red); border-color: var(--ept-red); color: var(--ept-cream); }
+.btn-ept:hover { background-color: #6d1730; border-color: #6d1730; color: #fff; box-shadow: var(--shadow-sm); }
+.btn-ept:active { transform: translateY(1px); }
 
+/* download / secondary action — outline, fills on hover (quieter than solid orange) */
 .btn-steel {
-  background-color: var(--ept-orange); border-color: var(--ept-orange); color: #2a1500;
-  transition: background-color 0.3s ease;
+  background: transparent; border: 1px solid var(--ept-orange); color: #b4531c;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
-.btn-steel:hover { background-color: var(--ept-amber); color: #3a2600; }
+.btn-steel:hover { background-color: var(--ept-orange); color: #2a1500; }
 
-/* sample-data / secondary outline button — visible on the white body */
+/* sample-data / secondary outline button */
 .btn-outline-cream {
-  background: transparent; border: 1px solid var(--ept-magma); color: var(--ept-magma);
-  transition: background-color 0.3s ease, color 0.3s ease;
+  background: transparent; border: 1px solid var(--line); color: var(--ink);
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
 }
-.btn-outline-cream:hover { background: var(--ept-magma); color: var(--ept-cream); }
+.btn-outline-cream:hover { background: var(--surface-2); border-color: var(--ept-magma); color: var(--ept-magma); }
 
 .btn-danger-magma {
-  background-color: var(--ept-red); border-color: var(--ept-red); color: var(--ept-cream);
+  background: transparent; border: 1px solid var(--ept-red); color: var(--ept-red);
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
-.btn-danger-magma:hover { background-color: var(--ept-magma); color: var(--ept-cream); }
+.btn-danger-magma:hover { background-color: var(--ept-red); color: #fff; }
 
-/* ---- cards / sections: magma header, cream body ---- */
+/* ---- cards / sections: rectangles, hairline + soft shadow, quiet header ---- */
 .card-section {
-  background-color: var(--ept-cream);
-  border: 1px solid rgba(0,0,0,0.12);
-  border-left: 4px solid var(--ept-magma);
-  color: #1a1a1a;
-  margin-bottom: 1.75rem !important;   /* more air between cards */
+  background-color: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);          /* rectangles */
+  box-shadow: var(--shadow-sm);
+  color: var(--ink);
+  margin-bottom: 1.5rem !important;
+  overflow: hidden;
+  transition: box-shadow 0.2s ease;
 }
+.card-section:hover { box-shadow: var(--shadow-md); }
+/* header: no solid fill — quiet uppercase label with a thin magma accent bar */
 .card-section .card-header {
-  background-color: var(--ept-magma);
-  color: var(--ept-cream);
-  font-weight: 600;
-  border-bottom: none;
+  background-color: var(--surface);
+  color: var(--ink);
+  font-weight: 700;
+  font-size: 0.80rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  padding: 0.9rem 1.1rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  position: relative;
 }
-.card-section .card-body { background-color: var(--ept-cream); }
+.card-section .card-header::before {
+  content: ""; position: absolute; left: 0; top: 0.7rem; bottom: 0.55rem;
+  width: 3px; background: var(--ept-magma);
+}
+.card-section .card-header { padding-left: 1.4rem; }
+.card-section .card-body { background-color: var(--surface); padding: 1.25rem 1.4rem; }
+
 .form-control, .form-select {
-  background-color: #ffffff;
-  border-color: rgba(0,0,0,0.2);
-  color: #1a1a1a;
+  background-color: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+  color: var(--ink);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 .form-control:focus, .form-select:focus {
-  background-color: #ffffff;
-  color: #1a1a1a;
-  border-color: var(--ept-red);
-  box-shadow: 0 0 0 0.2rem rgba(193,53,43,0.25);
+  background-color: var(--surface);
+  color: var(--ink);
+  border-color: var(--ept-magma);
+  box-shadow: 0 0 0 3px var(--magma-tint);
 }
-.form-control::placeholder { color: rgba(0,0,0,0.4); }
-.form-text { color: rgba(0,0,0,0.6) !important; }
-.text-muted { color: rgba(0,0,0,0.55) !important; }
+.form-control::placeholder { color: rgba(27,22,19,0.35); }
+.form-text { color: var(--ink-soft) !important; }
+.text-muted { color: var(--ink-soft) !important; }
+.form-label { font-weight: 600; font-size: 0.9rem; }
 
-/* ---- accordion (light) ---- */
-.accordion-item { background-color: #fff; border-color: rgba(0,0,0,0.12); }
+/* ---- accordion: rectangles, quiet active state (tint, not solid fill) ---- */
+.accordion { border-radius: var(--radius); }
+.accordion-item { background-color: var(--surface); border-color: var(--line); }
 .accordion-button {
-  background-color: var(--ept-cream); color: #1a1a1a; font-weight: 600;
+  background-color: var(--surface); color: var(--ink); font-weight: 600;
+  border-radius: 0 !important;
 }
-.accordion-button:not(.collapsed) { background-color: var(--ept-red); color: var(--ept-cream); }
-.accordion-button:not(.collapsed)::after { filter: invert(1); }
-.accordion-body { color: #1a1a1a; }
+.accordion-button:not(.collapsed) {
+  background-color: var(--magma-tint);
+  color: var(--ept-magma);
+  box-shadow: inset 3px 0 0 var(--ept-magma);
+}
+.accordion-button:not(.collapsed)::after {
+  filter: none;
+  /* recolor the chevron to magma via a hue-ish approximation */
+}
+.accordion-button:focus { box-shadow: 0 0 0 3px var(--magma-tint); }
+.accordion-body { color: var(--ink); }
 
 /* ---- metrics / sequence ---- */
 .metric-pill {
   display: inline-block;
-  background: #ffffff;
-  color: var(--ept-magma);
-  border: 1px solid var(--ept-orange);
-  border-radius: 1rem;
-  padding: 0.15rem 0.7rem;
+  background: var(--surface-2);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 999px;              /* pills stay round — a modern accent on square cards */
+  padding: 0.2rem 0.7rem;
   margin: 0.15rem;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   font-family: ui-monospace, monospace;
+  letter-spacing: 0.01em;
 }
 .seq-view {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
@@ -127,9 +179,9 @@ a:hover { color: var(--ept-magma); }
   color: #1a1a1a;
 }
 .seq-mut {
-  background: var(--ept-orange);
-  color: #2a1500;
-  border-radius: 2px;
+  background: var(--amber-tint);
+  color: #b4531c;
+  box-shadow: inset 0 -2px 0 var(--ept-orange);
   padding: 0 1px;
   font-weight: 700;
 }
@@ -176,16 +228,19 @@ a:hover { color: var(--ept-magma); }
 }
 .track-legend .item { margin-right: 1.1rem; white-space: nowrap; }
 .as-warning {
-  background: #fff3cd; border: 1px solid var(--ept-amber); color: #6b4b00;
-  border-radius: 4px; padding: 0.3rem 0.6rem; font-size: 0.82rem; margin-bottom: 0.4rem;
+  background: var(--amber-tint);
+  border: 1px solid transparent; border-left: 3px solid var(--ept-amber);
+  color: #7a5300;
+  border-radius: var(--radius-ctl);
+  padding: 0.5rem 0.75rem; font-size: 0.82rem; margin-bottom: 0.5rem;
 }
 
 .status-badge { font-size: 0.85rem; }
 .viewer-box {
   position: relative;      /* Mol* absolutely-positions its canvas — contain it */
   width: 100%; height: 360px;
-  border: 1px solid rgba(0,0,0,0.15); border-radius: 4px;
-  background: #f3f0ea;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface-2);
   overflow: hidden;
 }
 /* Mol* injects an absolutely-positioned root that otherwise escapes the box */
@@ -196,5 +251,18 @@ a:hover { color: var(--ept-magma); }
   width: 100% !important;
   height: 100% !important;
 }
-h3, h5 { color: var(--ept-magma); }
-footer { color: rgba(0,0,0,0.5) !important; }
+h1, h2, h3, h4, h5 { color: var(--ink); font-weight: 700; letter-spacing: -0.01em; }
+h3 { font-size: 1.5rem; }
+footer {
+  color: var(--ink-soft) !important;
+  border-top: 1px solid var(--line);
+  margin-top: 2.5rem; padding-top: 1.25rem;
+  font-size: 0.85rem;
+}
+/* alerts: flat, tinted, left-accent — not glossy Bootstrap fills */
+.alert { border-radius: var(--radius-ctl); border: 1px solid var(--line); border-left-width: 3px; }
+.alert-info { background: var(--surface-2); border-left-color: var(--ept-magma); color: var(--ink); }
+.alert-warning { background: var(--amber-tint); border-left-color: var(--ept-amber); color: #7a5300; }
+.alert-danger { background: rgba(193,53,43,0.08); border-left-color: var(--ept-red); color: #8f2019; }
+/* badges in headers/lists */
+.badge.bg-light { background: var(--surface-2) !important; color: var(--ink) !important; border: 1px solid var(--line); font-weight: 600; }
