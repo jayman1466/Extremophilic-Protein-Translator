@@ -233,7 +233,8 @@ def train_classifier(backbone, head, tokenizer, train_ds, val_ds=None, *,
                      pair_batch_size: int | None = None, lam: float = 1.0,
                      margin: float = 1.0, pos_weight: float | None = None,
                      device: str = "cpu", out_dir: str | None = None,
-                     max_steps: int | None = None):
+                     max_steps: int | None = None,
+                     log_every: int = 20, ckpt_every: int = 0, resume: bool = True):
     """Per-phenotype classifier head on the adapted backbone (§12 Loss 2).
 
     ``pair_ds``: optional matched-pair Dataset (build_pair_dataset). When given,
@@ -241,12 +242,36 @@ def train_classifier(backbone, head, tokenizer, train_ds, val_ds=None, *,
     each step scores both members through the same backbone+head and adds the
     margin term ``max(0, margin - (s_ext - s_out))``. When None, only the
     pointwise BCE is used. Returns history with val AUPRC.
+
+    ``log_every``: print a flushed ``[train_clf] epoch E step S/T loss L`` line
+    every N optimizer steps so a block-buffered SLURM log shows live progress
+    (proof-of-life) long before the first epoch-end eval. ``ckpt_every``: if >0,
+    every N steps atomically write a resumable checkpoint (trainable backbone
+    LoRA weights + head + optimizer + epoch + batch-in-epoch + best + history) to
+    ``<out_dir>/clf_ckpt.pt`` AND flush the running ``clf_history.json`` — so
+    both a growing metrics file and an mtime-updating checkpoint prove the job is
+    advancing between epochs. ``step`` is DERIVED from ``(epoch, batch_index)``;
+    on ``resume`` an existing checkpoint is loaded and the interrupted epoch
+    resumes mid-stream, skipping only the batches already done (there is no LR
+    scheduler here, so a resume cannot overshoot). Only trainable params are
+    saved, so the checkpoint is LoRA-sized.
     """
     import itertools
     import torch
     from torch.utils.data import DataLoader
     from .losses import classifier_loss
     from .data import collate_pairs
+
+    def _trainable_backbone_sd():
+        return {n: p.detach().cpu() for n, p in backbone.named_parameters() if p.requires_grad}
+
+    def _save_ckpt(path, step, ep, batch_in_epoch, best, hist):
+        tmp = str(path) + ".tmp"
+        torch.save({"backbone_trainable": _trainable_backbone_sd(),
+                    "head": head.state_dict(), "opt": opt.state_dict(),
+                    "step": step, "epoch": ep, "batch_in_epoch": batch_in_epoch,
+                    "best": best, "hist": hist}, tmp)
+        os.replace(tmp, path)  # atomic: a kill mid-write can't corrupt the ckpt
 
     pad_id = tokenizer.pad_token_id
     dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
@@ -264,10 +289,29 @@ def train_classifier(backbone, head, tokenizer, train_ds, val_ds=None, *,
 
     hist = {"train_loss": [], "val_auprc": []}
     best = -1.0
-    step = 0
-    for ep in range(epochs):
+    steps_per_epoch = len(dl)
+    total = max_steps or steps_per_epoch * epochs
+    start_ep = 0
+    resume_skip = 0          # batches already completed in the interrupted epoch
+    ckpt_path = Path(out_dir) / "clf_ckpt.pt" if out_dir else None
+    if resume and ckpt_path and ckpt_path.exists():
+        ck = torch.load(ckpt_path, map_location=device)
+        backbone.load_state_dict(ck["backbone_trainable"], strict=False)
+        head.load_state_dict(ck["head"]); opt.load_state_dict(ck["opt"])
+        start_ep = ck["epoch"]; resume_skip = ck.get("batch_in_epoch", 0)
+        best = ck.get("best", -1.0); hist = ck.get("hist", hist)
+        print(f"[train_clf] resumed at epoch {start_ep}, batch {resume_skip} "
+              f"(step {start_ep * steps_per_epoch + resume_skip})", flush=True)
+
+    step = start_ep * steps_per_epoch + resume_skip
+    stop = False
+    for ep in range(start_ep, epochs):
         backbone.train(); head.train()
-        for batch in dl:
+        skip = resume_skip if ep == start_ep else 0
+        for bi, batch in enumerate(dl):
+            if bi < skip:
+                continue
+            step = ep * steps_per_epoch + bi
             batch = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in batch.items()}
             h = _encode(backbone, batch["input_ids"], batch["attention_mask"])
             s = head(h, batch["attention_mask"])
@@ -284,16 +328,26 @@ def train_classifier(backbone, head, tokenizer, train_ds, val_ds=None, *,
                                           lam=lam, margin=margin)
             opt.zero_grad(); loss.backward(); opt.step()
             hist["train_loss"].append((step, float(loss.detach())))
-            step += 1
-            if max_steps and step >= max_steps:
+            if step % log_every == 0:
+                print(f"[train_clf] epoch {ep} step {step}/{total} "
+                      f"loss {float(loss.detach()):.4f}", flush=True)
+            done = step + 1
+            if ckpt_every and ckpt_path and done % ckpt_every == 0:
+                _save_ckpt(ckpt_path, done, ep, bi + 1, best, hist)
+                json.dump(hist, open(Path(out_dir) / "clf_history.json", "w"), indent=2)
+            if max_steps and done >= max_steps:
+                stop = True
                 break
         if val_ds is not None:
             au = evaluate_auprc(backbone, head, tokenizer, val_ds, device, batch_size)
             hist["val_auprc"].append((step, au))
+            print(f"[train_clf] epoch {ep} END val_auprc {au:.4f}", flush=True)
             if au > best and out_dir:
                 best = au
                 torch.save(head.state_dict(), str(Path(out_dir) / "clf_head_best.pt"))
-        if max_steps and step >= max_steps:
+        if out_dir:
+            json.dump(hist, open(Path(out_dir) / "clf_history.json", "w"), indent=2)
+        if stop:
             break
     if out_dir:
         json.dump(hist, open(Path(out_dir) / "clf_history.json", "w"), indent=2)

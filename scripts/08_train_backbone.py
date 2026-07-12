@@ -93,6 +93,12 @@ def main():
             p.add_argument("--pos-weight", type=float, default=None)
             p.add_argument("--neg-per-pos", type=float, default=3.0,
                            help="cap negatives at this multiple of positives (None=all)")
+            p.add_argument("--ckpt-every", type=int, default=0,
+                           help="every N steps write a resumable clf_ckpt.pt + flush clf_history.json (proof-of-life)")
+            p.add_argument("--log-every", type=int, default=20,
+                           help="print a flushed per-step progress line every N steps")
+            p.add_argument("--no-resume", dest="resume", action="store_false",
+                           help="ignore any existing clf_ckpt.pt and start fresh")
         p.add_argument("--full-attention", action="store_true", default=True,
                        help="LoRA on query/key/value + attention-output dense (Section 15 #3)")
         p.add_argument("--qv-only", dest="full_attention", action="store_false",
@@ -162,7 +168,9 @@ def main():
                                 lr_head=args.lr_head, lr_adapter=args.lr_adapter,
                                 batch_size=args.batch_size, lam=args.lam, margin=args.margin,
                                 pos_weight=args.pos_weight, device=args.device,
-                                out_dir=args.out_dir, max_steps=args.max_steps)
+                                out_dir=args.out_dir, max_steps=args.max_steps,
+                                log_every=args.log_every, ckpt_every=args.ckpt_every,
+                                resume=args.resume)
         print(f"[08] done; val_auprc trace: {hist['val_auprc']}")
 
 
