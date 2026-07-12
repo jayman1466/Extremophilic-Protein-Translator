@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 
 __all__ = ["collate_pad", "train_mlm", "train_classifier", "evaluate_auprc",
-           "LengthBucketSampler"]
+           "evaluate_pair_metrics", "LengthBucketSampler"]
 
 
 class LengthBucketSampler:
@@ -228,7 +228,7 @@ def _pseudo_perplexity(model, tokenizer, ds, device, batch_size, amp_ctx=None):
 
 
 def train_classifier(backbone, head, tokenizer, train_ds, val_ds=None, *,
-                     pair_ds=None, epochs: int = 5, lr_head: float = 1e-3,
+                     pair_ds=None, val_pair_ds=None, epochs: int = 5, lr_head: float = 1e-3,
                      lr_adapter: float = 1e-5, batch_size: int = 16,
                      pair_batch_size: int | None = None, lam: float = 1.0,
                      margin: float = 1.0, pos_weight: float | None = None,
@@ -287,7 +287,7 @@ def train_classifier(backbone, head, tokenizer, train_ds, val_ds=None, *,
     opt = torch.optim.AdamW(params)
     pw = torch.tensor(pos_weight, device=device) if pos_weight else None
 
-    hist = {"train_loss": [], "val_auprc": []}
+    hist = {"train_loss": [], "val_auprc": [], "val_pair_acc": [], "val_pair_auc": []}
     best = -1.0
     steps_per_epoch = len(dl)
     total = max_steps or steps_per_epoch * epochs
@@ -346,6 +346,13 @@ def train_classifier(backbone, head, tokenizer, train_ds, val_ds=None, *,
             if au > best and out_dir:
                 best = au
                 torch.save(head.state_dict(), str(Path(out_dir) / "clf_head_best.pt"))
+        if val_pair_ds is not None and len(val_pair_ds) > 0:
+            pm = evaluate_pair_metrics(backbone, head, tokenizer, val_pair_ds, device,
+                                       pair_batch_size or batch_size)
+            hist["val_pair_acc"].append((step, pm["pair_acc"]))
+            hist["val_pair_auc"].append((step, pm["pair_auc"]))
+            print(f"[train_clf] epoch {ep} END val_pair_acc {pm['pair_acc']:.4f} "
+                  f"pair_auc {pm['pair_auc']:.4f} (n={pm['n']})", flush=True)
         if out_dir:
             # Per-epoch MATCHED (adapter, head) snapshot — NOT overwritten across
             # epochs, so a completed early epoch stays independently loadable for
@@ -403,3 +410,56 @@ def evaluate_auprc(backbone, head, tokenizer, ds, device, batch_size):
     if len(set(ys)) < 2:
         return float("nan")
     return float(average_precision_score(ys, ps))
+
+
+def evaluate_pair_metrics(backbone, head, tokenizer, pair_ds, device, batch_size):
+    """Taxonomy-controlled eval on matched (extremophile, outgroup) ortholog pairs.
+
+    Each pair shares a sequence cluster and comes from taxonomically matched
+    genomes, so phylogenetic/taxonomic signal is held ~constant WITHIN a pair.
+    The only thing left for the head to separate is the residual phenotype
+    (thermoadaptation etc.) signal. Reports:
+
+      * ``pair_acc``: fraction of pairs with ``s_ext > s_out`` (the training
+        margin term's target direction). 0.5 == no phenotype signal beyond what
+        taxonomy already fixes (i.e. the head is riding taxonomy); >0.5 == genuine
+        phenotype separation. This is the metric that pointwise val AUPRC CANNOT
+        give, because val singles still carry organism-level taxonomic signal.
+      * ``pair_auc``: AUC of the paired scores framed as a 2N-point ranking
+        (ext labeled 1, out labeled 0) — a threshold-free companion to pair_acc.
+      * ``margin_gap``: mean ``s_ext - s_out`` (logit units), sign-informative.
+      * ``n``: number of scored pairs.
+
+    Ties (s_ext == s_out) count as 0.5 in pair_acc.
+    """
+    import torch
+    from torch.utils.data import DataLoader
+    from .data import collate_pairs
+    from sklearn.metrics import roc_auc_score
+    pad_id = tokenizer.pad_token_id
+    dl = DataLoader(pair_ds, batch_size=batch_size,
+                    collate_fn=lambda b: collate_pairs(b, pad_id))
+    backbone.eval(); head.eval()
+    se_all, so_all = [], []
+    with torch.no_grad():
+        for pb in dl:
+            pb = {k: v.to(device) for k, v in pb.items()}
+            se = head(_encode(backbone, pb["ext_input_ids"], pb["ext_attention_mask"]),
+                      pb["ext_attention_mask"])
+            so = head(_encode(backbone, pb["out_input_ids"], pb["out_attention_mask"]),
+                      pb["out_attention_mask"])
+            se_all.extend(se.float().cpu().tolist())
+            so_all.extend(so.float().cpu().tolist())
+    backbone.train(); head.train()
+    n = len(se_all)
+    if n == 0:
+        return {"pair_acc": float("nan"), "pair_auc": float("nan"),
+                "margin_gap": float("nan"), "n": 0}
+    wins = sum(1.0 if e > o else 0.5 if e == o else 0.0 for e, o in zip(se_all, so_all))
+    pair_acc = wins / n
+    margin_gap = sum(e - o for e, o in zip(se_all, so_all)) / n
+    ys = [1] * n + [0] * n
+    ps = se_all + so_all
+    pair_auc = float(roc_auc_score(ys, ps)) if len(set(ys)) == 2 else float("nan")
+    return {"pair_acc": float(pair_acc), "pair_auc": pair_auc,
+            "margin_gap": float(margin_gap), "n": n}

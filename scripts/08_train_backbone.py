@@ -161,10 +161,17 @@ def main():
                                       neg_per_pos=args.neg_per_pos)
         pair_tr = (build_pair_dataset(df, pairs, tok, args.phenotype, "train",
                                       max_len=args.max_len) if pairs is not None else None)
+        # Held-out matched pairs (VAL split): taxonomy-controlled eval — see
+        # train.evaluate_pair_metrics. Isolates phenotype signal from taxonomy,
+        # which pointwise val AUPRC cannot.
+        pair_va = (build_pair_dataset(df, pairs, tok, args.phenotype, "val",
+                                      max_len=args.max_len) if pairs is not None else None)
         n_pairs = len(pair_tr) if pair_tr is not None else 0
+        n_pairs_va = len(pair_va) if pair_va is not None else 0
         print(f"[08] classifier[{args.phenotype}]: train {len(tr):,} / val {len(va):,} "
-              f"| matched pairs {n_pairs:,}")
-        hist = train_classifier(model, head, tok, tr, va, pair_ds=pair_tr, epochs=args.epochs,
+              f"| matched pairs train {n_pairs:,} / val {n_pairs_va:,}")
+        hist = train_classifier(model, head, tok, tr, va, pair_ds=pair_tr, val_pair_ds=pair_va,
+                                epochs=args.epochs,
                                 lr_head=args.lr_head, lr_adapter=args.lr_adapter,
                                 batch_size=args.batch_size, lam=args.lam, margin=args.margin,
                                 pos_weight=args.pos_weight, device=args.device,
@@ -172,6 +179,7 @@ def main():
                                 log_every=args.log_every, ckpt_every=args.ckpt_every,
                                 resume=args.resume)
         print(f"[08] done; val_auprc trace: {hist['val_auprc']}")
+        print(f"[08] done; val_pair_auc trace: {hist['val_pair_auc']}")
 
 
 if __name__ == "__main__":
