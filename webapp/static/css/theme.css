@@ -1,0 +1,68 @@
+/* Extremophilic Protein Translator palette
+   primary #C34C62  secondary: #e3b8c1 (soft rose) #3b6a80 (steel blue) #c3e2ee (pale cyan) */
+:root {
+  --ept-primary: #C34C62;
+  --ept-primary-dark: #a03b4f;
+  --ept-rose: #e3b8c1;
+  --ept-steel: #3b6a80;
+  --ept-cyan: #c3e2ee;
+}
+
+.ept-navbar { background-color: var(--ept-primary); }
+
+.btn-ept {
+  background-color: var(--ept-primary);
+  border-color: var(--ept-primary);
+  color: #fff;
+}
+.btn-ept:hover { background-color: var(--ept-primary-dark); border-color: var(--ept-primary-dark); color: #fff; }
+
+.btn-steel { background-color: var(--ept-steel); border-color: var(--ept-steel); color: #fff; }
+.btn-steel:hover { background-color: #2f5468; color: #fff; }
+
+a { color: var(--ept-steel); }
+a:hover { color: var(--ept-primary); }
+
+.card-section {
+  border: 1px solid var(--ept-cyan);
+  border-left: 4px solid var(--ept-steel);
+}
+.card-section .card-header {
+  background-color: var(--ept-cyan);
+  color: var(--ept-steel);
+  font-weight: 600;
+}
+
+.phenotype-header .accordion-button:not(.collapsed) {
+  background-color: var(--ept-rose);
+  color: var(--ept-primary-dark);
+}
+.phenotype-header .accordion-button { font-weight: 600; }
+
+.metric-pill {
+  display: inline-block;
+  background: var(--ept-cyan);
+  color: var(--ept-steel);
+  border-radius: 1rem;
+  padding: 0.15rem 0.7rem;
+  margin: 0.15rem;
+  font-size: 0.85rem;
+  font-family: ui-monospace, monospace;
+}
+
+.seq-view {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  word-break: break-all;
+  line-height: 1.6;
+  font-size: 0.85rem;
+}
+.seq-mut {
+  background: var(--ept-primary);
+  color: #fff;
+  border-radius: 2px;
+  padding: 0 1px;
+  font-weight: 700;
+}
+
+.status-badge { font-size: 0.85rem; }
+.viewer-box { width: 100%; height: 360px; border: 1px solid var(--ept-cyan); border-radius: 4px; }

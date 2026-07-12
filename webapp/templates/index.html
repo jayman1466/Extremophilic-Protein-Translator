@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block content %}
+<h3 class="mb-3" style="color:var(--ept-primary)">Design extremophilic enzyme variants</h3>
+<p class="text-muted">
+  Input an enzyme sequence; the pipeline proposes phenotype-shifted variants that
+  preserve the active site, then folds and scores them.
+</p>
+
+{% if errors %}
+<div class="alert alert-danger"><ul class="mb-0">
+  {% for e in errors %}<li>{{ e }}</li>{% endfor %}
+</ul></div>
+{% endif %}
+
+<form method="post" action="{{ url_for('submit') }}">
+  <div class="card card-section mb-3">
+    <div class="card-header">Job</div>
+    <div class="card-body">
+      <div class="mb-3">
+        <label class="form-label">Job Title</label>
+        <input type="text" name="title" class="form-control" maxlength="120"
+               value="{{ form.get('title','') }}" required
+               placeholder="e.g. Thermostable lipase A">
+      </div>
+      <div class="mb-3">
+        <label class="form-label">Amino-Acid Sequence</label>
+        <textarea name="sequence" class="form-control seq-view" rows="4" required
+          placeholder="Paste sequence or FASTA (headers ignored). 20\u20132000 aa.">{{ form.get('sequence','') }}</textarea>
+        <div class="form-text">Standard 20 AA + ambiguity codes (B, Z, X, U, O). Whitespace and FASTA headers are stripped.</div>
+      </div>
+      <div class="row">
+        <div class="col-md-4 mb-3">
+          <label class="form-label">Designs per phenotype</label>
+          <input type="number" name="n_designs" class="form-control" min="1" max="20"
+                 value="{{ form.get('n_designs', 5) }}">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card card-section mb-3">
+    <div class="card-header">Target Phenotypes</div>
+    <div class="card-body">
+      <div class="row">
+        {% for val, label in phenotypes %}
+        <div class="col-md-6">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="phenotypes" value="{{ val }}"
+                   id="ph_{{ val }}"
+                   {% if (form and val in form.getlist('phenotypes')) or (not form and val in ['thermophile']) %}checked{% endif %}>
+            <label class="form-check-label" for="ph_{{ val }}">{{ label }}</label>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <h5 class="mt-4 mb-2" style="color:var(--ept-steel)">Pipeline Components</h5>
+  {% for key, label, help, multi, opts in sections %}
+  <div class="card card-section mb-3">
+    <div class="card-header">{{ label }}</div>
+    <div class="card-body">
+      <p class="text-muted small mb-2">{{ help }}</p>
+      {% if multi %}
+        {% for value, olabel, default, enabled in opts %}
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" name="{{ key }}" value="{{ value }}"
+                 id="{{ key }}_{{ value }}" {% if not enabled %}disabled{% endif %}
+                 {% if (form and value in form.getlist(key)) or (not form and value in defaults[key]) %}checked{% endif %}>
+          <label class="form-check-label" for="{{ key }}_{{ value }}">
+            {{ olabel }}{% if not enabled %} <span class="badge bg-secondary">coming soon</span>{% endif %}
+          </label>
+        </div>
+        {% endfor %}
+      {% else %}
+        <select name="{{ key }}" class="form-select">
+          {% for value, olabel, default, enabled in opts %}
+          <option value="{{ value }}" {% if not enabled %}disabled{% endif %}
+            {% if (form and form.get(key)==value) or (not form and defaults[key]==value) %}selected{% endif %}>
+            {{ olabel }}{% if not enabled %} (coming soon){% endif %}
+          </option>
+          {% endfor %}
+        </select>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+
+  <button type="submit" class="btn btn-ept btn-lg mb-4">Submit Job</button>
+</form>
+{% endblock %}

@@ -44,3 +44,8 @@ logs/
 scratch/
 tmp/
 results/slurm_test/
+
+# webapp local data (SQLite + job files)
+webapp/webapp_data/
+webapp_data/
+*.db

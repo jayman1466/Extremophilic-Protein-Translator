@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h3 class="mb-3" style="color:var(--ept-primary)">Jobs</h3>
+{% if not jobs %}
+<p class="text-muted">No jobs yet. <a href="{{ url_for('index') }}">Submit one.</a></p>
+{% else %}
+<table class="table table-hover align-middle">
+  <thead><tr><th>Title</th><th>Phenotypes</th><th>Status</th><th>Created</th><th></th></tr></thead>
+  <tbody>
+  {% for j in jobs %}
+  <tr>
+    <td>{{ j.title }}</td>
+    <td>{{ j.n_phenotypes }}</td>
+    <td>
+      {% set cls = {'queued':'secondary','running':'info','done':'success','error':'danger'} %}
+      <span class="badge bg-{{ cls.get(j.status,'secondary') }} status-badge">{{ j.status }}</span>
+    </td>
+    <td class="small text-muted">{{ j.created_at }}</td>
+    <td><a class="btn btn-sm btn-steel" href="{{ url_for('job_view', jid=j.id) }}">View</a></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

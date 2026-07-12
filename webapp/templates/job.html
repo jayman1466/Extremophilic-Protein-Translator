@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-start mb-3">
+  <div>
+    <h3 class="mb-1" style="color:var(--ept-primary)">{{ job.title }}</h3>
+    <div class="text-muted small">Job {{ job.id }} &middot; {{ job.sequence|length }} aa &middot;
+      {{ job.n_designs }} designs/phenotype &middot; {{ job.phenotypes|length }} phenotype(s)</div>
+  </div>
+  {% set cls = {'queued':'secondary','running':'info','done':'success','error':'danger'} %}
+  <span class="badge bg-{{ cls.get(job.status,'secondary') }} status-badge fs-6" id="status-badge">{{ job.status }}</span>
+</div>
+
+{% if job.status in ['queued','running'] %}
+<div class="alert alert-info d-flex align-items-center">
+  <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+  <div>Pipeline running &mdash; this page updates automatically when results are ready.</div>
+</div>
+{% elif job.status == 'error' %}
+<div class="alert alert-danger">Job failed: {{ job.message }}</div>
+{% elif results %}
+<div class="mb-3">
+  <a class="btn btn-sm btn-steel" href="{{ url_for('download', jid=job.id, fmt='tsv') }}">Download TSV</a>
+  <a class="btn btn-sm btn-steel" href="{{ url_for('download', jid=job.id, fmt='fasta') }}">Download FASTA</a>
+</div>
+
+<div class="accordion" id="phenoAcc">
+  {% for ph, designs in results.by_phenotype.items() %}
+  {% set phi = loop.index %}
+  <div class="accordion-item phenotype-header">
+    <h2 class="accordion-header">
+      <button class="accordion-button {% if not loop.first %}collapsed{% endif %}" type="button"
+              data-bs-toggle="collapse" data-bs-target="#ph{{ phi }}">
+        {{ phenotype_labels.get(ph, ph) }} &nbsp;<span class="badge bg-light text-dark ms-2">{{ designs|length }} designs</span>
+      </button>
+    </h2>
+    <div id="ph{{ phi }}" class="accordion-collapse collapse {% if loop.first %}show{% endif %}" data-bs-parent="#phenoAcc">
+      <div class="accordion-body">
+        <div class="accordion" id="designAcc{{ phi }}">
+          {% for d in designs %}
+          {% set di = loop.index %}
+          <div class="accordion-item">
+            <h2 class="accordion-header">
+              <button class="accordion-button collapsed" type="button"
+                      data-bs-toggle="collapse" data-bs-target="#d{{ phi }}_{{ di }}">
+                {{ d.design_id }} &nbsp;
+                <span class="metric-pill">score {{ '%.3f'|format(d.classifier_score) }}</span>
+                <span class="metric-pill">AS-RMSD {{ '%.2f'|format(d.active_site_rmsd) }} \u00c5</span>
+                <span class="metric-pill">{{ d.n_mutations }} mut</span>
+              </button>
+            </h2>
+            <div id="d{{ phi }}_{{ di }}" class="accordion-collapse collapse" data-bs-parent="#designAcc{{ phi }}">
+              <div class="accordion-body">
+                <div class="mb-2">
+                  {% for k, v in d.metrics.items() %}
+                  <span class="metric-pill">{{ k }}: {{ v }}</span>
+                  {% endfor %}
+                </div>
+                <div class="mb-2 seq-view">{{ d.highlighted_seq | safe }}</div>
+                <div class="viewer-box" id="viewer_{{ phi }}_{{ di }}"
+                     data-design="{{ url_for('structure_file', jid=job.id, name=d.structure_file) }}"
+                     data-wt="{{ url_for('structure_file', jid=job.id, name=results.wt_structure) }}"></div>
+                <div class="form-text mt-1">Wild-type (steel) overlaid with design (rose). Active-site residues highlighted.</div>
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if job.status in ['queued','running'] %}
+<script>
+  const poll = setInterval(async () => {
+    const r = await fetch("{{ url_for('job_status', jid=job.id) }}");
+    const j = await r.json();
+    if (j.status === 'done' || j.status === 'error') { clearInterval(poll); location.reload(); }
+  }, 5000);
+</script>
+{% elif results %}
+<script src="https://cdn.jsdelivr.net/npm/molstar@4.9.0/build/viewer/molstar.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/molstar@4.9.0/build/viewer/molstar.css">
+<script src="{{ url_for('static', filename='js/viewer.js') }}"></script>
+{% endif %}
+{% endblock %}
