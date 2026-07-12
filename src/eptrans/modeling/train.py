@@ -338,6 +338,7 @@ def train_classifier(backbone, head, tokenizer, train_ds, val_ds=None, *,
             if max_steps and done >= max_steps:
                 stop = True
                 break
+        au = None
         if val_ds is not None:
             au = evaluate_auprc(backbone, head, tokenizer, val_ds, device, batch_size)
             hist["val_auprc"].append((step, au))
@@ -346,6 +347,25 @@ def train_classifier(backbone, head, tokenizer, train_ds, val_ds=None, *,
                 best = au
                 torch.save(head.state_dict(), str(Path(out_dir) / "clf_head_best.pt"))
         if out_dir:
+            # Per-epoch MATCHED (adapter, head) snapshot — NOT overwritten across
+            # epochs, so a completed early epoch stays independently loadable for
+            # the generation step even after later epochs run. Two forms of the
+            # SAME state: (a) a self-contained .pt (trainable backbone LoRA deltas
+            # + head), loadable via the resume path (load_state_dict strict=False);
+            # (b) a portable peft adapter dir written from the classifier model, so
+            # its keys are already in classifier-tree form (a plain peft
+            # load_adapter consumes it — no MLM->clf remap needed).
+            epd = Path(out_dir) / f"clf_epoch{ep}"
+            epd.mkdir(parents=True, exist_ok=True)
+            torch.save({"backbone_trainable": _trainable_backbone_sd(),
+                        "head": head.state_dict(), "epoch": ep, "step": step,
+                        "val_auprc": au}, str(epd / "clf_matched.pt"))
+            try:
+                backbone.save_pretrained(str(epd / "adapter"))
+            except Exception as e:
+                print(f"[train_clf] warn: epoch {ep} adapter save_pretrained failed: {e}",
+                      flush=True)
+            print(f"[train_clf] epoch {ep} snapshot -> {epd}", flush=True)
             json.dump(hist, open(Path(out_dir) / "clf_history.json", "w"), indent=2)
         if stop:
             break

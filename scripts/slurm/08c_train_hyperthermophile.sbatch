@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=/groups/cress/projects/jaymin/eptrans_scratch/logs/clf_hyper_%j.log
 #
 # Stage-2 PROOF-OF-CONCEPT: a single per-phenotype classifier head for
