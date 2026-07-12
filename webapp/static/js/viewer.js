@@ -22,6 +22,10 @@
       await viewer.loadStructureFromUrl(designUrl, "pdb", false, {
         representationParams: { theme: { color: "uniform",
           colorParams: { value: 0x5b1226 } } } });
+      // Mol* sizes its canvas from the container; nudge it to recompute now that
+      // the accordion panel is laid out, so it fits the box instead of the window.
+      try { viewer.plugin.layout.events.updated.next(); } catch (e) {}
+      window.dispatchEvent(new Event("resize"));
     };
     if (parent) parent.addEventListener("shown.bs.collapse", init, { once: true });
     else init();
