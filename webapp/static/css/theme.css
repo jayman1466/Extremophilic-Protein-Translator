@@ -2,7 +2,7 @@
    bg #0B1622 · magma deep #5B1226 · red #C1352B · hot orange #EE6C2B
    amber #F6B23C · cream #F5EFE6 · teal #28C2A8 */
 :root {
-  --ept-bg: #0B1622;
+  --ept-bg: #000000;
   --ept-magma: #5B1226;   /* default body accent */
   --ept-red: #C1352B;
   --ept-orange: #EE6C2B;
