@@ -15,6 +15,7 @@ from flask import (Flask, render_template, request, redirect, url_for,
 
 from pipeline_options import (SECTIONS, PHENOTYPES, default_selection,
                               validate_selection)
+import aggressiveness as agg
 import store
 
 app = Flask(__name__)
@@ -96,15 +97,38 @@ def validate_form(form):
         selection[key] = request.form.getlist(key) if multi else request.form.get(key)
     errs.extend(validate_selection(selection))
 
+    # advanced (expert) overrides — blank means "use the schedule"
+    override = {}
+    _bounds = {"adv_mask_rate": ("mask_rate", 0.02, 0.5),
+               "adv_gamma": ("gamma", 0.5, 6.0),
+               "adv_target_mut_frac": ("target_mut_frac", 0.01, 0.5)}
+    for field, (key, lo, hi) in _bounds.items():
+        raw = (form.get(field) or "").strip()
+        if raw:
+            try:
+                v = float(raw)
+                if not (lo <= v <= hi):
+                    errs.append(f"{key} must be between {lo} and {hi}.")
+                else:
+                    override[key] = v
+            except ValueError:
+                errs.append(f"{key} must be a number.")
+    selection["_advanced_override"] = override or None
+
     return errs, warnings, dict(title=title, sequence=seq, n_designs=n_designs,
                                 phenotypes=phenos, selection=selection)
+
+
+def _agg_ctx():
+    return dict(agg_schedule={str(k): agg.schedule(k) for k in range(1, agg.N_LEVELS + 1)},
+                agg_n_levels=agg.N_LEVELS)
 
 
 @app.route("/")
 def index():
     return render_template("index.html", sections=SECTIONS, phenotypes=PHENOTYPES,
                            defaults=default_selection(), form={}, errors=[],
-                           example_seq=EXAMPLE_SEQ)
+                           example_seq=EXAMPLE_SEQ, **_agg_ctx())
 
 
 @app.route("/submit", methods=["POST"])
@@ -113,7 +137,7 @@ def submit():
     if errs:
         return render_template("index.html", sections=SECTIONS, phenotypes=PHENOTYPES,
                                defaults=default_selection(), form=request.form,
-                               errors=errs, example_seq=EXAMPLE_SEQ), 400
+                               errors=errs, example_seq=EXAMPLE_SEQ, **_agg_ctx()), 400
     jid = store.create_job(**data)
     if warnings:
         store.set_status(jid, "queued", message=" ".join(warnings))
@@ -124,7 +148,8 @@ def submit():
     if DEMO_MODE:
         try:
             import make_demo_results
-            make_demo_results.main(jid, data["phenotypes"], data["n_designs"])
+            override = data["selection"].get("_advanced_override")
+            make_demo_results.main(jid, data["phenotypes"], data["n_designs"], override=override)
         except Exception as e:
             store.set_status(jid, "error", message=f"demo generation failed: {e}")
     return redirect(url_for("job_view", jid=jid))

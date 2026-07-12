@@ -38,8 +38,74 @@
       <div class="row">
         <div class="col-md-4 mb-3">
           <label class="form-label">Designs per phenotype</label>
-          <input type="number" name="n_designs" class="form-control" min="1" max="20"
+          <input type="number" name="n_designs" id="n-designs" class="form-control" min="1" max="20"
                  value="{{ form.get('n_designs', 5) }}">
+          <div class="form-text">Designs auto-span conservative &rarr; aggressive.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card card-section mb-3">
+    <div class="card-header">Design Aggressiveness</div>
+    <div class="card-body">
+      <p class="text-muted small mb-2">
+        A single knob controls how far designs move from wild-type. The N designs above
+        automatically span the range, so one query returns a conservative&ndash;to&ndash;aggressive
+        spectrum. The active-site freeze and catalytic-RMSD gate are invariant at every level &mdash;
+        aggressiveness moves only the <em>mutable-surface</em> budget, never the catalytic core.
+      </p>
+      <div id="agg-preview" class="mb-2"></div>
+
+      <div class="accordion" id="advAcc">
+        <div class="accordion-item">
+          <h2 class="accordion-header">
+            <button class="accordion-button collapsed" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#advBody">
+              Advanced (expert overrides)
+            </button>
+          </h2>
+          <div id="advBody" class="accordion-collapse collapse">
+            <div class="accordion-body">
+              <p class="text-muted small">
+                Leave blank to use the coordinated per-level schedule. Any value here pins that
+                lever across all designs. Hover a label for its definition.
+              </p>
+              <div class="row">
+                <div class="col-md-4 mb-3">
+                  <label class="form-label" data-bs-toggle="tooltip" title=
+                    "mask_rate: fraction of positions masked per Gibbs pass. Magnitude of change. Not the mutation rate — masked positions are often refilled with the wild-type residue, especially where conserved.">
+                    mask_rate <span class="text-muted">&#9432;</span>
+                  </label>
+                  <input type="number" step="0.01" min="0.02" max="0.5" name="adv_mask_rate"
+                         class="form-control" placeholder="schedule"
+                         value="{{ form.get('adv_mask_rate','') }}">
+                </div>
+                <div class="col-md-4 mb-3">
+                  <label class="form-label" data-bs-toggle="tooltip" title=
+                    "gamma: conservation exponent in the mask weight w_i = (1 - c_i)^gamma, where c_i is per-position conservation in [0,1]. High gamma confines masking to the least-conserved surface (safe); low gamma reaches into moderately-conserved positions (bold). This IS the conservation exponent.">
+                    &gamma; (conservation exponent) <span class="text-muted">&#9432;</span>
+                  </label>
+                  <input type="number" step="0.1" min="0.5" max="6" name="adv_gamma"
+                         class="form-control" placeholder="schedule"
+                         value="{{ form.get('adv_gamma','') }}">
+                </div>
+                <div class="col-md-4 mb-3">
+                  <label class="form-label" data-bs-toggle="tooltip" title=
+                    "target_mut_frac: goal fraction of MUTABLE residues changed (the semantic budget). Gibbs sampling stops when this is reached, when the classifier score plateaus, when MPNN-gate acceptance collapses, or at the hard iteration cap — whichever comes first. Iteration count is emergent, not a user parameter.">
+                    target_mut_frac <span class="text-muted">&#9432;</span>
+                  </label>
+                  <input type="number" step="0.01" min="0.01" max="0.5" name="adv_target_mut_frac"
+                         class="form-control" placeholder="schedule"
+                         value="{{ form.get('adv_target_mut_frac','') }}">
+                </div>
+              </div>
+              <p class="text-muted small mb-0" data-bs-toggle="tooltip" title=
+                "Gibbs sampling iterates until whichever fires first: (1) classifier-score plateau, (2) mutation budget reached, (3) MPNN-gate acceptance collapse, (4) hard cap. The MPNN gate also rejects individual implausible substitutions inline.">
+                Gibbs iterations are convergence-driven, not set here <span class="text-muted">&#9432;</span>
+              </p>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -119,5 +185,38 @@
     if (!document.querySelector('input[name="title"]').value)
       document.querySelector('input[name="title"]').value = "Example — B. subtilis lipase A";
   });
+
+  // aggressiveness spread preview: which levels the N designs will span
+  const SCHEDULE = {{ agg_schedule | tojson }};   // {level: {label,target_mut_frac,...}}
+  const N_LEVELS = {{ agg_n_levels }};
+  function spanLevels(n) {
+    if (n <= 1) return [3];
+    if (n <= N_LEVELS) {
+      const step = (N_LEVELS - 1) / (n - 1);
+      return Array.from({length: n}, (_, i) => Math.round(1 + i * step));
+    }
+    const base = Array.from({length: N_LEVELS}, (_, i) => i + 1);
+    let out = [];
+    while (out.length < n) out = out.concat(base);
+    return out.slice(0, n).sort((a, b) => a - b);
+  }
+  const nInput = document.getElementById("n-designs");
+  const prev = document.getElementById("agg-preview");
+  function renderPreview() {
+    const n = Math.max(1, Math.min(20, parseInt(nInput.value) || 1));
+    const levels = spanLevels(n);
+    const counts = {};
+    levels.forEach(l => counts[l] = (counts[l] || 0) + 1);
+    prev.innerHTML = Object.keys(counts).sort().map(l => {
+      const s = SCHEDULE[l];
+      const pct = Math.round(s.target_mut_frac * 100);
+      return `<span class="metric-pill">${s.label}: ~${pct}% mut${counts[l] > 1 ? " ×" + counts[l] : ""}</span>`;
+    }).join(" ");
+  }
+  nInput.addEventListener("input", renderPreview); renderPreview();
+
+  // enable Bootstrap tooltips (Advanced labels)
+  [...document.querySelectorAll('[data-bs-toggle="tooltip"]')]
+    .forEach(el => new bootstrap.Tooltip(el));
 </script>
 {% endblock %}

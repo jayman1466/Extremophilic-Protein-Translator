@@ -26,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import store
+import aggressiveness as agg
 
 AA = "ACDEFGHIKLMNPQRSTVWY"
 WT = ("MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKR"
@@ -60,24 +61,35 @@ def fake_pdb(seq, jitter=0.0):
     return "\n".join(lines)
 
 
-def main(jid, phenotypes, n_designs):
+def main(jid, phenotypes, n_designs, override=None):
     jd = store.job_dir(jid)
     (jd / "structures").mkdir(parents=True, exist_ok=True)
     (jd / "structures" / "wt.pdb").write_text(fake_pdb(WT))
+    L = len(WT)
+    # per-design aggressiveness schedule — the N designs span conservative->aggressive
+    scheds = agg.resolve(n_designs, override=override)
     by = {}
     for ph in phenotypes:
         designs = []
-        for k in range(n_designs):
-            n_mut = random.randint(3, 12)
-            mut = mutate(WT, n_mut)
+        for k, s in enumerate(scheds):
+            # realized mutation count tracks the design's target_mut_frac (of the
+            # mutable surface, ~70% of residues after freezing conserved/active-site),
+            # with a little noise — so the demo shows the real conservative->aggressive spread.
+            mutable = int(L * 0.70)
+            n_mut = max(1, int(round(mutable * s["target_mut_frac"] * random.uniform(0.85, 1.15))))
+            mut = mutate(WT, min(n_mut, L))
             did = f"{ph[:4]}_{k+1}"
             (jd / "structures" / f"{did}.pdb").write_text(fake_pdb(mut, jitter=1.5))
+            # bolder designs: higher phenotype score, but higher active-site RMSD (risk)
             designs.append(dict(
                 design_id=did, sequence=mut, highlighted_seq=highlight(WT, mut),
-                classifier_score=round(random.uniform(0.55, 0.98), 3),
-                active_site_rmsd=round(random.uniform(0.1, 1.4), 2),
+                classifier_score=round(min(0.99, 0.55 + 0.09 * s["level"] + random.uniform(-0.04, 0.04)), 3),
+                active_site_rmsd=round(0.15 + 0.13 * s["level"] + random.uniform(-0.05, 0.05), 2),
                 n_mutations=n_mut, structure_file=f"{did}.pdb",
-                metrics={"pLDDT": round(random.uniform(70, 92), 1),
+                aggressiveness=s["label"], aggressiveness_level=s["level"],
+                metrics={"aggressiveness": s["label"],
+                         "mut %": f"{round(100*n_mut/L,1)}",
+                         "pLDDT": round(random.uniform(70, 92), 1),
                          "TM-score": round(random.uniform(0.85, 0.99), 3),
                          "MPNN score": round(random.uniform(0.8, 1.5), 2),
                          "\u0394 charge": random.randint(-4, 4)}))

@@ -636,12 +636,50 @@ them. Instead:
   `threshold=0.5`, `min_sep=6`) are masked and decoded *together*, the
   inference-time twin of coupling-aware training.
 
-### 16.3 Aggressiveness ladder (maps to §9)
+### 16.3 Aggressiveness — one knob, coordinated schedule (implemented in the portal)
 
-Three composable knobs → 5 designs on a conservative→aggressive frontier:
-1. **Mutable region** — surface-only → +second-shell → all-non-immutable.
-2. **Gibbs iterations / sampling temperature** — near-wild-type → bolder.
-3. **Steering strength** — how hard the phenotype signal pushes (see §16.4).
+The user sees **one** aggressiveness control, not the individual levers — the
+low-level parameters are partially redundant (raising `mask_rate` while raising
+`γ` fight each other) and few users have intuition for "γ = 2.5". The N requested
+designs **auto-span** the frontier (design 1 conservative → design N aggressive),
+so a single query returns the spectrum (the "5 designs of varying aggressiveness"
+spec). The knob maps to a coordinated schedule of three levers:
+
+| Level | target_mut_frac | mask_rate | γ | character |
+|---|---|---|---|---|
+| 1 Conservative | 0.04 | 0.10 | 3.0 | surface only |
+| 2 Cautious | 0.07 | 0.12 | 2.5 | |
+| 3 Moderate | 0.10 | 0.15 | 2.0 | default |
+| 4 Bold | 0.15 | 0.18 | 1.4 | reaches 2nd shell |
+| 5 Aggressive | 0.20 | 0.22 | 1.0 | |
+
+The levers split by role: **`mask_rate`** = how many positions are in play per pass
+(magnitude); **`γ`** = *where* they land on the conservation spectrum (`(1−c_i)^γ`,
+targeting — high γ confines to least-conserved surface); **`target_mut_frac`** = the
+semantic budget (goal fraction of *mutable* residues changed). The **active-site
+freeze and catalytic-RMSD gate are invariant across every level** — aggressiveness
+moves only the mutable-surface budget, never the catalytic core. An **Advanced
+(expert)** panel exposes `mask_rate`/`γ`/`target_mut_frac` for manual override of
+the schedule (with in-UI tooltips carrying the definitions/equations).
+
+### 16.3a Gibbs iteration count is convergence-driven, not a user parameter
+
+Iterations are **emergent**, not set. Sampling stops at whichever fires **first**:
+1. **Classifier-score plateau** — Δ below tolerance over a window of passes
+   (the available phenotype signal is extracted).
+2. **Mutation budget reached** — `target_mut_frac` of the mutable surface changed.
+3. **Acceptance collapse** — fraction of proposed moves surviving the MPNN gate +
+   conservation penalty drops near zero (sampler stuck against structure).
+4. **Hard max-iteration cap** — guarantees termination.
+
+Note the MPNN gate is a **per-move accept/reject filter** during sampling (rejects
+individual implausible substitutions inline) *and* feeds the acceptance-collapse
+signal — it is not itself the terminator. Neither "run until classifier plateaus"
+alone (would over-mutate chasing marginal gains) nor "run until MPNN gate" alone
+(a per-move filter, not a global stop) is correct; the stop is their conjunction.
+Bolder designs naturally run more passes — honest, since the user asked for more
+search. Implemented in `webapp/aggressiveness.py` (`schedule`, `span_levels`,
+`resolve`, `gibbs_stop_rule`).
 
 ### 16.4 Steering — classifier-guided (primary), contrastive (optional, validate first)
 
