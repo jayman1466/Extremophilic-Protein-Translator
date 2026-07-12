@@ -13,9 +13,17 @@ results.json schema:
   "wt_sequence": "...",
   "by_phenotype": {
      "<phenotype>": [
-        {"design_id","sequence","highlighted_seq","classifier_score",
+        {"design_id","sequence","classifier_score",
          "active_site_rmsd","n_mutations","structure_file",
-         "metrics": {label: value, ...}},
+         "metrics": {label: value, ...},
+         # sequence-track payload (3 orthogonal display channels):
+         "track": {
+            "seq": "<design seq>", "wt": "<wt seq>",
+            "conservation": [float in [0,1] | null, ...],   # per-residue MSA conservation
+            "active_site": [1-based int, ...],               # putative catalytic residues
+            "active_site_assigned": bool,                    # false -> UI shows warning
+            "mutations": [{"pos":1-based,"wt":a,"mut":b}, ...]
+         }},
         ...
      ]
   }
@@ -44,8 +52,30 @@ def mutate(seq, n):
     s = list(seq)
     pos = random.sample(range(len(s)), n)
     for p in pos:
-        s[p] = random.choice(AA)
+        s[p] = random.choice([a for a in AA if a != s[p]])  # guarantee a real change
     return "".join(s)
+
+
+def fake_conservation(L, active_site, seed):
+    # smooth-ish per-position conservation in [0,1]; active-site positions forced high.
+    rng = random.Random(seed)
+    base = [rng.random() for _ in range(L)]
+    # smooth with neighbors so it reads like a real profile, not white noise
+    cons = []
+    for i in range(L):
+        w = base[max(0, i-1):min(L, i+2)]
+        cons.append(round(sum(w) / len(w), 3))
+    for p in active_site:  # 1-based
+        if 1 <= p <= L:
+            cons[p-1] = round(min(1.0, 0.85 + rng.random() * 0.15), 3)
+    return cons
+
+
+def build_track(wt, mut, conservation, active_site, active_site_assigned):
+    muts = [dict(pos=i+1, wt=a, mut=b) for i, (a, b) in enumerate(zip(wt, mut)) if a != b]
+    return dict(seq=mut, wt=wt, conservation=conservation,
+                active_site=active_site, active_site_assigned=active_site_assigned,
+                mutations=muts)
 
 
 def fake_pdb(seq, jitter=0.0):
@@ -68,6 +98,8 @@ def main(jid, phenotypes, n_designs, override=None):
     L = len(WT)
     # per-design aggressiveness schedule — the N designs span conservative->aggressive
     scheds = agg.resolve(n_designs, override=override)
+    # a fixed putative active-site set for the demo enzyme (1-based, catalytic triad-like)
+    DEMO_ACTIVE_SITE = [77, 105, 133, 40]
     by = {}
     for ph in phenotypes:
         designs = []
@@ -80,9 +112,16 @@ def main(jid, phenotypes, n_designs, override=None):
             mut = mutate(WT, min(n_mut, L))
             did = f"{ph[:4]}_{k+1}"
             (jd / "structures" / f"{did}.pdb").write_text(fake_pdb(mut, jitter=1.5))
+            # demo: one design per phenotype (the last) shows the "active site not
+            # assigned" fallback so the warning path is exercised in the UI.
+            as_assigned = not (k == len(scheds) - 1 and len(scheds) > 1)
+            active_site = DEMO_ACTIVE_SITE if as_assigned else []
+            cons = fake_conservation(L, active_site, seed=hash((ph, k)) & 0xffff)
+            track = build_track(WT, mut, cons, active_site, as_assigned)
             # bolder designs: higher phenotype score, but higher active-site RMSD (risk)
             designs.append(dict(
                 design_id=did, sequence=mut, highlighted_seq=highlight(WT, mut),
+                track=track,
                 classifier_score=round(min(0.99, 0.55 + 0.09 * s["level"] + random.uniform(-0.04, 0.04)), 3),
                 active_site_rmsd=round(0.15 + 0.13 * s["level"] + random.uniform(-0.05, 0.05), 2),
                 n_mutations=n_mut, structure_file=f"{did}.pdb",

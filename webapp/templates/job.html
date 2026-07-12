@@ -65,7 +65,12 @@
                   <span class="metric-pill">{{ k }}: {{ v }}</span>
                   {% endfor %}
                 </div>
+                {% if d.track %}
+                <div class="mb-2 seq-track-data"
+                     data-track='{{ d.track | tojson }}'></div>
+                {% elif d.highlighted_seq %}
                 <div class="mb-2 seq-view">{{ d.highlighted_seq | safe }}</div>
+                {% endif %}
                 <div class="viewer-box" id="viewer_{{ phi }}_{{ di }}"
                      data-design="{{ url_for('structure_file', jid=job.id, name=d.structure_file) }}"
                      data-wt="{{ url_for('structure_file', jid=job.id, name=results.wt_structure) }}"></div>
@@ -95,6 +100,7 @@
 {% elif results %}
 <script src="https://cdn.jsdelivr.net/npm/molstar@4.9.0/build/viewer/molstar.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/molstar@4.9.0/build/viewer/molstar.css">
+<script src="{{ url_for('static', filename='js/track.js') }}"></script>
 <script src="{{ url_for('static', filename='js/viewer.js') }}"></script>
 {% endif %}
 {% endblock %}

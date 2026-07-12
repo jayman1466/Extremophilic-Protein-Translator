@@ -134,6 +134,52 @@ a:hover { color: var(--ept-magma); }
   font-weight: 700;
 }
 
+/* ---- sequence track: 3 orthogonal channels ----
+   background shade = conservation · underline+dot = active site · box+bold = mutation */
+.seq-track {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.9rem;
+  line-height: 2.1;
+  word-break: break-word;
+  padding: 0.4rem 0.2rem;
+}
+.res {
+  position: relative;
+  display: inline-block;
+  width: 1.05ch;
+  text-align: center;
+  color: #1a1a1a;
+  border-radius: 2px;
+  cursor: default;
+}
+/* mutation channel: orange box + bold mutant letter */
+.res.mut {
+  outline: 2px solid var(--ept-orange);
+  font-weight: 700;
+  color: #7a2f00;
+  border-radius: 3px;
+}
+/* active-site channel: magma underline + dot marker below */
+.res.as { border-bottom: 3px solid var(--ept-magma); }
+.res.as::after {
+  content: "";
+  position: absolute; left: 50%; bottom: -0.55em; transform: translateX(-50%);
+  width: 4px; height: 4px; border-radius: 50%; background: var(--ept-magma);
+}
+/* mutated AND active-site: magma outline (higher-risk), keep dot */
+.res.mut.as { outline-color: var(--ept-magma); }
+
+.track-legend { font-size: 0.78rem; color: rgba(0,0,0,0.65); margin-top: 0.5rem; }
+.track-legend .swatch {
+  display: inline-block; vertical-align: middle; margin-right: 0.25rem;
+  width: 0.9em; height: 0.9em; border-radius: 2px;
+}
+.track-legend .item { margin-right: 1.1rem; white-space: nowrap; }
+.as-warning {
+  background: #fff3cd; border: 1px solid var(--ept-amber); color: #6b4b00;
+  border-radius: 4px; padding: 0.3rem 0.6rem; font-size: 0.82rem; margin-bottom: 0.4rem;
+}
+
 .status-badge { font-size: 0.85rem; }
 .viewer-box {
   position: relative;      /* Mol* absolutely-positions its canvas — contain it */
