@@ -17,14 +17,17 @@ from pipeline_options import (SECTIONS, PHENOTYPES, default_selection,
                               validate_selection)
 import aggressiveness as agg
 import store
+import backends
 
 app = Flask(__name__)
 store.init()
 
-# DEMO MODE: synthesize results on submit until the generation engine is wired.
-# Set env EPT_DEMO=0 to disable once the real backend produces results.json.
+# Generation backend is chosen by env EPT_BACKEND (demo|slurm|broker); see
+# backends.py. The public deployment runs `demo` (no credentials, no cluster
+# path); the private in-network deployment runs `slurm`. Resolved lazily so an
+# unavailable backend fails on first submit, not at import.
 import os as _os
-DEMO_MODE = _os.environ.get("EPT_DEMO", "1") != "0"
+BACKEND_NAME = backends.selected_backend_name()
 
 # Example enzyme for the "load example" button — B. subtilis lipase A (P37957),
 # a small well-characterized secreted enzyme.
@@ -141,17 +144,12 @@ def submit():
     jid = store.create_job(**data)
     if warnings:
         store.set_status(jid, "queued", message=" ".join(warnings))
-    # DEMO MODE: the generation engine isn't wired yet, so synthesize results
-    # immediately. Flip DEMO_MODE off (or set env EPT_DEMO=0) when the real
-    # pipeline is connected — submit will then leave the job "queued" for the
-    # backend worker to pick up.
-    if DEMO_MODE:
-        try:
-            import make_demo_results
-            override = data["selection"].get("_advanced_override")
-            make_demo_results.main(jid, data["phenotypes"], data["n_designs"], override=override)
-        except Exception as e:
-            store.set_status(jid, "error", message=f"demo generation failed: {e}")
+    # Hand the job to the selected generation backend. `demo` synthesizes
+    # results synchronously; `slurm`/`broker` set "running" and advance in poll.
+    try:
+        backends.get_backend().submit(store.get_job(jid))
+    except Exception as e:  # noqa: BLE001
+        store.set_status(jid, "error", message=f"submit failed: {e}")
     return redirect(url_for("job_view", jid=jid))
 
 
@@ -161,6 +159,10 @@ def cancel(jid):
     if not job:
         abort(404)
     if job["status"] in ("queued", "running"):
+        try:
+            backends.get_backend().cancel(jid)  # best-effort remote scancel
+        except Exception:  # noqa: BLE001 — cancel is best-effort
+            pass
         store.set_status(jid, "cancelled", message="Cancelled by user.")
     return redirect(url_for("job_view", jid=jid))
 
@@ -185,6 +187,13 @@ def job_status(jid):
     job = store.get_job(jid)
     if not job:
         abort(404)
+    # Let an async backend advance state (check remote, harvest) before reporting.
+    if job["status"] in ("queued", "running"):
+        try:
+            backends.get_backend().poll(jid)
+        except Exception:  # noqa: BLE001 — polling is best-effort
+            pass
+        job = store.get_job(jid)
     return jsonify(status=job["status"], message=job["message"])
 
 
