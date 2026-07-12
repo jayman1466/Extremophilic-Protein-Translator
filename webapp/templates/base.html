@@ -8,14 +8,17 @@
   <link href="{{ url_for('static', filename='css/theme.css') }}" rel="stylesheet">
 </head>
 <body>
-  <nav class="navbar navbar-expand-lg navbar-dark ept-navbar">
+  <nav class="navbar navbar-expand-lg ept-navbar">
     <div class="container">
-      <a class="navbar-brand fw-bold" href="{{ url_for('index') }}">
-        Extremophilic&nbsp;Protein&nbsp;Translator
+      <a class="navbar-brand" href="{{ url_for('index') }}">
+        <img src="{{ url_for('static', filename='img/logo.svg') }}" alt="Extremolith"
+             class="ept-logo"
+             onerror="this.style.display='none';this.nextElementSibling.style.display='inline';">
+        <span class="brand-text" style="display:none">Extremophilic&nbsp;Protein&nbsp;Translator</span>
       </a>
       <div class="ms-auto">
-        <a class="nav-link d-inline text-white me-3" href="{{ url_for('index') }}">New Job</a>
-        <a class="nav-link d-inline text-white" href="{{ url_for('jobs') }}">Jobs</a>
+        <a class="nav-btn me-2" href="{{ url_for('index') }}">New Job</a>
+        <a class="nav-btn" href="{{ url_for('jobs') }}">Jobs</a>
       </div>
     </div>
   </nav>

@@ -20,6 +20,17 @@ import store
 app = Flask(__name__)
 store.init()
 
+# DEMO MODE: synthesize results on submit until the generation engine is wired.
+# Set env EPT_DEMO=0 to disable once the real backend produces results.json.
+import os as _os
+DEMO_MODE = _os.environ.get("EPT_DEMO", "1") != "0"
+
+# Example enzyme for the "load example" button — B. subtilis lipase A (P37957),
+# a small well-characterized secreted enzyme.
+EXAMPLE_SEQ = ("MKFVKRRIIALVTILMLSVTSLFALQPSAKAAEHNPVVMVHGIGGASFNFAGIKSYLVSQGWSRDKLYAVDF"
+               "WDKTGTNYNNGPVLSRFVQKVLDETGAKKVDIVAHSMGGANTLYYIKNLDGGNKVANVVTLGGANRLTTGKA"
+               "LPGTDPNQKILYTSIYSSADMIVMNYLSRLDGARNVQIHGVGHIGLLYSSQVNSLIKEGLNGGGQNTN")
+
 # IUPAC amino acids (20 standard + ambiguity codes B/Z/X, U selenocysteine, O pyrrolysine)
 AA_RE = re.compile(r"^[ACDEFGHIKLMNPQRSTVWYBZXUO]+$", re.IGNORECASE)
 MIN_LEN = 20
@@ -92,7 +103,8 @@ def validate_form(form):
 @app.route("/")
 def index():
     return render_template("index.html", sections=SECTIONS, phenotypes=PHENOTYPES,
-                           defaults=default_selection(), form={}, errors=[])
+                           defaults=default_selection(), form={}, errors=[],
+                           example_seq=EXAMPLE_SEQ)
 
 
 @app.route("/submit", methods=["POST"])
@@ -101,10 +113,30 @@ def submit():
     if errs:
         return render_template("index.html", sections=SECTIONS, phenotypes=PHENOTYPES,
                                defaults=default_selection(), form=request.form,
-                               errors=errs), 400
+                               errors=errs, example_seq=EXAMPLE_SEQ), 400
     jid = store.create_job(**data)
     if warnings:
         store.set_status(jid, "queued", message=" ".join(warnings))
+    # DEMO MODE: the generation engine isn't wired yet, so synthesize results
+    # immediately. Flip DEMO_MODE off (or set env EPT_DEMO=0) when the real
+    # pipeline is connected — submit will then leave the job "queued" for the
+    # backend worker to pick up.
+    if DEMO_MODE:
+        try:
+            import make_demo_results
+            make_demo_results.main(jid, data["phenotypes"], data["n_designs"])
+        except Exception as e:
+            store.set_status(jid, "error", message=f"demo generation failed: {e}")
+    return redirect(url_for("job_view", jid=jid))
+
+
+@app.route("/job/<jid>/cancel", methods=["POST"])
+def cancel(jid):
+    job = store.get_job(jid)
+    if not job:
+        abort(404)
+    if job["status"] in ("queued", "running"):
+        store.set_status(jid, "cancelled", message="Cancelled by user.")
     return redirect(url_for("job_view", jid=jid))
 
 

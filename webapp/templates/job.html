@@ -6,7 +6,7 @@
     <div class="text-muted small">Job {{ job.id }} &middot; {{ job.sequence|length }} aa &middot;
       {{ job.n_designs }} designs/phenotype &middot; {{ job.phenotypes|length }} phenotype(s)</div>
   </div>
-  {% set cls = {'queued':'secondary','running':'info','done':'success','error':'danger'} %}
+  {% set cls = {'queued':'secondary','running':'info','done':'success','error':'danger','cancelled':'warning'} %}
   <span class="badge bg-{{ cls.get(job.status,'secondary') }} status-badge fs-6" id="status-badge">{{ job.status }}</span>
 </div>
 
@@ -14,10 +14,17 @@
 <div class="alert alert-warning"><strong>Note:</strong> {{ job.message }}</div>
 {% endif %}
 {% if job.status in ['queued','running'] %}
-<div class="alert alert-info d-flex align-items-center">
-  <div class="spinner-border spinner-border-sm me-2" role="status"></div>
-  <div>Pipeline running &mdash; this page updates automatically when results are ready.</div>
+<div class="alert alert-info d-flex align-items-center justify-content-between">
+  <div class="d-flex align-items-center">
+    <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+    <div>Pipeline running &mdash; this page updates automatically when results are ready.</div>
+  </div>
+  <form method="post" action="{{ url_for('cancel', jid=job.id) }}" class="mb-0">
+    <button type="submit" class="btn btn-sm btn-danger-magma">Cancel job</button>
+  </form>
 </div>
+{% elif job.status == 'cancelled' %}
+<div class="alert alert-warning">Job cancelled. {{ job.message }}</div>
 {% elif job.status == 'error' %}
 <div class="alert alert-danger">Job failed: {{ job.message }}</div>
 {% elif results %}
@@ -82,7 +89,7 @@
   const poll = setInterval(async () => {
     const r = await fetch("{{ url_for('job_status', jid=job.id) }}");
     const j = await r.json();
-    if (j.status === 'done' || j.status === 'error') { clearInterval(poll); location.reload(); }
+    if (['done','error','cancelled'].includes(j.status)) { clearInterval(poll); location.reload(); }
   }, 5000);
 </script>
 {% elif results %}
