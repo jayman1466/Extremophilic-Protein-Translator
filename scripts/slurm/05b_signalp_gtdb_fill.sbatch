@@ -13,7 +13,7 @@ set -euo pipefail
 export PYENV_ROOT="$HOME/.pyenv"
 export PATH="$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH"
 
-ACC_LIST="/Users/jaymin/Documents/GitHub/Extremophilic Protein Translator/scripts/slurm/05b_signalp_gtdb_fill.accessions.txt"
+ACC_LIST="/groups/cress/projects/jaymin/eptrans_scratch/signalp_gtdb_fill_accessions.txt"
 PROT_DIR="/groups/cress/projects/jaymin/IS1111/gtdb/protein_faa_reps"      # per-genome proteomes: <domain>/<GENOME>_protein.faa.gz
 OUT_ROOT="/groups/cress/projects/jaymin/eptrans_scratch/signalp_gtdb_fill"
 ORGANISM="other"
