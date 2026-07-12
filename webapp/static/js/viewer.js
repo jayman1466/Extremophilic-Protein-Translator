@@ -1,4 +1,4 @@
-// Mol* overlay: wild-type (steel) + design (rose), superposed.
+// Mol* overlay: wild-type (amber) + design (magma), superposed.
 // Each .viewer-box carries data-wt and data-design URLs (PDB).
 (async function () {
   const boxes = document.querySelectorAll(".viewer-box");
@@ -14,14 +14,14 @@
         layoutIsExpanded: false, layoutShowControls: false,
         layoutShowSequence: false, layoutShowLog: false,
       });
-      // wild-type in steel blue
+      // wild-type in amber (reference)
       await viewer.loadStructureFromUrl(wtUrl, "pdb", false, {
         representationParams: { theme: { color: "uniform",
-          colorParams: { value: 0x3b6a80 } } } });
-      // design in rose, superposed onto WT
+          colorParams: { value: 0xf6b23c } } } });
+      // design in magma, superposed onto WT
       await viewer.loadStructureFromUrl(designUrl, "pdb", false, {
         representationParams: { theme: { color: "uniform",
-          colorParams: { value: 0xc34c62 } } } });
+          colorParams: { value: 0x5b1226 } } } });
     };
     if (parent) parent.addEventListener("shown.bs.collapse", init, { once: true });
     else init();

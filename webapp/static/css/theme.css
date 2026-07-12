@@ -1,14 +1,14 @@
-/* Extremophilic Protein Translator — magma/dark palette
-   bg #0B1622 · magma deep #5B1226 · red #C1352B · hot orange #EE6C2B
-   amber #F6B23C · cream #F5EFE6 · teal #28C2A8 */
+/* Extremophilic Protein Translator — light body, black header
+   accents: magma #5B1226 · red #C1352B · hot orange #EE6C2B · amber #F6B23C
+   cream #FBF8F2 (surfaces) · white body. Teal token retained but unused. */
 :root {
   --ept-bg: #000000;
   --ept-magma: #5B1226;   /* default body accent */
   --ept-red: #C1352B;
   --ept-orange: #EE6C2B;
   --ept-amber: #F6B23C;
-  --ept-cream: #F5EFE6;
-  --ept-teal: #28C2A8;
+  --ept-cream: #FBF8F2;   /* lighter cream */
+  --ept-teal: #28C2A8;    /* retained as a token but no longer used in the UI */
   --ept-panel: #13202e;   /* slightly lifted card surface on the dark bg */
   --ept-panel-2: #1b2a3a;
 }
@@ -39,8 +39,8 @@ body {
 .nav-btn:hover { background-color: var(--ept-magma); color: var(--ept-cream); }
 
 /* ---- links & buttons ---- */
-a { color: #167a68; }
-a:hover { color: var(--ept-red); }
+a { color: var(--ept-red); }
+a:hover { color: var(--ept-magma); }
 
 .btn-ept {
   background-color: var(--ept-magma);
@@ -51,31 +51,33 @@ a:hover { color: var(--ept-red); }
 .btn-ept:hover { background-color: var(--ept-red); border-color: var(--ept-red); color: var(--ept-cream); }
 
 .btn-steel {
-  background-color: var(--ept-teal); border-color: var(--ept-teal); color: #06231e;
+  background-color: var(--ept-orange); border-color: var(--ept-orange); color: #2a1500;
   transition: background-color 0.3s ease;
 }
 .btn-steel:hover { background-color: var(--ept-amber); color: #3a2600; }
 
+/* sample-data / secondary outline button — visible on the white body */
 .btn-outline-cream {
-  background: transparent; border: 1px solid var(--ept-cream); color: var(--ept-cream);
+  background: transparent; border: 1px solid var(--ept-magma); color: var(--ept-magma);
   transition: background-color 0.3s ease, color 0.3s ease;
 }
-.btn-outline-cream:hover { background: var(--ept-cream); color: var(--ept-bg); }
+.btn-outline-cream:hover { background: var(--ept-magma); color: var(--ept-cream); }
 
 .btn-danger-magma {
   background-color: var(--ept-red); border-color: var(--ept-red); color: var(--ept-cream);
 }
 .btn-danger-magma:hover { background-color: var(--ept-magma); color: var(--ept-cream); }
 
-/* ---- cards / sections: red header, cream body ---- */
+/* ---- cards / sections: magma header, cream body ---- */
 .card-section {
   background-color: var(--ept-cream);
   border: 1px solid rgba(0,0,0,0.12);
   border-left: 4px solid var(--ept-magma);
   color: #1a1a1a;
+  margin-bottom: 1.75rem !important;   /* more air between cards */
 }
 .card-section .card-header {
-  background-color: var(--ept-red);
+  background-color: var(--ept-magma);
   color: var(--ept-cream);
   font-weight: 600;
   border-bottom: none;
@@ -89,8 +91,8 @@ a:hover { color: var(--ept-red); }
 .form-control:focus, .form-select:focus {
   background-color: #ffffff;
   color: #1a1a1a;
-  border-color: var(--ept-teal);
-  box-shadow: 0 0 0 0.2rem rgba(40,194,168,0.25);
+  border-color: var(--ept-red);
+  box-shadow: 0 0 0 0.2rem rgba(193,53,43,0.25);
 }
 .form-control::placeholder { color: rgba(0,0,0,0.4); }
 .form-text { color: rgba(0,0,0,0.6) !important; }
@@ -109,8 +111,8 @@ a:hover { color: var(--ept-red); }
 .metric-pill {
   display: inline-block;
   background: #ffffff;
-  color: #167a68;
-  border: 1px solid rgba(40,194,168,0.6);
+  color: var(--ept-magma);
+  border: 1px solid var(--ept-orange);
   border-radius: 1rem;
   padding: 0.15rem 0.7rem;
   margin: 0.15rem;
