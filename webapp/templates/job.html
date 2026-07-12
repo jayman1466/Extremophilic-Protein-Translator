@@ -10,6 +10,9 @@
   <span class="badge bg-{{ cls.get(job.status,'secondary') }} status-badge fs-6" id="status-badge">{{ job.status }}</span>
 </div>
 
+{% if job.status in ['queued','running'] and job.message %}
+<div class="alert alert-warning"><strong>Note:</strong> {{ job.message }}</div>
+{% endif %}
 {% if job.status in ['queued','running'] %}
 <div class="alert alert-info d-flex align-items-center">
   <div class="spinner-border spinner-border-sm me-2" role="status"></div>

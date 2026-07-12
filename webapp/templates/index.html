@@ -24,9 +24,13 @@
       </div>
       <div class="mb-3">
         <label class="form-label">Amino-Acid Sequence</label>
-        <textarea name="sequence" class="form-control seq-view" rows="4" required
-          placeholder="Paste sequence or FASTA (headers ignored). 20\u20132000 aa.">{{ form.get('sequence','') }}</textarea>
-        <div class="form-text">Standard 20 AA + ambiguity codes (B, Z, X, U, O). Whitespace and FASTA headers are stripped.</div>
+        <textarea name="sequence" id="seq-input" class="form-control seq-view" rows="4" required
+          placeholder="Paste sequence or FASTA (headers ignored).">{{ form.get('sequence','') }}</textarea>
+        <div class="form-text">
+          Standard 20 AA + ambiguity codes (B, Z, X, U, O). Whitespace and FASTA headers are stripped.
+          Best results &le; 1022 aa (ESM-2 window); 1022&ndash;1500 aa is windowed with a warning; &gt; 1500 aa is rejected.
+          <span id="seq-count" class="fw-bold"></span>
+        </div>
       </div>
       <div class="row">
         <div class="col-md-4 mb-3">
@@ -89,4 +93,21 @@
 
   <button type="submit" class="btn btn-ept btn-lg mb-4">Submit Job</button>
 </form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const ta = document.getElementById("seq-input");
+  const out = document.getElementById("seq-count");
+  function upd() {
+    const s = ta.value.split("\n").filter(l => !l.startsWith(">")).join("");
+    const n = s.replace(/[\s0-9]/g, "").length;
+    let msg = `${n} aa`, color = "var(--ept-steel)";
+    if (n > 1500) { msg += " — too long (max 1500)"; color = "var(--ept-primary)"; }
+    else if (n > 1022) { msg += " — will be windowed (>1022)"; color = "#b8860b"; }
+    out.textContent = n ? "  •  " + msg : "";
+    out.style.color = color;
+  }
+  ta.addEventListener("input", upd); upd();
+</script>
 {% endblock %}

@@ -22,8 +22,13 @@ store.init()
 
 # IUPAC amino acids (20 standard + ambiguity codes B/Z/X, U selenocysteine, O pyrrolysine)
 AA_RE = re.compile(r"^[ACDEFGHIKLMNPQRSTVWYBZXUO]+$", re.IGNORECASE)
-MAX_LEN = 2000
 MIN_LEN = 20
+# ESM-2 positional limit is 1024 tokens = 1022 residues; generator + classifier run
+# cleanly up to here. 1022-1500: accepted but ESM windows the sequence (cross-window
+# contacts dropped) and ESMFold is memory-heavy — warn. >1500: ESMFold reliably OOMs
+# and windowed generation is too lossy — hard reject.
+ESM_WINDOW = 1022
+MAX_LEN = 1500
 
 
 def _clean_seq(raw: str) -> str:
@@ -34,6 +39,7 @@ def _clean_seq(raw: str) -> str:
 
 def validate_form(form):
     errs = []
+    warnings = []
     title = (form.get("title") or "").strip()
     if not title:
         errs.append("Job title is required.")
@@ -49,7 +55,14 @@ def validate_form(form):
     elif len(seq) < MIN_LEN:
         errs.append(f"Sequence too short ({len(seq)} aa; minimum {MIN_LEN}).")
     elif len(seq) > MAX_LEN:
-        errs.append(f"Sequence too long ({len(seq)} aa; maximum {MAX_LEN}).")
+        errs.append(f"Sequence too long ({len(seq)} aa; maximum {MAX_LEN}). "
+                    f"ESMFold runs out of memory beyond this length.")
+    elif len(seq) > ESM_WINDOW:
+        warnings.append(
+            f"Sequence is {len(seq)} aa, beyond ESM-2's {ESM_WINDOW}-residue window. "
+            f"It will be processed in overlapping windows (long-range contacts that "
+            f"span windows are dropped) and folding is memory-heavy. Results for "
+            f"sequences \u2264 {ESM_WINDOW} aa are more reliable.")
 
     try:
         n_designs = int(form.get("n_designs") or 5)
@@ -72,8 +85,8 @@ def validate_form(form):
         selection[key] = request.form.getlist(key) if multi else request.form.get(key)
     errs.extend(validate_selection(selection))
 
-    return errs, dict(title=title, sequence=seq, n_designs=n_designs,
-                      phenotypes=phenos, selection=selection)
+    return errs, warnings, dict(title=title, sequence=seq, n_designs=n_designs,
+                                phenotypes=phenos, selection=selection)
 
 
 @app.route("/")
@@ -84,12 +97,14 @@ def index():
 
 @app.route("/submit", methods=["POST"])
 def submit():
-    errs, data = validate_form(request.form)
+    errs, warnings, data = validate_form(request.form)
     if errs:
         return render_template("index.html", sections=SECTIONS, phenotypes=PHENOTYPES,
                                defaults=default_selection(), form=request.form,
                                errors=errs), 400
     jid = store.create_job(**data)
+    if warnings:
+        store.set_status(jid, "queued", message=" ".join(warnings))
     return redirect(url_for("job_view", jid=jid))
 
 
