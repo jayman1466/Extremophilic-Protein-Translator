@@ -41,7 +41,14 @@ fi
 
 # SignalP batches internally: concatenate this chunk's proteomes into ONE FASTA
 # (protein ids namespaced by genome as {GENOME}~{PROTID}) and run once.
-CHUNK_FAA=$(mktemp --suffix=.faa)
+# Write the concatenated chunk FASTA to the big VAST scratch, NOT node-local /tmp:
+# each chunk is ~2.5M proteins (~1-1.5 GB) and several concurrent tasks on one
+# node exhausted /tmp -> awk died with ENOSPC and the task failed in ~1s (exit 2),
+# so the %5 throttle burned through array indices without doing work. /groups has
+# ~247 TB free. trap-clean so temp files never accumulate.
+mkdir -p "$OUT_ROOT/tmp"
+CHUNK_FAA=$(mktemp -p "$OUT_ROOT/tmp" --suffix=.faa)
+trap 'rm -f "$CHUNK_FAA"' EXIT
 N=0
 for i in $(seq "$START" "$END"); do
   ACC=$(sed -n "${i}p" "$ACC_LIST")
