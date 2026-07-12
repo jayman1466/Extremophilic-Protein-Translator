@@ -33,6 +33,12 @@ biotite:
     foldseek_af:     "/shared/db/foldseek/latest/db/alphafold_uniprot"         # 2026-02-04
     swissprot_dat:   "/groups/cress/projects/jaymin/IS1111/eptrans/db/swissprot_2026_07_09/uniprot_sprot.dat.gz"  # 2026_02
     interpro_entries: "/groups/cress/projects/jaymin/IS1111/eptrans/db/interpro_2026_07_09/entry.list"
+    # --- Generation-time MSA databases (§10) — shared, read-only; do NOT copy ---
+    # UniRef30 (clustered) for sequence-weighted conservation scoring; the ColabFold
+    # environmental DB (MMseqs2, pre-indexed / COLABDB_READY) for MSA depth on remote
+    # homologs. Both already on /shared/db — used in place, no download/build needed.
+    uniref30_mmseqs: "/shared/db/uniclust/30_2020_06"                              # UniClust/UniRef30 2020_06
+    colabfold_envdb: "/shared/db/colabfold/latest/colabfold_envdb_202108_db"      # ColabFold envdb 202108 (mmseqs stem)
     # InterPro position mapping via mcp-protein-annotation connector (protein2ipr not staged)
     # M-CSA: repo artifact data/mcsa_snapshot/mcsa_catalytic_residues.tsv (API snapshot 2026-07-09)
 
