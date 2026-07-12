@@ -734,6 +734,66 @@ pairs (λ=1.0, margin=1.0), best-by-val-AUPRC, natural class sizes (per-phenotyp
 independent models). Data staged to `$PERSIST`: `labeled_dataset_r232_clustered.parquet`
 (1,985,508 rows), `..._protein_pairs.tsv` (90,984 pairs), FASTA already present.
 
+### Matched protein-pair funnel (per phenotype)
+
+The margin loss (and the taxonomy-controlled pair eval below) consumes
+**protein-level** ortholog pairs, derived as **cluster ∩ matched-genome-pair**
+(`_derive_protein_pairs`, `src/eptrans/dataset.py`): for each matched
+(extremophile, mesophile-outgroup) genome pair, a sequence cluster containing a
+protein from *both* genomes yields one ortholog pair (one protein per genome,
+highest `cs_prob` as a stable tie-break). Measured from
+`labeled_dataset_r232_clustered_protein_pairs.tsv` (90,984 pairs total):
+
+| phenotype | protein pairs | genome pairs | ext genomes | protein pairs / genome pair |
+|---|---:|---:|---:|---:|
+| halophile | 63,846 | 1,472 | 1,472 | 43.4 |
+| thermophile | 15,604 | 560 | 560 | 27.9 |
+| alkaliphile | 6,314 | 292 | 292 | 21.6 |
+| acidophile | 5,051 | 341 | 341 | 14.8 |
+| **hyperthermophile** | **169** | **22** | **22** | **7.7** |
+
+**Why hyperthermophile is the outlier (169 pairs, ~125 train / ~44 val), not a
+low count across the board.** The collapse is the product of two independent
+funnels, and hyperthermophile is small on *both*:
+
+1. **Few matched genome pairs.** Only **22** hyperthermophile genomes survive
+   into matched pairs — vs 1,472 for halophile. Hyperthermophiles are a small,
+   taxonomically narrow slice of GTDB (mostly *Pyrococcus, Thermococcus,
+   Methanocaldococcus, Thermotoga, Aquifex*), so there are simply few
+   extremophile genomes to match, regardless of outgroup availability. Having
+   "roughly as many taxonomy-matched outgroups as extremophiles" (true here:
+   ext genomes == out genomes each row, so pairing is 1:1) does **not** raise
+   this — the binding constraint is the *extremophile* side, not the outgroup
+   side.
+2. **Lowest per-pair ortholog yield.** Each hyperthermophile genome pair yields
+   only **7.7** protein pairs vs halophile's 43.4. This is the cluster-intersection
+   step: two genomes contribute a protein pair only for clusters they *both* land
+   in. Hyperthermophile proteomes are small (compact thermophile genomes) *and*
+   their proteins cluster tightly within-clade but poorly with the mesophile
+   outgroup at the mmseqs identity threshold, so fewer shared clusters ⇒ fewer
+   orthologs per genome pair.
+
+Net: 22 genome pairs × 7.7 orthologs ≈ 169. The pair signal is therefore
+well-powered for halophile/thermophile/acidophile/alkaliphile and **weak only for
+the hyperthermophile POC** — which is exactly the phenotype where we're leaning on
+it least (the POC's purpose is the pipeline, not a defensible pair-AUC).
+
+### Pair-aware eval + per-epoch snapshots (added mid-run)
+
+Added `evaluate_pair_metrics` (`train.py`): a **taxonomy-controlled** eval on
+held-out matched pairs — `pair_acc` = fraction with `s_ext > s_out` (0.5 = the
+head is riding taxonomy; >0.5 = genuine phenotype signal that pointwise val AUPRC
+*cannot* isolate, since val singles still carry organism-level taxonomic signal),
+plus paired `pair_auc` and mean `margin_gap`. Wired into `train_classifier` via
+`val_pair_ds` → logs `val_pair_acc`/`val_pair_auc` per epoch. Standalone
+`scripts/08d_eval_pairs.py` computes the same metrics post-hoc from a
+`clf_epoch<E>/clf_matched.pt` snapshot, so an already-running job (the
+hyperthermophile POC 1152524, which predates the wiring) still gets a pair-AUC.
+Also added per-epoch **matched (adapter, head) snapshots** (`clf_epoch<E>/`,
+never clobbered) so an early epoch stays independently loadable for the
+generation step, plus step-checkpointing (`clf_ckpt.pt`) + flushed progress
+logging + mid-epoch resume.
+
 ## Coupling-aware masking — thresholds and the contact-pair cache
 
 The masked-LM objective masks positions to reconstruct; **coupling-aware masking**
