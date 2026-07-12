@@ -9,6 +9,14 @@ backbone is frozen and precomputed, an epoch is seconds not days — so we drop 
 neg_per_pos subsampling and train on ALL negatives, and do all 5 phenotypes in
 one job.
 
+Training loss = weighted BCE + ACTIVE matched-pair margin (design "alternative":
+cache once, pair-aware). A train-split matched-pair sub-batch is scored each step
+and the margin term max(0, margin - (s_ext - s_out)) is added — the anti-taxonomy
+mechanism, operating on the head's readout of the frozen features (the pairs push
+the head toward a taxonomy-invariant direction that exists in the fixed embedding).
+This is the same L_pair as the end-to-end path, minus the ability to reshape the
+representation.
+
 Metrics per phenotype match the end-to-end path:
   * pointwise val AUPRC (average precision) — the §12 selection metric.
   * taxonomy-controlled pair metrics (pair_acc / pair_auc / margin_gap) on
@@ -74,6 +82,8 @@ def main():
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--lam", type=float, default=1.0, help="pair margin loss weight")
     ap.add_argument("--margin", type=float, default=1.0)
+    ap.add_argument("--pair-batch-size", type=int, default=256,
+                    help="matched-pair sub-batch per step for the active margin term")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=1466)
     ap.add_argument("--out-root", required=True)
@@ -118,10 +128,12 @@ def main():
         pp = pairs[pairs["class"] == pheno] if "class" in pairs.columns else pairs.iloc[0:0]
         pp = pp[pp["ext_id"].astype(str).isin(id2row) & pp["outgroup_id"].astype(str).isin(id2row)]
         vpp = pp[(pp["ext_id"].map(split_of) == "val") & (pp["outgroup_id"].map(split_of) == "val")]
+        tpp = pp[(pp["ext_id"].map(split_of) == "train") & (pp["outgroup_id"].map(split_of) == "train")]
         n_pos = int((tr_y == 1).sum())
         pw = float((tr_y == 0).sum()) / max(n_pos, 1)
         print(f"[10] {pheno}: train {len(tr):,} (pos {n_pos:,}) / val {len(va):,} "
-              f"| val pairs {len(vpp):,} | pos_weight {pw:.1f}", flush=True)
+              f"| train pairs {len(tpp):,} / val pairs {len(vpp):,} | pos_weight {pw:.1f}",
+              flush=True)
         if n_pos == 0:
             print(f"[10] {pheno}: no positives, skipping"); continue
 
@@ -132,20 +144,38 @@ def main():
 
         ext_rows = rows_for(vpp["ext_id"].astype(str).tolist()) if len(vpp) else None
         out_rows = rows_for(vpp["outgroup_id"].astype(str).tolist()) if len(vpp) else None
+        # TRAIN pairs -> active margin term (the anti-taxonomy mechanism). A pair
+        # sub-batch is drawn each step and cycled if fewer pairs than steps; the
+        # margin pushes s_ext > s_out on taxonomy-matched orthologs so the head
+        # finds a taxonomy-invariant direction in the frozen features.
+        tr_ext = rows_for(tpp["ext_id"].astype(str).tolist()) if len(tpp) else None
+        tr_out = rows_for(tpp["outgroup_id"].astype(str).tolist()) if len(tpp) else None
+        n_tp = int(tr_ext.shape[0]) if tr_ext is not None else 0
 
         hist = {"train_loss": [], "val_auprc": [], "val_pair_acc": [], "val_pair_auc": []}
         best = -1.0
         odir = Path(args.out_root) / f"clf_{pheno}_cached"
         odir.mkdir(parents=True, exist_ok=True)
         n_tr = tr_rows.shape[0]
+        pair_bs = args.pair_batch_size
         for ep in range(args.epochs):
             head.train()
             perm = torch.randperm(n_tr, device=args.device)
+            pair_perm = torch.randperm(n_tp, device=args.device) if n_tp else None
+            pp_cur = 0
             tot = 0.0
             for i in range(0, n_tr, args.batch_size):
                 idx = perm[i:i + args.batch_size]
                 s = head(Xt[tr_rows[idx]]).squeeze(-1)
+                pe = po = None
+                if n_tp:
+                    if pp_cur + pair_bs > n_tp:          # cycle when exhausted
+                        pair_perm = torch.randperm(n_tp, device=args.device); pp_cur = 0
+                    pidx = pair_perm[pp_cur:pp_cur + pair_bs]; pp_cur += pair_bs
+                    pe = head(Xt[tr_ext[pidx]]).squeeze(-1)
+                    po = head(Xt[tr_out[pidx]]).squeeze(-1)
                 loss, _ = classifier_loss(s, tr_y[idx], pos_weight=pw_t,
+                                          pair_ext=pe, pair_out=po,
                                           lam=args.lam, margin=args.margin)
                 opt.zero_grad(); loss.backward(); opt.step()
                 tot += float(loss.detach()) * len(idx)
