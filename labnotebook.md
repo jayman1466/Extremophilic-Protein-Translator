@@ -695,6 +695,45 @@ Operational notes for future Jarvis work:
 Measured throughput: **~1.94 step/s (31 seq/s) at batch 16**, ~25k steps/epoch →
 **~3.6 h/epoch, ~10.7 h for 3 epochs (~$21 spot)**.
 
+### Stage-1 result (COMPLETE)
+
+Coupling-aware `both`-mode MLM ran 3 epochs on the 420k subsample with the
+precomputed contact cache. **Val pseudo-perplexity trace: 6.237 → 6.217 → 6.2168**
+(epochs 0/1/2, at steps 26,347 / 52,695 / 79,043). The adaptation is essentially
+captured in the first pass (ESM-2 unadapted ≈10–15 PPL → 6.24); epochs 2–3 refine
+at the margin and the curve plateaus with no val uptick (no overfitting on 400k).
+The ~6.2 floor sits higher than a plain i.i.d.-masked run would, consistent with
+coupling-aware masking making reconstruction genuinely harder by design — the true
+test of *learned* coupling is the post-training probe (mask one partner of a known
+salt-bridge/disulfide pair, check the other co-varies), not this number.
+
+`mlm_adapter_best` (best-by-val-PPL, 94.4 MB rank-32 LoRA) transferred to biotite
+`$PERSIST/models/mlm_adapt/`. Jarvis instance destroyed — **Stage-1 total $42.32**
+spot (precompute + 3 epochs + the ~$8 restart-idle incident), well under budget.
+
+## Stage-2 — per-phenotype classifiers (coupling-aware, biotite)
+
+Five per-phenotype classifier heads (`scripts/slurm/08b_train_classifiers.sbatch`,
+job 1152290, array 0-4%2 on `gpu_h200 gpu:1`), each branching from the SAME
+coupling-aware Stage-1 adapter — the coupling-adapted representations propagate;
+the classifier is discriminative (no masking), so adapter inheritance IS the
+coupling-aware path.
+
+**Critical bug caught + fixed before launch:** the MLM adapter trains on
+`EsmForMaskedLM` (keys `base_model.model.esm.encoder…`) while the classifier is a
+bare `EsmModel` (keys `…encoder…`, no `esm.` prefix). `peft.load_adapter` returns
+OK but **silently drops** the mismatched keys — every classifier would have trained
+from a *random* adapter, inheriting zero coupling-awareness. Proven by tweaking a
+LoRA weight to +1.234 and reading back 0.177. Fixed with
+`load_mlm_adapter_into_classifier` (remaps keys, **raises if 0 transfer**). Verified
+end-to-end on the real 3B: **288 LoRA tensors transferred, 0 unmatched**,
+max|lora_A|=0.183 (real trained values, not random).
+
+Classifier config: 5 epochs, lr_head 1e-3 / lr_adapter 1e-5, margin-loss on matched
+pairs (λ=1.0, margin=1.0), best-by-val-AUPRC, natural class sizes (per-phenotype
+independent models). Data staged to `$PERSIST`: `labeled_dataset_r232_clustered.parquet`
+(1,985,508 rows), `..._protein_pairs.tsv` (90,984 pairs), FASTA already present.
+
 ## Coupling-aware masking — thresholds and the contact-pair cache
 
 The masked-LM objective masks positions to reconstruct; **coupling-aware masking**
