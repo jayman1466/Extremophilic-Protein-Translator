@@ -17,18 +17,34 @@ gcloud config set project "$PROJECT"
 gcloud services enable run.googleapis.com artifactregistry.googleapis.com \
   cloudbuild.googleapis.com storage.googleapis.com
 
-# 1b. grant the build service account the roles Cloud Build needs.
-#     Since mid-2024 new projects no longer auto-grant these to the default
-#     compute SA, so source-based deploys fail with PERMISSION_DENIED until set.
-PROJECT_NUM="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
-BUILD_SA="${PROJECT_NUM}-compute@developer.gserviceaccount.com"
-echo ">> granting build roles to $BUILD_SA"
-for ROLE in roles/cloudbuild.builds.builder roles/storage.objectViewer roles/artifactregistry.writer; do
-  gcloud projects add-iam-policy-binding "$PROJECT" \
-    --member="serviceAccount:${BUILD_SA}" --role="$ROLE" \
-    --condition=None --quiet >/dev/null
-done
-echo ">> waiting 20s for IAM propagation"; sleep 20
+# 1b. grant the build service account the roles Cloud Build needs — but only if
+#     missing. Since mid-2024 new projects no longer auto-grant these to the
+#     default compute SA, so source deploys fail with PERMISSION_DENIED until set.
+#     Set SKIP_IAM=1 to bypass this block entirely on routine redeploys.
+if [[ "${SKIP_IAM:-0}" != "1" ]]; then
+  PROJECT_NUM="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
+  BUILD_SA="${PROJECT_NUM}-compute@developer.gserviceaccount.com"
+  granted_any=0
+  for ROLE in roles/cloudbuild.builds.builder roles/storage.objectViewer roles/artifactregistry.writer; do
+    # list members currently bound to this exact role; skip grant if SA present
+    MEMBERS="$(gcloud projects get-iam-policy "$PROJECT" \
+      --flatten='bindings[].members' \
+      --filter="bindings.role=${ROLE}" \
+      --format='value(bindings.members)' 2>/dev/null || true)"
+    if grep -qx "serviceAccount:${BUILD_SA}" <<<"$MEMBERS"; then
+      echo ">> IAM ok: $BUILD_SA already has $ROLE"
+    else
+      echo ">> granting $ROLE to $BUILD_SA"
+      gcloud projects add-iam-policy-binding "$PROJECT" \
+        --member="serviceAccount:${BUILD_SA}" --role="$ROLE" \
+        --condition=None --quiet >/dev/null
+      granted_any=1
+    fi
+  done
+  if [[ "$granted_any" == "1" ]]; then
+    echo ">> waiting 20s for IAM propagation"; sleep 20
+  fi
+fi
 
 # 2. create the storage bucket if absent
 if ! gcloud storage buckets describe "gs://$BUCKET" >/dev/null 2>&1; then
