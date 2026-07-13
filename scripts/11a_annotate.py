@@ -205,6 +205,9 @@ def main():
                     help="reviewed Swiss-Prot mmseqs DB stem (PRIMARY seq channel)")
     ap.add_argument("--no-foldseek", action="store_true",
                     help="skip the slow foldseek-vs-AF structural channel")
+    ap.add_argument("--consensus-frac", type=float, default=0.5,
+                    help="keep a transferred position only if >= this fraction of the "
+                         "contributing annotated homologs support it (default 0.5)")
     ap.add_argument("--mmseqs-m8", default="", help="optional Stage-1 mmseqs hits.m8 for seq channel")
     ap.add_argument("--workdir", default=".")
     ap.add_argument("--seq-len", type=int, required=True)
@@ -219,17 +222,25 @@ def main():
                  "foldseek_mcsa": set(), "mmseqs_swissprot": set()}
     detail = []
 
+    support = {}                 # qpos -> set(homolog accs) supporting it
+    contributing = set()         # homologs (accs) that transferred >=1 annotated position
+
     def _transfer(hit_iter, src, table):
         n = 0
         for acc, qstart, qaln, tstart, taln in hit_iter:
             tpos = table.get(acc)
             if not tpos:
                 continue
+            got = False
             for qp in transfer_from_alignment(qstart, qaln, tstart, taln, tpos):
                 if 1 <= qp <= args.seq_len:
                     by_source[src].add(qp)
+                    support.setdefault(qp, set()).add(acc)
                     detail.append(dict(pos=qp, source=src, homolog=acc))
                     n += 1
+                    got = True
+            if got:
+                contributing.add(acc)
         return n
 
     # --- PRIMARY channel: mmseqs WT-sequence vs reviewed Swiss-Prot DB ---
@@ -253,8 +264,22 @@ def main():
         print(f"[11a] Stage-1 m8 seq-channel hits: {len(mh)}", flush=True)
         _transfer(iter(mh), "mmseqs_swissprot", swissprot)
 
-    transferred = sorted(set().union(*by_source.values())) if any(by_source.values()) else []
-    out = dict(transferred=transferred,
+    raw_union = sorted(set().union(*by_source.values())) if any(by_source.values()) else []
+    # Consensus filter: a transferred position is kept only if a fraction >= consensus_frac
+    # of the CONTRIBUTING annotated homologs support it. Point catalytic/coordination
+    # residues are near-universal across homologs; incidental single-homolog BINDING
+    # ranges fall out. Denominator = homologs that transferred anything (so a laccase
+    # aligned against 145 hits, of which K are annotated, needs >= consensus_frac*K votes).
+    n_contrib = max(1, len(contributing))
+    keep_votes = max(1, int(round(args.consensus_frac * n_contrib)))
+    transferred = sorted(p for p in raw_union if len(support.get(p, ())) >= keep_votes)
+    print(f"[11a] consensus filter: {len(raw_union)} raw -> {len(transferred)} kept "
+          f"(>= {keep_votes}/{n_contrib} contributing homologs, frac={args.consensus_frac})",
+          flush=True)
+    out = dict(transferred=transferred, transferred_raw_union=raw_union,
+               consensus_frac=args.consensus_frac, keep_votes=keep_votes,
+               n_contributing_homologs=n_contrib,
+               position_support={str(p): sorted(support[p]) for p in transferred},
                by_source={k: sorted(v) for k, v in by_source.items()},
                n_swissprot_hits=len(sp), n_foldseek_hits=len(fs), n_mmseqs_hits=len(mh),
                detail=detail[:500])
