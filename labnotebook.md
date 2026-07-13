@@ -916,3 +916,48 @@ active site protected preventively (frozen, never mutated) *and* verificationall
   MLM-standalone the degraded-input path.
 - **Contact-precompute batching** — current precompute is single-sequence
   (~25 seq/s, GPU ~47%); batched inference would cut the ~4.5 h one-time pass.
+
+## Generation-stage tools provisioned on biotite (2026-07-13)
+
+The generation pipeline's structural gate (Stage 6) and folding oracle are now
+installed and validated on biotite. Both were built on the **login node**
+(igi.biotite, which has internet) and validated on **GPU nodes** (which do NOT —
+conda/pip/HF-download all fail there with NameResolutionError; the split is the
+standard no-egress-compute-node pattern).
+
+**LigandMPNN** (`conda env: ligandmpnn`, repo `eptrans_scratch/software/LigandMPNN`)
+— one install ships **all MPNN variants**: ProteinMPNN, LigandMPNN, SolubleMPNN,
+membrane. So the auto-select design (LigandMPNN for holo / ProteinMPNN for apo)
+needs no second install. Validated on bundled `inputs/1BC8.pdb` (a 2-Zn protein):
+`protein_mpnn` and `ligand_mpnn` both exit 0; LigandMPNN correctly detected the
+2 Zn ions + 41 ligand-context residues and produced a higher-confidence design
+(ligand_confidence 0.555 vs ProteinMPNN 0.397; seq_rec 0.52 vs 0.49) — the
+metalloenzyme case the gate is built for. Gotchas: numpy pinned 1.26.4 (2.x
+breaks); vendored openfold used deprecated `np.int`/`np.float` — sed-patched to
+builtins in `openfold/{np/residue_constants.py,np/relax/utils.py,data/templates.py}`
+(re-apply if repo re-cloned); `prody` is a required dep missing from the repo's
+install docs.
+
+**ESMFold** (`conda env: esmfold`) — HF `transformers` `EsmForProteinFolding`
+path (not the fair-esm/openfold build), weights `facebook/esmfold_v1` in the
+shared HF cache (`HF_HOME=.../IS1111/eptrans/hf_cache`, 27 GB, co-located with the
+3B ESM-2). Validated: folded a 78-res test sequence in 1.9 s on an RTX A5000,
+mean pLDDT 0.80, PDB written (`esmfold_validation_1BC8test.pdb` artifact). Run
+with `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1` on GPU nodes. `model.esm.half()`
+puts the ESM trunk in fp16 (standard ESMFold inference); the "contact_head newly
+initialized" warning is benign (folding path unaffected).
+
+**Databases** (verified present, from `config/config.yaml`): Foldseek PDB
+`/shared/db/foldseek/latest/db/pdb`, Foldseek AlphaFold
+`/shared/db/foldseek/latest/db/alphafold_uniprot`, UniRef30
+`/shared/db/uniclust/30_2020_06`, ColabFold envDB
+`/shared/db/colabfold/latest/colabfold_envdb_202108_db`, UniProt mmseqs
+`/shared/db/uniprot/latest/mmseqs`. `mmseqs` + `foldseek` on PATH
+(`/shared/software/bin`). Foldseek is the Stage-3 recall booster — transfers
+M-CSA/Swiss-Prot catalytic-residue annotations from PDB/AlphaFold structural
+homologs when no direct sequence match exists.
+
+Pipeline tool status: Stages 1–2 (mmseqs/conservation) ✅, Stage 3 (foldseek +
+annotation) ✅, Stages 4–5 (ESM-2 3B + cached heads) ✅ already, Stage 6a
+(LigandMPNN/ProteinMPNN) ✅ now, Stage 6b (ESMFold) ✅ now. All generation-stage
+tools are installed; what remains is the runtime driver in `SlurmBackend.submit`.
