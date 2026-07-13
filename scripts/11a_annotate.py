@@ -100,14 +100,31 @@ def transfer_from_alignment(qstart, qaln, tstart, taln, annotated_tpos):
 
 
 def foldseek_search(wt_pdb, db, workdir, max_seqs=300):
-    """foldseek easy-search -> list of (acc, qstart, qaln, tstart, taln, bits)."""
+    """foldseek easy-search vs the AlphaFold DB -> list of
+    (acc, qstart, qaln, tstart, taln, bits).
+
+    BOUNDED for a single query against the 645 GB AF DB (the search stalled unbounded):
+      --split-memory-limit  pages the huge target index through RAM in chunks (the OOM
+                            guardrail, same as the mmseqs MSA fix).
+      --prefilter-mode 1    UNGAPPED prefilter — much cheaper first pass; only structurally
+                            similar targets reach the expensive gapped alignment.
+      -s (sensitivity)      lowered from the 9.5 default to 7.0: for active-site transfer
+                            we want clear structural homologs, not the deep twilight zone,
+                            so a faster, less exhaustive search suffices.
+      --max-seqs            cap on aligned targets (default 300 homologs is ample).
+    Runtime knobs overridable via env (FOLDSEEK_MEM_LIMIT / FOLDSEEK_SENS).
+    """
     m8 = Path(workdir) / "fs_hits.m8"
     tmp = Path(workdir) / "fs_tmp"
+    mem_cap = os.environ.get("FOLDSEEK_MEM_LIMIT", "80G")
+    sens = os.environ.get("FOLDSEEK_SENS", "7.0")
     cmd = ["foldseek", "easy-search", str(wt_pdb), db, str(m8), str(tmp),
            "--format-output", "query,target,qstart,qend,tstart,tend,qaln,taln,bits",
-           "--max-seqs", str(max_seqs), "-e", "1e-3", "--threads", str(os.cpu_count() or 8)]
+           "--max-seqs", str(max_seqs), "-e", "1e-3", "-s", sens,
+           "--prefilter-mode", "1", "--split-memory-limit", mem_cap,
+           "--threads", str(os.cpu_count() or 8)]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=2400)
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"[11a] foldseek failed ({type(e).__name__}): "
               f"{getattr(e,'stderr','')[:200] if hasattr(e,'stderr') else ''}", flush=True)
