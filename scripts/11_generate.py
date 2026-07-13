@@ -67,9 +67,16 @@ def run_msa_conservation(seq, uniref_db, workdir, min_hits=25, max_hits=2000):
     qf.write_text(f">query\n{seq}\n")
     m8 = Path(workdir) / "hits.m8"
     tmp = Path(workdir) / "mmseqs_tmp"
+    # --split-memory-limit caps the target-DB footprint (pages large DBs through RAM
+    # in chunks) so a single-query search against a big DB does NOT OOM — the failure
+    # mode that killed the uniprot_kb (90GB) attempt. Target should be a CLUSTERED DB
+    # (UniRef50) not the full uniprot_kb: same conservation signal, ~4x smaller, and
+    # non-redundant. mmseqs accepts a FASTA target directly (builds a temp DB).
+    mem_cap = os.environ.get("MMSEQS_MEM_LIMIT", "80G")
     cmd = ["mmseqs", "easy-search", str(qf), uniref_db, str(m8), str(tmp),
            "--format-output", "query,target,pident,qstart,qend,qaln,taln",
            "-s", "5.7", "--max-seqs", str(max_hits), "-e", "1e-3",
+           "--split-memory-limit", mem_cap,
            "--threads", str(os.cpu_count() or 8)]
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=1800)
