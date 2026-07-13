@@ -249,25 +249,61 @@ in the loop" defense against oracle exploitation.
 **Purpose.** The verificational half of active-site protection and the fold-
 integrity oracle. Cheap structural screen first, then a folding confirmation.
 
-**6a — MPNN gate (cheap, fold-free).** Score the proposal against the wild-type
-backbone with **ProteinMPNN** (LigandMPNN when a cofactor/metal is present —
-advertised, cofactor-aware). The inverse-folding likelihood of the proposed
-sequence on the fixed WT backbone screens structurally implausible proposals
-without folding anything: a proposal MPNN finds unlikely on the native backbone
-is likely destabilising. Reject below an MPNN-score margin relative to WT. This
-runs on every Gibbs proposal (it is cheap), so it shapes the trajectory, not
-just the final output.
+**6a — MPNN structural audit (periodic, not every step).** The inverse-folding
+likelihood of a proposed sequence on the fixed WT backbone screens structurally
+implausible designs without folding anything: a sequence MPNN finds unlikely on
+the native backbone is likely destabilising. But a full MPNN pass per Gibbs
+proposal is too expensive (up to `MAX_GIBBS_ITERS` × N-levels passes), and MPNN
+only at the very end lets a trajectory drift far into implausible territory
+before it's caught. Use a **two-tier gate**:
+
+- **Every step — cheap accept/reject.** The per-step objective is the phenotype
+  score (Stage 5) gated by the non-learnable biophysical layer — both already
+  computed each step. This catches obvious-bad moves at zero extra cost.
+- **Every K accepted moves — MPNN audit.** Run MPNN on the accumulated design;
+  if its margin vs. WT has fallen below `MPNN_THRESH`, **roll back to the last
+  MPNN-passing checkpoint** and resume with a fresh RNG seed. This bounds
+  structural drift to K accepted moves at `1/K` the MPNN cost. `K` is set by the
+  aggressiveness schedule and scales *inversely* with boldness (conservative
+  ~every 8 moves, aggressive ~every 3), so the audit fires per roughly-constant
+  *mutation count* rather than per step — a bold run that mutates fast is checked
+  more often. `K` lives in `aggressiveness._SCHEDULE` alongside
+  `mask_rate`/`gamma`/`target_mut_frac`.
+
+**MPNN variant — auto-selected on ligand presence, not a manual toggle.**
+- **Holo input (ligand / cofactor / metal present in the folded structure) →
+  LigandMPNN** (`ligandmpnn` skill, Dauparas et al. 2023). It conditions the
+  sequence on the ligand context, so a pocket-lining or metal-coordinating
+  residue is scored *in the presence of* the cofactor. ProteinMPNN is
+  ligand-blind (backbone only) and can favour a residue that is geometrically
+  fine but destroys coordination — wrong for metalloenzymes and cofactor-
+  dependent enzymes, which is much of this project's target set.
+- **Apo input (no ligand resolved, or sequence-only → single-sequence ESMFold) →
+  ProteinMPNN** (`proteinmpnn` skill). With no ligand context LigandMPNN degrades
+  to ~ProteinMPNN anyway, so there's nothing to gain from the heavier path.
+- **Selection is automatic** from whether the WT structure carries relevant
+  heteroatoms/metals — the user does not have to know whether their enzyme is a
+  metalloenzyme to get the right gate. (`SolubleMPNN` is deliberately *not* used:
+  it biases toward cytosolic solubility, the opposite of this project's secreted-
+  protein context.)
+- **Consequence — the ligand choice is one decision seen from both ends.** When
+  LigandMPNN gates, Stage 3 must include the ligand-coordinating shell in
+  `frozen[]` (already listed there) and Stage 6c must measure **coordination
+  geometry** (metal–ligand / cofactor-contact distances), not just backbone RMSD.
 
 **6b — refold survivors.** Fold each surviving accepted design with **ESMFold**
 (single-sequence; `esmfold2` skill). Fold WT with the *same* method so the RMSD
 reflects the sequence change, not cross-method bias (webapp `fold` help text).
 Require high pLDDT and low global backbone RMSD to the WT fold (Oracle 3).
 
-**6c — catalytic-RMSD gate.** The decisive functional check: superpose design
-onto WT and measure **catalytic-atom RMSD** over the `frozen[]` active-site
+**6c — catalytic-geometry gate.** The decisive functional check: superpose
+design onto WT and measure **catalytic-atom RMSD** over the `frozen[]` active-site
 residues specifically (not just global backbone). A design that keeps global
-fold but distorts the catalytic geometry fails. This is the verificational
-guarantee that complements the preventive freeze.
+fold but distorts the catalytic geometry fails. When the input is holo (LigandMPNN
+path), this gate additionally checks **coordination geometry** — metal–ligand and
+key cofactor-contact distances against WT — since a preserved catalytic-residue
+RMSD does not by itself guarantee the cofactor still coordinates. This is the
+verificational guarantee that complements the preventive freeze.
 
 **Gate ordering (cheap→expensive).** MPNN (per proposal) → global pLDDT/RMSD
 (per accepted design) → catalytic-RMSD (per folded design). Most rejections
@@ -286,16 +322,23 @@ happen at the cheapest stage.
 fold WT once (ESMFold) ; compute WT contact map, MSA, conservation, frozen[]
 for level in span_levels(N):                       # aggressiveness 1..5
     sched = schedule(level)                         # mask_rate, gamma, target_mut_frac
-    seq = query
+    mpnn = LigandMPNN if wt_has_ligand else ProteinMPNN     # auto-selected (6a)
+    seq = query ; checkpoint = query ; n_accept = 0
     for it in range(MAX_GIBBS_ITERS):
         units = build_mask_units(L, special, frozen, contact_pairs, spans)
         mask  = sample_mask_units(conservation, units, sched.mask_rate, sched.gamma)
         prop  = adapted_mlm.fill_joint(seq, mask, units)     # coupled decode
-        # --- gate the proposal ---
-        if mpnn_margin(prop, wt_backbone) < MPNN_THRESH:      continue   # 6a reject
-        s = clf_score(prop, phenotype) gated by biophysical(prop)        # stage 5
+        # --- cheap per-step accept/reject (stage 5) ---
+        s = clf_score(prop, phenotype) gated by biophysical(prop)
         if accept(s, prev_s):                                  # score-driven accept
-            seq, prev_s = prop, s
+            seq, prev_s = prop, s ; n_accept += 1
+            # --- periodic MPNN structural audit (6a), every K accepted moves ---
+            if n_accept % sched.mpnn_every == 0:
+                if mpnn.margin(seq, wt_backbone) < MPNN_THRESH:
+                    seq, prev_s = checkpoint, clf_score(checkpoint, phenotype)  # roll back
+                    reseed(rng)
+                else:
+                    checkpoint = seq                            # advance last-good
         if gibbs_stop_rule fires (plateau / budget / collapse / cap): break
     # --- confirm the level's final design ---
     pdb = esmfold(seq)
@@ -304,8 +347,15 @@ for level in span_levels(N):                       # aggressiveness 1..5
 ```
 
 Key invariants:
-- `frozen[]` and the catalytic-RMSD gate are identical across all levels; only
-  `sched` (the mutable-surface budget) varies. (`aggressiveness.py` contract.)
+- `frozen[]` and the catalytic-geometry gate are identical across all levels;
+  only `sched` (the mutable-surface budget *and* the MPNN audit cadence
+  `mpnn_every`) varies. (`aggressiveness.py` contract.)
+- the MPNN gate is **periodic in-loop** (every `mpnn_every` accepted moves, with
+  rollback to the last MPNN-passing checkpoint) plus a full gate on the final
+  design — not per-proposal. Cheap per-step accept/reject is the phenotype +
+  biophysical score.
+- MPNN variant is auto-selected per input: LigandMPNN for holo (ligand/cofactor/
+  metal), ProteinMPNN for apo.
 - coupled positions are always masked and refilled as a unit (never split), so
   the contact-pair coupling learned in Stage-1/Stage-2 training is honoured at
   generation time.
@@ -337,16 +387,23 @@ Key invariants:
 - Stage 4 the Gibbs driver: joint coupled decode from the adapted MLM, wired to
   the existing masking units + schedule + stop rule.
 - Stage 5 cached-head scoring + non-learnable biophysical gate.
-- Stage 6 MPNN gate → ESMFold refold → catalytic-RMSD gate, ordered cheap→expensive.
+- Stage 6 periodic in-loop MPNN audit (every `mpnn_every` accepted moves, with
+  checkpoint rollback) → ESMFold refold → catalytic-geometry gate, ordered
+  cheap→expensive; MPNN variant auto-selected (LigandMPNN holo / ProteinMPNN apo).
+  Requires adding an `mpnn_every` field to `aggressiveness._SCHEDULE` (inverse to
+  boldness: ~8 conservative → ~3 aggressive).
 - The assembled per-level Gibbs loop and its result artifacts
   (`design_<level>.{json,pdb}`, trajectories) that `poll()` harvests.
 
 **Open items carried from §16 (decide before/at implementation):**
 - Contrastive delta-logit steering — validate per-phenotype (esp. pH
   anti-correlation) before enabling; default is classifier-guided.
-- Standalone masked-gen vs. MPNN-coupled — this spec treats MPNN as an in-loop
-  gate (tightly coupled path); the MLM-standalone degraded path drops 6a and
-  relies on the refold+catalytic-RMSD gate only.
+- Standalone masked-gen vs. MPNN-coupled — this spec treats MPNN as a periodic
+  in-loop audit (tightly coupled path); the MLM-standalone degraded path drops 6a
+  and relies on the refold + catalytic-geometry gate only.
+- MPNN audit cadence `mpnn_every` (K) — the ~8→3 inverse-to-boldness schedule is
+  a starting point; tune once real trajectories show how fast drift accumulates
+  per accepted move at each level.
 - Contact-precompute batching — the WT contact map is one-off per job so it is
   not the bottleneck here; batching matters for the training-time precompute, not
   generation.
