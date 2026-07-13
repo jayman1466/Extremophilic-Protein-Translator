@@ -961,3 +961,77 @@ Pipeline tool status: Stages 1–2 (mmseqs/conservation) ✅, Stage 3 (foldseek 
 annotation) ✅, Stages 4–5 (ESM-2 3B + cached heads) ✅ already, Stage 6a
 (LigandMPNN/ProteinMPNN) ✅ now, Stage 6b (ESMFold) ✅ now. All generation-stage
 tools are installed; what remains is the runtime driver in `SlurmBackend.submit`.
+
+## Stage 1–3 fixes and full end-to-end laccase run (07-13)
+
+Three fixes landed after the first end-to-end laccase run (which used a
+uniform-conservation fallback because the MSA DB was misconfigured):
+
+**1. MSA database + memory (commit a1a1861).** The first run's conservation was
+uniform because `/shared/db/uniclust/30_2020_06` is an HH-suite DB (hhblits), not
+mmseqs, and the fallback (`uniprot_kb`, 90 GB) OOM'd a single-query `easy-search`.
+Fixed: target the clustered **UniRef50** FASTA (`/shared/db/uniref/uniref50/latest`,
+~24 GB, non-redundant), add `--split-memory-limit` (env `MMSEQS_MEM_LIMIT`, default
+80G) as a hard footprint cap. UniRef50's 50%-identity clustering also gives
+first-order de-redundancy against taxonomic over-sampling.
+
+**2. Henikoff conservation weighting (commit 32553f8).** Replaced a crude
+percent-identity discount with true Henikoff & Henikoff (1994) position-based
+sequence weights: per column c, a sequence with residue r gets weight
+`1/(k_c · n_{c,r})` (k_c = distinct residues in the column, n_{c,r} = sequences
+sharing r), averaged over covered columns and renormalised to mean 1. This corrects
+phylogenetic over-sampling that raw counts miss. Conservation is the weighted
+modal-residue fraction per column. Unit-tested: 10 near-identical + 2 divergent
+sequences → over-sampled group weight 0.4 each, divergent 4.0 each (10× up-weight).
+
+**3. Swiss-Prot annotation channel + adaptive Otsu freeze (commits dd8a7c7, 66f36d9,
+0fd29f8).** The foldseek-vs-AlphaFold structural channel returned 0 transferable
+annotations (verified: 0/300 AF hits present in the reviewed Swiss-Prot or M-CSA
+tables — AF DB is dominated by unreviewed TrEMBL entries). Root cause: annotated
+laccase homologs are reachable by *sequence* homology, not among the top structural
+AF neighbours. Fix: a **reviewed Swiss-Prot mmseqs DB** (575,503 seqs, built once on
+the login node) is now the PRIMARY channel — `mmseqs` WT-seq search → transfer
+ACT_SITE/BINDING/SITE (+ M-CSA catalytic) in UniProt coordinate space via the
+alignment. foldseek-vs-AF is off by default (`GEN_USE_FOLDSEEK=1` to enable as a
+recall booster). The raw union over-transfers (213/519 = 41%, extended BINDING
+ranges), so an **adaptive Otsu (1979) threshold** on the per-position homolog vote
+distribution finds the natural break between the incidental-range tail and the
+recurrent-catalytic cluster — parameter-free, adapts per enzyme to hit count and
+annotation depth; hard floor of 2 votes.
+
+### Full pipeline run (H200, job 82374b61, all fixes)
+
+| stage | result |
+|---|---|
+| Swiss-Prot transfer | 145 homologs → 213 raw positions → **Otsu kept 60** (threshold 6 votes, max support 22) |
+| Cu-ligand retention | **10 of 11** kept by transfer (His84/86/129/131, His415/418/420, His472/Cys473/His474); His422 fell 1 vote below the Otsu cut but is re-caught by the Cu-motif backstop |
+| active site (Stage 4) | 80 residues = 60 transferred + 19 conservation + 1 motif |
+| conservation | Henikoff-weighted, mean 0.432, 2000 MSA hits |
+
+Design results (best per phenotype, WT classifier scores thermophile 0.017 /
+halophile 0.009):
+
+| phenotype | best design | clf score | # muts | active-site CA-RMSD |
+|---|---|---|---|---|
+| thermophile | ther_2 | 0.911 | 146 | 1.36 Å |
+| thermophile | ther_1 | 0.366 | 87 | 1.09 Å |
+| halophile | halo_3 | 0.744 | 188 | **14.9 Å** ⚠ |
+| halophile | halo_2 | 0.467 | 162 | **17.2 Å** ⚠ |
+| halophile | halo_1 | 0.326 | 116 | 1.90 Å |
+
+**Key observations.**
+- Real Henikoff conservation lifted thermophile from a ~0.3 ceiling (uniform-fallback
+  run) to 0.91 — masking now targets variable positions and spares the constrained
+  active-site/conserved core. This confirms the earlier ruling that thermophiles
+  needed *real conservation*, not more Gibbs cycles.
+- **The active-site RMSD gate is flagging classifier gaming on the halophile head:**
+  the two top-scoring halophile designs (0.744, 0.467) have catastrophic active-site
+  RMSDs (14.9, 17.2 Å) from ~160–190 mutations — the fold collapses around the frozen
+  residues, so the high scores are not physically trustworthy. Only the low-scoring
+  halo_1 (0.326) holds a coherent site (1.9 Å). Argues for a tighter mutation budget
+  or promoting RMSD from a reported metric to a hard filter.
+
+Artifacts: `laccase_gen_full_results.json`, `laccase_active_site_transfer.json`,
+`laccase_ther2_full.pdb` (clf 0.911, RMSD 1.36 Å), `laccase_halo3_full.pdb`
+(clf 0.744 but RMSD 14.9 Å — gaming example). Annotation tables archived as
+`annotation_tables.tar.gz`.
