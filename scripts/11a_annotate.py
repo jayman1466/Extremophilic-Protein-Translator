@@ -206,8 +206,10 @@ def main():
     ap.add_argument("--no-foldseek", action="store_true",
                     help="skip the slow foldseek-vs-AF structural channel")
     ap.add_argument("--consensus-frac", type=float, default=0.5,
-                    help="keep a transferred position only if >= this fraction of the "
-                         "contributing annotated homologs support it (default 0.5)")
+                    help="keep a transferred position only if its homolog vote count is "
+                         ">= this fraction of the MAX observed support (default 0.5)")
+    ap.add_argument("--consensus-min-votes", type=int, default=2,
+                    help="absolute floor on supporting homologs to keep a position (default 2)")
     ap.add_argument("--mmseqs-m8", default="", help="optional Stage-1 mmseqs hits.m8 for seq channel")
     ap.add_argument("--workdir", default=".")
     ap.add_argument("--seq-len", type=int, required=True)
@@ -265,21 +267,25 @@ def main():
         _transfer(iter(mh), "mmseqs_swissprot", swissprot)
 
     raw_union = sorted(set().union(*by_source.values())) if any(by_source.values()) else []
-    # Consensus filter: a transferred position is kept only if a fraction >= consensus_frac
-    # of the CONTRIBUTING annotated homologs support it. Point catalytic/coordination
-    # residues are near-universal across homologs; incidental single-homolog BINDING
-    # ranges fall out. Denominator = homologs that transferred anything (so a laccase
-    # aligned against 145 hits, of which K are annotated, needs >= consensus_frac*K votes).
-    n_contrib = max(1, len(contributing))
-    keep_votes = max(1, int(round(args.consensus_frac * n_contrib)))
-    transferred = sorted(p for p in raw_union if len(support.get(p, ())) >= keep_votes)
+    # Consensus filter. Each transferred position carries a vote count = number of distinct
+    # annotated homologs whose (aligned) annotation landed there. Real catalytic/coordination
+    # residues are recurrently annotated across the homolog set and rise to the TOP of the
+    # support distribution; incidental single-homolog BINDING ranges sit at the bottom (a
+    # long tail of 1-2 vote positions). We threshold on a fraction of the MAX observed
+    # support (self-calibrating to how deep/annotated the homolog set is) with an absolute
+    # floor of 2 votes, rather than on the count of contributing homologs (each homolog only
+    # annotates its own few sites, so no position is supported by a large fraction of them).
+    votes = {p: len(support.get(p, ())) for p in raw_union}
+    max_sup = max(votes.values()) if votes else 0
+    keep_votes = max(args.consensus_min_votes, int(round(args.consensus_frac * max_sup)))
+    transferred = sorted(p for p in raw_union if votes[p] >= keep_votes)
     print(f"[11a] consensus filter: {len(raw_union)} raw -> {len(transferred)} kept "
-          f"(>= {keep_votes}/{n_contrib} contributing homologs, frac={args.consensus_frac})",
-          flush=True)
+          f"(>= {keep_votes} votes; max_support={max_sup}, frac={args.consensus_frac}, "
+          f"floor={args.consensus_min_votes})", flush=True)
     out = dict(transferred=transferred, transferred_raw_union=raw_union,
-               consensus_frac=args.consensus_frac, keep_votes=keep_votes,
-               n_contributing_homologs=n_contrib,
-               position_support={str(p): sorted(support[p]) for p in transferred},
+               consensus_frac=args.consensus_frac, keep_votes=keep_votes, max_support=max_sup,
+               n_contributing_homologs=len(contributing),
+               position_support={str(p): votes[p] for p in transferred},
                by_source={k: sorted(v) for k, v in by_source.items()},
                n_swissprot_hits=len(sp), n_foldseek_hits=len(fs), n_mmseqs_hits=len(mh),
                detail=detail[:500])
