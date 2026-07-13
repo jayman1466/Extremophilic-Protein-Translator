@@ -30,6 +30,48 @@ import sys, os, json, argparse, subprocess, re, gzip
 from pathlib import Path
 
 
+def otsu_threshold(values):
+    """Parameter-free split of a 1-D integer distribution (Otsu 1979).
+
+    Given per-position homolog vote counts, find the integer cut t that MAXIMISES
+    between-class variance (equivalently minimises within-class variance) of the two
+    groups {v < t} and {v >= t}. This adapts per enzyme to however many homologs were
+    found and however deeply they're annotated: a deeply-annotated protein with a high
+    catalytic-cluster peak gets a high cut; a sparsely-annotated one gets a low cut.
+    Returns the smallest vote count to KEEP (the >= side). If the distribution has no
+    spread (all equal) returns that single value.
+    """
+    if not values:
+        return 1
+    vmin, vmax = min(values), max(values)
+    if vmin == vmax:
+        return vmin
+    # histogram over integer vote counts
+    n = len(values)
+    hist = {}
+    for v in values:
+        hist[v] = hist.get(v, 0) + 1
+    total_sum = sum(values)
+    best_t, best_var = vmin + 1, -1.0
+    w0 = 0        # count below t
+    sum0 = 0      # weighted sum below t
+    # candidate thresholds t split into [<t] and [>=t]; iterate t over vmin+1..vmax
+    for t in range(vmin, vmax + 1):
+        # move class boundary: everything == (t-1) joins the "below" class
+        c = hist.get(t - 1, 0)
+        w0 += c
+        sum0 += c * (t - 1)
+        w1 = n - w0
+        if w0 == 0 or w1 == 0:
+            continue
+        m0 = sum0 / w0
+        m1 = (total_sum - sum0) / w1
+        var_between = w0 * w1 * (m0 - m1) ** 2   # /n^2 const, irrelevant to argmax
+        if var_between > best_var:
+            best_var, best_t = var_between, t
+    return best_t
+
+
 def parse_swissprot_sites(tsv_gz):
     """{accession: set(uniprot_pos)} from a UniProt TSV with ft_act_site/ft_binding/
     ft_site columns. Feature strings look like 'ACT_SITE 195; /note=...; BINDING 41..43;'.
@@ -205,9 +247,9 @@ def main():
                     help="reviewed Swiss-Prot mmseqs DB stem (PRIMARY seq channel)")
     ap.add_argument("--no-foldseek", action="store_true",
                     help="skip the slow foldseek-vs-AF structural channel")
-    ap.add_argument("--consensus-frac", type=float, default=0.5,
-                    help="keep a transferred position only if its homolog vote count is "
-                         ">= this fraction of the MAX observed support (default 0.5)")
+    ap.add_argument("--consensus-frac", type=float, default=0.0,
+                    help="manual override: keep positions with vote count >= this fraction "
+                         "of MAX support. Default 0 -> use adaptive Otsu threshold instead.")
     ap.add_argument("--consensus-min-votes", type=int, default=2,
                     help="absolute floor on supporting homologs to keep a position (default 2)")
     ap.add_argument("--mmseqs-m8", default="", help="optional Stage-1 mmseqs hits.m8 for seq channel")
@@ -277,14 +319,26 @@ def main():
     # annotates its own few sites, so no position is supported by a large fraction of them).
     votes = {p: len(support.get(p, ())) for p in raw_union}
     max_sup = max(votes.values()) if votes else 0
-    keep_votes = max(args.consensus_min_votes, int(round(args.consensus_frac * max_sup)))
+    # Adaptive threshold: Otsu split of the vote distribution (parameter-free, per-enzyme).
+    # A manual --consensus-frac override (fraction of max support) is honoured if given >0;
+    # otherwise Otsu picks the natural break between the incidental-range tail and the
+    # recurrently-annotated catalytic cluster. A hard floor of --consensus-min-votes always
+    # applies (a single-homolog position is never trusted).
+    if args.consensus_frac and args.consensus_frac > 0:
+        keep_votes = max(args.consensus_min_votes, int(round(args.consensus_frac * max_sup)))
+        method = f"frac={args.consensus_frac}"
+    else:
+        keep_votes = max(args.consensus_min_votes, otsu_threshold(list(votes.values())))
+        method = "otsu"
     transferred = sorted(p for p in raw_union if votes[p] >= keep_votes)
-    print(f"[11a] consensus filter: {len(raw_union)} raw -> {len(transferred)} kept "
-          f"(>= {keep_votes} votes; max_support={max_sup}, frac={args.consensus_frac}, "
-          f"floor={args.consensus_min_votes})", flush=True)
+    print(f"[11a] consensus filter ({method}): {len(raw_union)} raw -> {len(transferred)} kept "
+          f"(>= {keep_votes} votes; max_support={max_sup}, floor={args.consensus_min_votes})",
+          flush=True)
     out = dict(transferred=transferred, transferred_raw_union=raw_union,
-               consensus_frac=args.consensus_frac, keep_votes=keep_votes, max_support=max_sup,
+               consensus_method=method, keep_votes=keep_votes, max_support=max_sup,
                n_contributing_homologs=len(contributing),
+               vote_histogram={str(v): sum(1 for x in votes.values() if x == v)
+                               for v in sorted(set(votes.values()))},
                position_support={str(p): votes[p] for p in transferred},
                by_source={k: sorted(v) for k, v in by_source.items()},
                n_swissprot_hits=len(sp), n_foldseek_hits=len(fs), n_mmseqs_hits=len(mh),
