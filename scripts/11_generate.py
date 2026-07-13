@@ -7,8 +7,13 @@ Chains, for ONE input enzyme + ONE phenotype:
   Stage 2  conservation  sequence-weighted per-column conservation from the MSA
   Stage 3  active-site   frozen[] = high-conservation columns U detected
                           multicopper-oxidase Cu-site motif residues (His/Cys)
-  Stage 4  masked-gen    ESM-2 3B + MLM adapter, conservation-gated, contact-pair
-                          coupled masking units (masking.py), Gibbs passes
+  Stage 4  masked-gen    ESM-2 3B + MLM adapter, conservation-gated masking units
+                          (masking.py), Gibbs passes. NOTE: this first end-to-end
+                          version uses SINGLETON mask units (build_mask_units with
+                          no contact_pairs) — the contact-pair COUPLED masking of the
+                          production spec (decode coupled residues jointly) is the
+                          documented next enhancement: it needs the WT ESM-2 contact
+                          map fed as contact_pairs, computed once per job.
   Stage 5  scoring       per-phenotype cached head (directional signal) +
                           non-learnable biophysical proxy (anti-gaming gate)
 

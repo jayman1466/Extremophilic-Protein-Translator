@@ -20,14 +20,20 @@ from pathlib import Path
 
 
 def wt_has_ligand(pdb_path):
-    """True if the PDB has HETATM records that are ligand/metal (not water)."""
-    metals = {"ZN", "CU", "FE", "MG", "MN", "CA", "NI", "CO", "MO", "K", "NA"}
+    """True if the PDB has a non-water HETATM record (ligand/cofactor/metal ion).
+
+    Metals and cofactors are recorded as HETATM in standard PDB files (the metal's
+    residue name, e.g. ' ZN', is what's returned), so the single HETATM scan below
+    covers them. NOTE: ESMFold output is a de-novo backbone with NO HETATM records,
+    so on ESMFold-folded WT this returns apo (ProteinMPNN). To exercise the holo
+    (LigandMPNN) path, feed a WT PDB that carries the cofactor (e.g. a crystal
+    structure or a co-folded complex) rather than the single-sequence ESMFold model.
+    """
     for ln in Path(pdb_path).read_text().splitlines():
         if ln.startswith("HETATM"):
             resn = ln[17:20].strip()
             if resn not in ("HOH", "WAT"):
                 return True, resn
-    # also detect metal ions recorded as ATOM with element in metals
     return False, None
 
 
