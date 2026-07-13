@@ -46,6 +46,11 @@ HEADDIR=$PERSIST/models/cached_probes
 CAND_LIST=(); FOLD_LIST=()
 ANN_DIR=${GEN_ANN_DIR:-$SW/annotations}
 FOLDSEEK_AF=${GEN_FOLDSEEK_AF:-/shared/db/foldseek/latest/db/alphafold_uniprot}
+SPROT_DB=${GEN_SPROT_DB:-$ANN_DIR/swissprot_mmseqs/sprot}
+# Structural foldseek-vs-AF channel is OFF by default: it returns mostly UNREVIEWED
+# TrEMBL neighbours (no site annotations) and is slow vs the 645GB DB. Set GEN_USE_FOLDSEEK=1
+# to enable it as a recall booster.
+USE_FOLDSEEK=${GEN_USE_FOLDSEEK:-0}
 
 # ---------- Stage 0: fold WT ONCE (esmfold) — annotation needs the structure ----------
 conda activate esmfold
@@ -53,15 +58,19 @@ echo "[gen] === fold WT (for annotation transfer) ==="
 python "$REPO/scripts/11b_fold_rmsd.py" --wt-only "$SEQ" --structures "$STRUCT" --max-len 1000
 conda deactivate
 
-# ---------- Stage 3: annotation transfer (eptrans_ml: foldseek on PATH) ----------
-# foldseek WT vs local AlphaFold DB -> transfer M-CSA/Swiss-Prot catalytic residues.
+# ---------- Stage 3: annotation transfer (eptrans_ml: mmseqs+foldseek on PATH) ----------
+# PRIMARY: mmseqs WT-seq vs reviewed Swiss-Prot DB -> transfer ACT_SITE/BINDING/SITE
+# (+ M-CSA catalytic) in UniProt coord space. Foldseek-vs-AF optional recall booster.
 # Skips gracefully (empty transfer) if annotation tables aren't staged.
 conda activate eptrans_ml
 if [ -f "$ANN_DIR/swissprot_sites.tsv.gz" ] || [ -f "$ANN_DIR/mcsa_catalytic_residues.json" ]; then
-  echo "[gen] === Stage 3: annotation transfer (foldseek + M-CSA/Swiss-Prot) ==="
+  echo "[gen] === Stage 3: annotation transfer (Swiss-Prot seq + M-CSA) ==="
+  FS_FLAG="--no-foldseek"; [ "$USE_FOLDSEEK" = "1" ] && FS_FLAG=""
   python "$REPO/scripts/11a_annotate.py" \
-    --wt-pdb "$STRUCT/wt.pdb" --out "$JOBDIR/active_site_transfer.json" \
-    --ann-dir "$ANN_DIR" --foldseek-af-db "$FOLDSEEK_AF" \
+    --wt-pdb "$STRUCT/wt.pdb" --wt-seq "$SEQ" \
+    --out "$JOBDIR/active_site_transfer.json" \
+    --ann-dir "$ANN_DIR" --swissprot-db "$SPROT_DB" \
+    --foldseek-af-db "$FOLDSEEK_AF" $FS_FLAG \
     --workdir "$JOBDIR/_annot" --seq-len "${#SEQ}" || \
     echo '{"transferred":[]}' > "$JOBDIR/active_site_transfer.json"
 else

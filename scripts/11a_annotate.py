@@ -161,12 +161,50 @@ def mmseqs_hits_from_m8(m8_path):
     return hits
 
 
+def swissprot_search(seq, sprot_db, workdir, max_seqs=500):
+    """mmseqs easy-search of the WT SEQUENCE vs a reviewed Swiss-Prot mmseqs DB ->
+    list of (acc, qstart, qaln, tstart, taln). This is the PRIMARY annotation channel:
+    the structural foldseek-vs-AF search returns mostly UNREVIEWED TrEMBL neighbours
+    with no site annotations, whereas Swiss-Prot homologs carry ACT_SITE/BINDING/SITE.
+    Swiss-Prot DB targets are '<db>|<ACC>|<name>' or bare ACC; both are parsed to ACC."""
+    qf = Path(workdir) / "sp_query.fasta"
+    qf.write_text(f">query\n{seq}\n")
+    m8 = Path(workdir) / "sp_hits.m8"
+    tmp = Path(workdir) / "sp_tmp"
+    mem_cap = os.environ.get("MMSEQS_MEM_LIMIT", "80G")
+    cmd = ["mmseqs", "easy-search", str(qf), sprot_db, str(m8), str(tmp),
+           "--format-output", "query,target,pident,qstart,qend,qaln,taln",
+           "-s", "5.7", "--max-seqs", str(max_seqs), "-e", "1e-3",
+           "--split-memory-limit", mem_cap, "--threads", str(os.cpu_count() or 8)]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=1800)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"[11a] swissprot mmseqs failed ({type(e).__name__}): "
+              f"{getattr(e,'stderr','')[:200] if hasattr(e,'stderr') else ''}", flush=True)
+        return []
+    hits = []
+    for ln in m8.read_text().splitlines():
+        p = ln.split("\t")
+        if len(p) < 7:
+            continue
+        target = p[1]
+        # '<db>|<ACC>|<entry>' (UniProt FASTA header) or bare ACC
+        acc = target.split("|")[1] if "|" in target else target
+        hits.append((acc, int(p[3]), p[5], 1, p[6]))
+    return hits
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--wt-pdb", required=True)
+    ap.add_argument("--wt-seq", default="", help="WT sequence for the Swiss-Prot seq channel")
     ap.add_argument("--out", required=True)
     ap.add_argument("--ann-dir", required=True, help="dir with swissprot_sites.tsv.gz + mcsa json")
     ap.add_argument("--foldseek-af-db", default="/shared/db/foldseek/latest/db/alphafold_uniprot")
+    ap.add_argument("--swissprot-db", default="",
+                    help="reviewed Swiss-Prot mmseqs DB stem (PRIMARY seq channel)")
+    ap.add_argument("--no-foldseek", action="store_true",
+                    help="skip the slow foldseek-vs-AF structural channel")
     ap.add_argument("--mmseqs-m8", default="", help="optional Stage-1 mmseqs hits.m8 for seq channel")
     ap.add_argument("--workdir", default=".")
     ap.add_argument("--seq-len", type=int, required=True)
@@ -177,44 +215,53 @@ def main():
     mcsa = parse_mcsa(Path(args.ann_dir) / "mcsa_catalytic_residues.json")
     print(f"[11a] annotation tables: swissprot accs={len(swissprot)}, mcsa accs={len(mcsa)}", flush=True)
 
-    by_source = {"foldseek_swissprot": set(), "foldseek_mcsa": set(), "mmseqs_swissprot": set()}
+    by_source = {"swissprot_seq": set(), "foldseek_swissprot": set(),
+                 "foldseek_mcsa": set(), "mmseqs_swissprot": set()}
     detail = []
 
-    # --- structural channel: foldseek vs AF DB ---
-    fs = foldseek_search(args.wt_pdb, args.foldseek_af_db, args.workdir)
-    print(f"[11a] foldseek AF hits: {len(fs)}", flush=True)
-    for acc, qstart, qaln, tstart, taln, bits in fs:
-        for src, table in (("foldseek_swissprot", swissprot), ("foldseek_mcsa", mcsa)):
+    def _transfer(hit_iter, src, table):
+        n = 0
+        for acc, qstart, qaln, tstart, taln in hit_iter:
             tpos = table.get(acc)
             if not tpos:
                 continue
-            qpos = transfer_from_alignment(qstart, qaln, tstart, taln, tpos)
-            for qp in qpos:
+            for qp in transfer_from_alignment(qstart, qaln, tstart, taln, tpos):
                 if 1 <= qp <= args.seq_len:
                     by_source[src].add(qp)
                     detail.append(dict(pos=qp, source=src, homolog=acc))
+                    n += 1
+        return n
 
-    # --- sequence channel: reuse Stage-1 mmseqs m8 (Swiss-Prot only) ---
+    # --- PRIMARY channel: mmseqs WT-sequence vs reviewed Swiss-Prot DB ---
+    sp = []
+    if args.swissprot_db and args.wt_seq:
+        sp = swissprot_search(args.wt_seq, args.swissprot_db, args.workdir)
+        print(f"[11a] Swiss-Prot seq hits: {len(sp)}", flush=True)
+        _transfer(((a, qs, qa, ts, ta) for a, qs, qa, ts, ta in sp), "swissprot_seq", swissprot)
+
+    # --- structural channel (optional, recall booster): foldseek vs AF DB ---
+    fs = []
+    if not args.no_foldseek:
+        fs = foldseek_search(args.wt_pdb, args.foldseek_af_db, args.workdir)
+        print(f"[11a] foldseek AF hits: {len(fs)}", flush=True)
+        _transfer(((a, qs, qa, ts, ta) for a, qs, qa, ts, ta, _b in fs), "foldseek_swissprot", swissprot)
+        _transfer(((a, qs, qa, ts, ta) for a, qs, qa, ts, ta, _b in fs), "foldseek_mcsa", mcsa)
+
+    # --- legacy: reuse Stage-1 UniRef50 m8 (rarely joins; kept for completeness) ---
     mh = mmseqs_hits_from_m8(args.mmseqs_m8)
-    print(f"[11a] mmseqs seq-channel hits: {len(mh)}", flush=True)
-    for acc, qstart, qaln, tstart, taln in mh:
-        tpos = swissprot.get(acc)
-        if not tpos:
-            continue
-        qpos = transfer_from_alignment(qstart, qaln, tstart, taln, tpos)
-        for qp in qpos:
-            if 1 <= qp <= args.seq_len:
-                by_source["mmseqs_swissprot"].add(qp)
-                detail.append(dict(pos=qp, source="mmseqs_swissprot", homolog=acc))
+    if mh:
+        print(f"[11a] Stage-1 m8 seq-channel hits: {len(mh)}", flush=True)
+        _transfer(iter(mh), "mmseqs_swissprot", swissprot)
 
     transferred = sorted(set().union(*by_source.values())) if any(by_source.values()) else []
     out = dict(transferred=transferred,
                by_source={k: sorted(v) for k, v in by_source.items()},
-               n_foldseek_hits=len(fs), n_mmseqs_hits=len(mh),
+               n_swissprot_hits=len(sp), n_foldseek_hits=len(fs), n_mmseqs_hits=len(mh),
                detail=detail[:500])
     Path(args.out).write_text(json.dumps(out, indent=2))
     print(f"[11a] transferred {len(transferred)} active-site positions "
-          f"(fs_sp={len(by_source['foldseek_swissprot'])}, fs_mcsa={len(by_source['foldseek_mcsa'])}, "
+          f"(sp_seq={len(by_source['swissprot_seq'])}, "
+          f"fs_sp={len(by_source['foldseek_swissprot'])}, fs_mcsa={len(by_source['foldseek_mcsa'])}, "
           f"ms_sp={len(by_source['mmseqs_swissprot'])}) -> {args.out}", flush=True)
 
 
