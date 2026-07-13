@@ -1,5 +1,5 @@
 # ==========================================================================
-# Extremophilic Protein Translator - central configuration
+# Extremolith (Extremophilic Protein Translator) - central configuration
 # All paths, thresholds, and conventions for the GTDB -> bin -> secrete pipeline.
 # Paths under `biotite:` are on the SLURM cluster; `local:` are workspace-relative.
 # ==========================================================================
@@ -34,11 +34,13 @@ biotite:
     swissprot_dat:   "/groups/cress/projects/jaymin/IS1111/eptrans/db/swissprot_2026_07_09/uniprot_sprot.dat.gz"  # 2026_02
     interpro_entries: "/groups/cress/projects/jaymin/IS1111/eptrans/db/interpro_2026_07_09/entry.list"
     # --- Generation-time MSA databases (§10) — shared, read-only; do NOT copy ---
-    # UniRef30 (clustered) for sequence-weighted conservation scoring; the ColabFold
-    # environmental DB (MMseqs2, pre-indexed / COLABDB_READY) for MSA depth on remote
-    # homologs. Both already on /shared/db — used in place, no download/build needed.
-    uniref30_mmseqs: "/shared/db/uniclust/30_2020_06"                              # UniClust/UniRef30 2020_06
-    colabfold_envdb: "/shared/db/colabfold/latest/colabfold_envdb_202108_db"      # ColabFold envdb 202108 (mmseqs stem)
+    # For `mmseqs easy-search` conservation MSA use uniprot_kb (a true mmseqs2 seq DB).
+    # CAUTION: /shared/db/uniclust/30_2020_06 is an HH-suite DB (_a3m/_cs219/_hhm
+    # .ffdata) for hhblits, NOT usable by mmseqs — the old "uniref30_mmseqs" label was
+    # wrong (verified 2026-07-13: mmseqs easy-search against it returns 0 hits).
+    msa_mmseqs: "/shared/db/uniprot/latest/mmseqs/uniprot_kb"                      # mmseqs2 UniProtKB seq DB (default MSA target)
+    colabfold_envdb: "/shared/db/colabfold/latest/colabfold_envdb_202108_db"      # ColabFold envdb 202108 (mmseqs profile DB — deeper MSA protocol)
+    uniref30_hhblits: "/shared/db/uniclust/30_2020_06"                            # HH-suite DB (hhblits only, NOT mmseqs)
     # InterPro position mapping via mcp-protein-annotation connector (protein2ipr not staged)
     # M-CSA: repo artifact data/mcsa_snapshot/mcsa_catalytic_residues.tsv (API snapshot 2026-07-09)
 
