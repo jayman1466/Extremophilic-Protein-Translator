@@ -794,6 +794,60 @@ never clobbered) so an early epoch stays independently loadable for the
 generation step, plus step-checkpointing (`clf_ckpt.pt`) + flushed progress
 logging + mid-epoch resume.
 
+### Frozen-backbone cached-embedding probe (design #1) — RESULTS
+
+The dominant Stage-2 cost is re-encoding millions of proteins through the 3B
+backbone every step/epoch (end-to-end A5000 bs6 projected **~27 d/epoch**
+thermophile, **~26 d/epoch** halophile — cell-102 projection table). Since the
+coupling-aware MLM adapter already separates phenotype ~linearly (train loss
+collapses in ~60 steps), we embed the whole secretome **once** through the frozen
+MLM-adapted backbone and train heads on the cache.
+
+**Pipeline** (`scripts/09_embed_secretome.py` + `scripts/10_train_cached_probe.py`,
+commit chain 501ab54 → 918d3dc → f4a0794):
+- **Stage A — embed once** (job 1152597, `09_embed_secretome.sbatch`, gpu-partition
+  array 0–7): bare `EsmModel` + Stage-1 MLM LoRA adapter (`set_adapter('mlm')`),
+  eval/no_grad, **masked mean-pool matching `MeanPoolClassifierHead`**, fp16 vectors
+  + `tagged_id` per shard. 8 shards × 248,189 rows × 2560 dim (~1.27 GB/shard);
+  `.done_shard{i}` idempotency guard. ~3 h wall under A5000 contention (~29 seq/s
+  per shard, 3-way node sharing). Spot-check: 100% finite, all rows non-zero,
+  ids==rows, mean ~0.002 / std ~0.29.
+- **Stage B — train heads** (job 1152605, `10_train_cached_probe.sbatch`,
+  `afterok:1152597`): all 5 heads on cached vectors, **ALL negatives** (no
+  neg_per_pos), 30 epochs, **~4m45s total**. Loss = weighted BCE + **ACTIVE
+  matched-pair margin** (pair-aware / "alternative": train-split pairs scored each
+  step, `--pair-batch-size 256`, cycled) — the anti-taxonomy mechanism on frozen
+  features. Best-AUPRC epoch → `clf_<pheno>_cached/head_best.pt`.
+
+**Results (best epoch, pair-aware):**
+
+| phenotype | val AUPRC | pair-AUC | pair-acc | base rate (val pos frac) | best epoch | val pairs |
+|---|---:|---:|---:|---:|---:|---:|
+| **hyperthermophile** | **0.898** | **0.924** | 0.957 | 0.0133 | 25 | 23 |
+| **thermophile** | **0.862** | **0.905** | 0.937 | 0.2146 | 27 | 1,495 |
+| **halophile** | 0.818 | 0.748 | 0.798 | 0.4246 | 27 | 6,616 |
+| acidophile | 0.745 | 0.749 | 0.837 | 0.0873 | 24 | 578 |
+| alkaliphile | 0.674 | 0.768 | 0.800 | 0.0738 | 28 | 666 |
+
+**Reads:**
+- **Signal is genuine, not taxonomy.** Every pair-AUC ≫ 0.5 (held-out
+  taxonomy-matched orthologs). Thermal phenotypes strong (hyper 0.924, thermo
+  0.905); salt/pH weaker (0.75–0.77) but clearly above chance — consistent with
+  thermoadaptation having the most distinctive proteome signature. The
+  matched-outgroup design works as intended.
+- **Frozen-feature heads plateau by ~epoch 10** (hyperthermophile: AUPRC 0.83→0.89
+  by ep10, then ±0.01 noise for 20 more epochs). Best epochs at 24–28 are
+  noise-band peaks, not late gains → **more epochs won't help; the ceiling is the
+  embedding, not training time.** To push weaker phenotypes: richer pooled feature
+  or end-to-end reshape, not more epochs.
+- **Epoch moving forward for generation: `head_best.pt` (hyperthermophile epoch 25,
+  AUPRC 0.898 / pair-AUC 0.924)** + the frozen MLM-adapted backbone = coherent
+  `(adapter, head)` pair (adapter fixed by construction).
+
+Artifacts: `cached_probe_results.png` (epoch trajectory + per-phenotype summary),
+`cached_probe_results.csv`. Heads on biotite at
+`models/cached_probes/clf_<pheno>_cached/head_best.pt`.
+
 ## Coupling-aware masking — thresholds and the contact-pair cache
 
 The masked-LM objective masks positions to reconstruct; **coupling-aware masking**
