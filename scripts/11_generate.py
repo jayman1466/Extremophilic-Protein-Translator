@@ -55,12 +55,56 @@ def biophysical_score(seq, phenotype):
 
 
 # ---- Stage 1-2: MSA + sequence-weighted conservation ----
+def henikoff_weights(msa_rows, L):
+    """Henikoff & Henikoff (1994) position-based sequence weights.
+
+    msa_rows: list of dict {query_col(0-based) -> residue char} — one per sequence
+    (query included as row 0), residues on the query coordinate frame.
+
+    For each column c: k_c = number of DISTINCT residue types present; for a sequence
+    with residue r at c, n_{c,r} = number of sequences sharing r. Its per-column weight
+    is 1/(k_c * n_{c,r}) — so a residue that is rare in a well-diversified column earns
+    more weight than one shared by a large (over-sampled) group. A sequence's weight is
+    the mean of its per-column weights over the columns it covers (mean, not sum, so
+    partial-coverage local hits are not penalised for length). Weights are renormalised
+    to mean 1 so downstream 'effective counts' stay interpretable.
+
+    This corrects phylogenetic/taxonomic OVER-SAMPLING that a raw count (or a pident
+    discount) does not: an over-represented genus contributes many sequences that share
+    the same residue, inflating n_{c,r} and thus each of their weights shrinks.
+    """
+    # per-column composition
+    comp = [dict() for _ in range(L)]
+    for row in msa_rows:
+        for c, r in row.items():
+            comp[c][r] = comp[c].get(r, 0) + 1
+    kc = [len(comp[c]) for c in range(L)]
+    # per-sequence weight = mean over covered columns of 1/(k_c * n_{c,r})
+    weights = np.ones(len(msa_rows), dtype=float)
+    for si, row in enumerate(msa_rows):
+        if not row:
+            weights[si] = 0.0
+            continue
+        acc = 0.0
+        for c, r in row.items():
+            n_cr = comp[c][r]
+            k = kc[c] or 1
+            acc += 1.0 / (k * n_cr)
+        weights[si] = acc / len(row)
+    m = weights[weights > 0].mean() if np.any(weights > 0) else 1.0
+    if m > 0:
+        weights = weights / m
+    return weights
+
+
 def run_msa_conservation(seq, uniref_db, workdir, min_hits=25, max_hits=2000):
     """mmseqs easy-search -> per-query-column conservation in [0,1].
 
-    Returns (conservation[L], n_effective_hits). Uses pairwise alignments anchored
-    to query coords (qaln/taln). Sequence-weighted by Henikoff-style 1/n_similar to
-    down-weight redundant homologs. Uniform (all 0) fallback if too few hits.
+    Returns (conservation[L], n_effective_hits). Builds an implied MSA on the query
+    coordinate frame from the pairwise alignments (qaln/taln), computes Henikoff
+    position-based sequence weights (taxonomy/over-sampling correction), then reports
+    each column's weighted modal-residue fraction as conservation. Uniform (all 0)
+    fallback if too few hits.
     """
     L = len(seq)
     qf = Path(workdir) / "query.fasta"
@@ -85,41 +129,51 @@ def run_msa_conservation(seq, uniref_db, workdir, min_hits=25, max_hits=2000):
               flush=True)
         return np.zeros(L, dtype=float), 0
 
-    # parse pairwise alignments anchored to query columns
-    counts = [dict() for _ in range(L)]  # per query col: {aa: weighted count}
-    rows = []
-    for line in m8.read_text().splitlines():
+    # parse pairwise alignments -> implied MSA rows on the query coordinate frame.
+    # Row 0 is the query itself (always fully present) so every column has >=1 member.
+    query_row = {i: seq[i] for i in range(L)}
+    msa_rows = [query_row]
+    for line in m8.read_text().splitlines()[:max_hits]:
         p = line.split("\t")
         if len(p) < 7:
             continue
-        _, _, pid, qstart, qend, qaln, taln = p[:7]
-        rows.append((float(pid), int(qstart), qaln, taln))
-    if len(rows) < min_hits:
-        print(f"[11] only {len(rows)} MSA hits (<{min_hits}); uniform-conservation fallback",
-              flush=True)
-        return np.zeros(L, dtype=float), len(rows)
-
-    # Henikoff-ish weight: down-weight near-duplicates by pident bucket
-    for pid, qstart, qaln, taln in rows[:max_hits]:
-        w = 1.0 / (1.0 + max(0.0, (pid - 30.0)) / 20.0)   # higher-id homologs weigh less
-        qpos = qstart - 1                                  # 0-based query col
+        _, _, _pid, qstart, _qend, qaln, taln = p[:7]
+        row = {}
+        qpos = int(qstart) - 1                             # 0-based query col
         for qc, tc in zip(qaln, taln):
             if qc == "-":
                 continue                                   # insertion vs query: no column
             if 0 <= qpos < L and tc != "-":
-                counts[qpos][tc] = counts[qpos].get(tc, 0.0) + w
+                row[qpos] = tc
             qpos += 1
+        if row:
+            msa_rows.append(row)
 
+    n_hits = len(msa_rows) - 1                              # exclude the query row
+    if n_hits < min_hits:
+        print(f"[11] only {n_hits} MSA hits (<{min_hits}); uniform-conservation fallback",
+              flush=True)
+        return np.zeros(L, dtype=float), n_hits
+
+    # Henikoff position-based sequence weights (over-sampling / taxonomy correction)
+    weights = henikoff_weights(msa_rows, L)
+
+    # weighted modal-residue fraction per column == conservation in [0,1]
     cons = np.zeros(L, dtype=float)
     for i in range(L):
-        tot = sum(counts[i].values())
-        if tot <= 0:
-            cons[i] = 0.0
-            continue
-        # weighted fraction of the modal residue == simple conservation in [0,1]
-        cons[i] = max(counts[i].values()) / tot
-    print(f"[11] MSA conservation from {len(rows)} hits; mean cons={cons.mean():.3f}", flush=True)
-    return cons, len(rows)
+        wsum = 0.0
+        per_res = {}
+        for si, row in enumerate(msa_rows):
+            r = row.get(i)
+            if r is None:
+                continue
+            w = weights[si]
+            per_res[r] = per_res.get(r, 0.0) + w
+            wsum += w
+        cons[i] = (max(per_res.values()) / wsum) if wsum > 0 else 0.0
+    print(f"[11] MSA conservation from {n_hits} hits (Henikoff-weighted, "
+          f"eff_seqs={weights.sum():.1f}); mean cons={cons.mean():.3f}", flush=True)
+    return cons, n_hits
 
 
 # ---- Stage 3: active-site (multicopper-oxidase Cu-site motifs + high conservation) ----
