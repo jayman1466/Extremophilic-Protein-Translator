@@ -116,29 +116,46 @@ def run_msa_conservation(seq, uniref_db, workdir, min_hits=25, max_hits=2000):
 
 
 # ---- Stage 3: active-site (multicopper-oxidase Cu-site motifs + high conservation) ----
-def detect_active_site(seq, conservation, freeze_thresh=0.90):
-    """frozen[] boolean + 1-based active-site list. For a first test, catalytic
-    residues = detected His/Cys/Met in the classic multicopper-oxidase Cu-binding
-    motifs (HxHG, HCHxxxH...) UNION the very-high-conservation columns."""
+def detect_active_site(seq, conservation, freeze_thresh=0.90, transferred=None):
+    """frozen[] boolean + 1-based active-site list, from three UNIONED sources:
+      1. transferred[] -- catalytic/functional-site positions carried over from
+         M-CSA / Swiss-Prot via foldseek+mmseqs homology (Stage 3, 11a_annotate.py).
+         This is the PRIMARY, general source when annotation hits exist.
+      2. very-high-conservation columns (>= freeze_thresh) from the MSA.
+      3. multicopper-oxidase Cu-binding motif residues (His/Cys/Met in HxHG/HCH...) --
+         a laccase-specific backstop so a copper enzyme is never left unprotected
+         even when annotation/conservation are thin.
+    Reports which sources fired so the UI/notebook can distinguish a real transfer
+    from the heuristic fallback."""
     import re
     L = len(seq)
     frozen = np.zeros(L, dtype=bool)
     active = set()
-    # high-conservation columns
+    src_counts = {"transferred": 0, "conservation": 0, "motif": 0}
+    # 1. homology-transferred positions (1-based -> 0-based)
+    for p in (transferred or []):
+        if 1 <= p <= L:
+            frozen[p - 1] = True
+            active.add(p - 1)
+            src_counts["transferred"] += 1
+    # 2. high-conservation columns
     for i in range(L):
         if conservation[i] >= freeze_thresh:
+            if not frozen[i]:
+                src_counts["conservation"] += 1
             frozen[i] = True
             active.add(i)
-    # multicopper-oxidase copper ligands: His-rich + Cys motifs. Freeze every His,
-    # Cys, and Met that sits in a local His/Cys cluster (Cu T1/T2/T3 ligands).
+    # 3. multicopper-oxidase copper ligands (His/Cys/Met in local His/Cys clusters)
     for m in re.finditer(r"H.{0,3}H|HCH|H.H.{2,4}H|C.{2,4}H", seq):
         for j in range(m.start(), m.end()):
             if seq[j] in "HCM":
+                if not frozen[j]:
+                    src_counts["motif"] += 1
                 frozen[j] = True
                 active.add(j)
     active_1based = sorted(p + 1 for p in active)
     assigned = len(active_1based) > 0
-    return frozen, active_1based, assigned
+    return frozen, active_1based, assigned, src_counts
 
 
 # ---- Stage 4-5: Gibbs masked-gen + scoring ----
@@ -150,6 +167,8 @@ def main():
     ap.add_argument("--mlm-adapter", required=True)
     ap.add_argument("--head", required=True, help="cached head_best.pt")
     ap.add_argument("--uniref-db", required=True)
+    ap.add_argument("--transfer-json", default="",
+                    help="active_site_transfer.json from 11a_annotate.py (optional)")
     ap.add_argument("--backbone-size", default="3B")
     ap.add_argument("--n-designs", type=int, default=3)
     ap.add_argument("--gibbs-iters", type=int, default=24)
@@ -171,8 +190,18 @@ def main():
 
     # Stages 1-3
     cons, n_hits = run_msa_conservation(seq, args.uniref_db, args.workdir)
-    frozen, active_1b, assigned = detect_active_site(seq, cons)
-    print(f"[11] active-site: {len(active_1b)} frozen residues (assigned={assigned})", flush=True)
+    transferred = []
+    transfer_meta = {}
+    if args.transfer_json and Path(args.transfer_json).exists():
+        tj = json.loads(Path(args.transfer_json).read_text())
+        transferred = tj.get("transferred", [])
+        transfer_meta = {k: tj.get(k) for k in ("by_source", "n_foldseek_hits", "n_mmseqs_hits")}
+        print(f"[11] loaded {len(transferred)} transferred active-site positions "
+              f"(foldseek_hits={tj.get('n_foldseek_hits')}, mmseqs_hits={tj.get('n_mmseqs_hits')})",
+              flush=True)
+    frozen, active_1b, assigned, src_counts = detect_active_site(seq, cons, transferred=transferred)
+    print(f"[11] active-site: {len(active_1b)} frozen residues (assigned={assigned}); "
+          f"sources {src_counts}", flush=True)
 
     # Model: EsmForMaskedLM (3B) + trained MLM LoRA adapter, for BOTH proposer logits
     # and encoder-pooled scoring (one model load; .esm gives encoder hidden states).
@@ -274,6 +303,7 @@ def main():
                wt_classifier_score=round(wt_score, 4),
                conservation=[round(float(c), 3) for c in cons],
                active_site=active_1b, active_site_assigned=assigned,
+               active_site_sources=src_counts, active_site_transfer=transfer_meta,
                n_msa_hits=int(n_hits), designs=designs)
     Path(args.out).write_text(json.dumps(out, indent=2))
     print(f"[11] wrote {args.out} ({len(designs)} designs)", flush=True)

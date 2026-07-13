@@ -45,9 +45,32 @@ UNIREF=${GEN_MSA_DB:-/shared/db/uniprot/latest/mmseqs/uniprot_kb}
 HEADDIR=$PERSIST/models/cached_probes
 
 CAND_LIST=(); FOLD_LIST=()
+ANN_DIR=${GEN_ANN_DIR:-$SW/annotations}
+FOLDSEEK_AF=${GEN_FOLDSEEK_AF:-/shared/db/foldseek/latest/db/alphafold_uniprot}
 
-# ---------- Stages 1-5 per phenotype (eptrans_ml) ----------
+# ---------- Stage 0: fold WT ONCE (esmfold) — annotation needs the structure ----------
+conda activate esmfold
+echo "[gen] === fold WT (for annotation transfer) ==="
+python "$REPO/scripts/11b_fold_rmsd.py" --wt-only "$SEQ" --structures "$STRUCT" --max-len 1000
+conda deactivate
+
+# ---------- Stage 3: annotation transfer (eptrans_ml: foldseek on PATH) ----------
+# foldseek WT vs local AlphaFold DB -> transfer M-CSA/Swiss-Prot catalytic residues.
+# Skips gracefully (empty transfer) if annotation tables aren't staged.
 conda activate eptrans_ml
+if [ -f "$ANN_DIR/swissprot_sites.tsv.gz" ] || [ -f "$ANN_DIR/mcsa_catalytic_residues.json" ]; then
+  echo "[gen] === Stage 3: annotation transfer (foldseek + M-CSA/Swiss-Prot) ==="
+  python "$REPO/scripts/11a_annotate.py" \
+    --wt-pdb "$STRUCT/wt.pdb" --out "$JOBDIR/active_site_transfer.json" \
+    --ann-dir "$ANN_DIR" --foldseek-af-db "$FOLDSEEK_AF" \
+    --workdir "$JOBDIR/_annot" --seq-len "${#SEQ}" || \
+    echo '{"transferred":[]}' > "$JOBDIR/active_site_transfer.json"
+else
+  echo "[gen] annotation tables not staged in $ANN_DIR; skipping Stage 3 transfer"
+  echo '{"transferred":[]}' > "$JOBDIR/active_site_transfer.json"
+fi
+
+# ---------- Stages 1,2,4,5 per phenotype (eptrans_ml) ----------
 for PH in $PHENOS; do
   echo "[gen] === $PH: masked-gen + scoring ==="
   python "$REPO/scripts/11_generate.py" \
@@ -56,16 +79,17 @@ for PH in $PHENOS; do
     --mlm-adapter "$MLM_ADAPTER" \
     --head "$HEADDIR/clf_${PH}_cached/head_best.pt" \
     --uniref-db "$UNIREF" \
+    --transfer-json "$JOBDIR/active_site_transfer.json" \
     --backbone-size 3B --n-designs "$NDES" --gibbs-iters "$GIBBS" \
     --device cuda --workdir "$JOBDIR/_work_${PH}" --seed 1466
   CAND_LIST+=("$JOBDIR/candidates_${PH}.json")
 done
 conda deactivate
 
-# ---------- Stage 6b/6c fold + RMSD per phenotype (esmfold) ----------
+# ---------- Stage 6b/6c fold designs + RMSD per phenotype (esmfold; WT reused) ----------
 conda activate esmfold
 for PH in $PHENOS; do
-  echo "[gen] === $PH: ESMFold refold + active-site RMSD ==="
+  echo "[gen] === $PH: ESMFold refold designs + active-site RMSD ==="
   python "$REPO/scripts/11b_fold_rmsd.py" \
     --candidates "$JOBDIR/candidates_${PH}.json" \
     --structures "$STRUCT" \

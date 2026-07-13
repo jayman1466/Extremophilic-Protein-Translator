@@ -41,15 +41,16 @@ def kabsch_rmsd(P, Q):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--candidates", required=True)
+    ap.add_argument("--candidates", help="candidates.json (design folding mode)")
+    ap.add_argument("--wt-only", help="a bare WT sequence: fold ONLY wt.pdb and exit "
+                    "(run before annotation, which needs the WT structure)")
     ap.add_argument("--structures", required=True, help="output dir for PDBs")
-    ap.add_argument("--out", required=True, help="folded.json path")
+    ap.add_argument("--out", help="folded.json path (design mode)")
     ap.add_argument("--max-len", type=int, default=1000)
     args = ap.parse_args()
 
     import torch
     from transformers import AutoTokenizer, EsmForProteinFolding
-    cand = json.loads(Path(args.candidates).read_text())
     sd = Path(args.structures); sd.mkdir(parents=True, exist_ok=True)
 
     tok = AutoTokenizer.from_pretrained("facebook/esmfold_v1")
@@ -66,13 +67,29 @@ def main():
         pdb = model.output_to_pdb(out)[0]
         return pdb, plddt
 
-    active = cand.get("active_site", [])  # 1-based
-    wt_pdb, wt_plddt = fold(cand["wt_sequence"])
-    (sd / "wt.pdb").write_text(wt_pdb)
-    wt_ca = ca_coords(wt_pdb)
-    print(f"[11b] WT folded plddt={wt_plddt:.3f}", flush=True)
+    # --- WT-only mode: fold wt.pdb and exit (runs before Stage-3 annotation) ---
+    if args.wt_only:
+        wt_pdb, wt_plddt = fold(args.wt_only.strip())
+        (sd / "wt.pdb").write_text(wt_pdb)
+        print(f"[11b] WT-only fold plddt={wt_plddt:.3f} -> {sd/'wt.pdb'}", flush=True)
+        return
 
-    folded = {"wt": {"plddt": round(wt_plddt, 3), "structure_file": "wt.pdb"}}
+    cand = json.loads(Path(args.candidates).read_text())
+    active = cand.get("active_site", [])  # 1-based
+    # reuse a pre-folded WT if present (folded once in the WT-only pre-step)
+    wt_path = sd / "wt.pdb"
+    if wt_path.exists():
+        wt_pdb = wt_path.read_text()
+        wt_plddt = None
+        print("[11b] reusing existing wt.pdb", flush=True)
+    else:
+        wt_pdb, wt_plddt = fold(cand["wt_sequence"])
+        wt_path.write_text(wt_pdb)
+        print(f"[11b] WT folded plddt={wt_plddt:.3f}", flush=True)
+    wt_ca = ca_coords(wt_pdb)
+
+    folded = {"wt": {"plddt": (round(wt_plddt, 3) if wt_plddt is not None else None),
+                     "structure_file": "wt.pdb"}}
     for d in cand["designs"]:
         did, seq = d["design_id"], d["sequence"]
         pdb, plddt = fold(seq)
