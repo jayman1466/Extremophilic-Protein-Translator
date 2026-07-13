@@ -1,4 +1,4 @@
-/* Extremophilic Protein Translator — modern light UI, black header.
+/* Extremophilic Protein Translator — modern light UI, light header (logo in a dark chip).
    Warm lava accents on neutral space: color accents, hairline borders, soft
    layered shadows, squared corners, quiet section headers.
    accents: magma #5B1226 · red #C1352B · hot orange #EE6C2B · amber #F6B23C */
@@ -31,20 +31,31 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* ---- header (only the header is dark) ---- */
+/* ---- header (light surface; logo kept in a dark chip) ----
+   The header surface is light to match the rest of the UI; the logo art
+   (cream wordmark on black) is preserved unchanged by housing it in a dark
+   "chip" so it stays legible on the light bar. */
 .ept-navbar {
-  background-color: #000;
-  min-height: 252px;
-  border-bottom: 1px solid rgba(255,255,255,0.08);
-  box-shadow: 0 1px 0 var(--ept-magma);   /* thin magma seam instead of a thick bar */
+  background-color: var(--surface-2);           /* warm cream, was #000 */
+  min-height: 132px;                            /* trimmer than the old 252px bar */
+  border-bottom: 1px solid var(--line);
+  box-shadow: inset 0 -3px 0 var(--ept-magma);  /* magma seam reads on light */
 }
-.ept-navbar .navbar-brand { display: flex; align-items: center; gap: 0.6rem; }
-.ept-logo { height: 156px; width: auto; }
+/* dark chip that houses the unchanged logo */
+.ept-navbar .navbar-brand {
+  display: flex; align-items: center; gap: 0.6rem;
+  background: #000;
+  border: 1px solid var(--ept-magma);
+  border-radius: 10px;
+  padding: 0.5rem 1.1rem;
+  box-shadow: var(--shadow-sm);
+}
+.ept-logo { height: 96px; width: auto; }        /* fits inside the chip */
 .brand-text { color: var(--ept-cream); font-weight: 700; font-size: 2rem; letter-spacing: 0.3px; }
 
 /* toolbar buttons — quiet, letter-spaced, subtle hover */
 .nav-btn {
-  color: var(--ept-cream);
+  color: var(--ink);                 /* ink on the light header, was cream */
   text-decoration: none;
   padding: 0.4rem 0.9rem;
   border-radius: var(--radius-ctl);
@@ -53,7 +64,7 @@ body {
   text-transform: uppercase;
   transition: background-color 0.25s ease, color 0.25s ease;
 }
-.nav-btn:hover { background-color: rgba(255,255,255,0.10); color: #fff; }
+.nav-btn:hover { background-color: var(--magma-tint); color: var(--ept-magma); }
 
 /* ---- links & buttons ---- */
 a { color: var(--ept-red); text-decoration: none; }
