@@ -52,8 +52,8 @@ SECTIONS = [
     ("gate", "Structural Gate",
      "Rejects designs whose backbone the inverse-folding model finds implausible; "
      "survivors are refolded and gated on catalytic-atom RMSD.", False,
-     [("proteinmpnn", "ProteinMPNN", True, True),
-      ("ligandmpnn", "LigandMPNN (cofactor-aware)", False, False)]),
+     [("ligandmpnn", "LigandMPNN (cofactor-aware)", True, True),
+      ("proteinmpnn", "ProteinMPNN", False, True)]),
 
     ("scoring", "Scoring",
      "Ranks designs by the per-phenotype classifier (this project's Stage-2 heads).",
