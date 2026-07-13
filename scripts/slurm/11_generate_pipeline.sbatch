@@ -36,7 +36,12 @@ SEQ=$(awk '!/^>/{printf "%s",$0}' input.fasta)
 echo "[gen] seq len=${#SEQ}  phenos=$PHENOS  n_designs=$NDES  gibbs=$GIBBS"
 
 MLM_ADAPTER=$PERSIST/models/mlm_adapt/mlm_adapter_best
-UNIREF=/shared/db/uniclust/30_2020_06
+# MSA target DB: the mmseqs2-format UniProtKB sequence DB (for `mmseqs easy-search`).
+# NOTE: /shared/db/uniclust/30_2020_06 is an HH-suite DB (_a3m/_cs219/_hhm .ffdata),
+# usable by hhblits NOT mmseqs — despite config.yaml's "uniref30_mmseqs" label. The
+# real mmseqs DBs are uniprot_kb (plain seq DB, used here) and the ColabFold envdb
+# (profile DB, for the deeper ColabFold MSA protocol).
+UNIREF=${GEN_MSA_DB:-/shared/db/uniprot/latest/mmseqs/uniprot_kb}
 HEADDIR=$PERSIST/models/cached_probes
 
 CAND_LIST=(); FOLD_LIST=()
