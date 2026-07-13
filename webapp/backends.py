@@ -145,27 +145,118 @@ class SlurmBackend(Backend):
         ]
         return subprocess.run(ssh, capture_output=True, text=True, timeout=timeout)
 
+    # Remote sbatch that chains the generation stages across conda envs.
+    PIPELINE_SBATCH = (
+        "/groups/cress/projects/jaymin/eptrans_scratch/repo/"
+        "scripts/slurm/11_generate_pipeline.sbatch"
+    )
+
+    def _remote_job_dir(self, jid: str) -> str:
+        return f"{self.remote_root}/{jid}"
+
     def submit(self, job: dict) -> None:
-        # The generation pipeline (masked-LM + Gibbs + MPNN gate + ESMFold +
-        # scoring) is not built yet. Until it is, be honest about state rather
-        # than silently succeed. When wired, this method will: write the input
-        # FASTA + selection to remote_root, sbatch submit_script, record the
-        # remote job id (e.g. in the job message or a sidecar), set status
-        # "running", and let poll() harvest results.json back into job_dir.
-        store.set_status(
-            job["id"], "error",
-            message=("Generation pipeline not yet wired to SLURM. "
-                     "SSH/SLURM plumbing is scaffolded; connect the generator here."),
-        )
+        """Stage the input FASTA to the cluster, sbatch the pipeline, record the
+        remote SLURM job id in the job message, and set status 'running'. poll()
+        then harvests results.json + structures back into the local job_dir."""
+        try:
+            jid = job["id"]
+            rdir = self._remote_job_dir(jid)
+            seq = "".join(job["sequence"].split())
+            phenos = " ".join(job.get("phenotypes") or ["thermophile"])
+            ndes = int(job.get("n_designs") or 3)
+
+            # 1) make remote job dir + write input.fasta (base64 to survive quoting)
+            import base64
+            fasta_b64 = base64.b64encode(f">query\n{seq}\n".encode()).decode()
+            mk = self._run_remote(
+                f"mkdir -p {rdir} && echo {fasta_b64} | base64 -d > {rdir}/input.fasta && "
+                f"wc -c {rdir}/input.fasta"
+            )
+            if mk.returncode != 0:
+                store.set_status(jid, "error",
+                                 message=f"remote staging failed: {mk.stderr[:400]}")
+                return
+
+            # 2) submit the pipeline (env vars carry per-job params)
+            sub = self._run_remote(
+                f"GEN_JOBDIR={rdir} GEN_PHENOS='{phenos}' GEN_NDESIGNS={ndes} "
+                f"sbatch --parsable --export=ALL,GEN_JOBDIR={rdir},"
+                f"GEN_PHENOS='{phenos}',GEN_NDESIGNS={ndes} {self.PIPELINE_SBATCH}"
+            )
+            slurm_id = (sub.stdout or "").strip().split(";")[0]
+            if sub.returncode != 0 or not slurm_id.isdigit():
+                store.set_status(jid, "error",
+                                 message=f"sbatch failed: {(sub.stderr or sub.stdout)[:400]}")
+                return
+
+            # 3) record remote slurm id (encoded in message: 'slurm:<id>')
+            store.set_status(jid, "running", message=f"slurm:{slurm_id}")
+        except Exception as e:  # noqa: BLE001
+            store.set_status(job["id"], "error", message=f"submit failed: {e}")
+
+    @staticmethod
+    def _slurm_id_from(job: dict) -> str:
+        msg = job.get("message") or ""
+        return msg.split("slurm:", 1)[1].strip() if "slurm:" in msg else ""
 
     def poll(self, jid: str) -> None:
-        # When wired: squeue the recorded remote job id; on completion, scp/rsync
-        # results.json + structures into store.job_dir(jid) and set "done".
-        return None
+        """squeue/sacct the recorded remote id; on completion, rsync results.json
+        + structures/ into the local job_dir and set 'done' (or 'error')."""
+        try:
+            job = store.get_job(jid)
+            if not job or job["status"] != "running":
+                return
+            slurm_id = self._slurm_id_from(job)
+            if not slurm_id:
+                return
+            rdir = self._remote_job_dir(jid)
+
+            # still queued/running?
+            sq = self._run_remote(f"squeue -j {slurm_id} -h -o %T 2>/dev/null | head -1")
+            state = (sq.stdout or "").strip()
+            if state in ("PENDING", "RUNNING", "CONFIGURING", "COMPLETING"):
+                return  # keep waiting
+
+            # terminal — did results.json land?
+            chk = self._run_remote(f"test -f {rdir}/results.json && echo OK || echo MISSING")
+            if "OK" not in (chk.stdout or ""):
+                sac = self._run_remote(
+                    f"sacct -j {slurm_id} -n -o State,ExitCode 2>/dev/null | head -1")
+                store.set_status(jid, "error",
+                                 message=f"pipeline ended without results ({sac.stdout.strip()})")
+                return
+
+            # harvest results.json + structures into local job_dir
+            local = store.job_dir(jid)
+            (local / "structures").mkdir(parents=True, exist_ok=True)
+            for src, dst in ((f"{rdir}/results.json", local / "results.json"),):
+                r = subprocess.run(
+                    ["scp", "-i", self.key, "-o", "BatchMode=yes",
+                     "-o", "StrictHostKeyChecking=accept-new",
+                     f"{self.host}:{src}", str(dst)],
+                    capture_output=True, text=True, timeout=120)
+                if r.returncode != 0:
+                    store.set_status(jid, "error",
+                                     message=f"results scp failed: {r.stderr[:300]}")
+                    return
+            # structures dir (recursive)
+            subprocess.run(
+                ["scp", "-r", "-i", self.key, "-o", "BatchMode=yes",
+                 "-o", "StrictHostKeyChecking=accept-new",
+                 f"{self.host}:{rdir}/structures", str(local)],
+                capture_output=True, text=True, timeout=300)
+            store.set_status(jid, "done", message="")
+        except Exception as e:  # noqa: BLE001
+            store.set_status(jid, "error", message=f"poll failed: {e}")
 
     def cancel(self, jid: str) -> None:
-        # When wired: scancel the recorded remote job id.
-        return None
+        try:
+            job = store.get_job(jid)
+            slurm_id = self._slurm_id_from(job) if job else ""
+            if slurm_id:
+                self._run_remote(f"scancel {slurm_id}")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class BrokerBackend(Backend):
