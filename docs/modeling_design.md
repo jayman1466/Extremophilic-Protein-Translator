@@ -728,10 +728,11 @@ full labeled secretome (`labeled_dataset_r232_clustered`, 1,985,508 proteins):
 
 That is a **~55:1 halophile-to-hyperthermophile ratio**. The scarcity is
 intrinsic: hyperthermophily (predicted OGT ≥ 80 °C) is rare in GTDB, and the
-selection kept only the 216 high-confidence hyperthermophile genomes (the
-medium/low tiers were rejected as mesophile-contaminated). Every
-hyperthermophile protein is also labelled `thermophile` — it is the ≥80 °C tail
-of the thermophile class, never a standalone label.
+selection kept the 216 high+medium-confidence hyperthermophile genomes (76 high +
+140 medium); only the **low** tier was rejected as mesophile-contaminated
+(median predicted OGT ~35 °C). Every hyperthermophile protein is also labelled
+`thermophile` — it is the ≥80 °C tail of the thermophile class, never a
+standalone label.
 
 **Where it does and does not bite — the effect is stage-dependent:**
 
@@ -767,5 +768,7 @@ of the thermophile class, never a standalone label.
 3. **Report AUPRC with a confidence interval** (bootstrap over test clusters) for
    the hyperthermophile head specifically, so scarcity-driven estimation variance
    is visible and not mistaken for a calibrated score.
-4. **Confidence weighting already in place** (`CONFIDENCE_WEIGHTS`) keeps the
-   216 high-confidence hyperthermophile genomes at full weight.
+4. **Confidence weighting already in place** (`CONFIDENCE_WEIGHTS`) down-weights
+   the medium-tier hyperthermophile genomes (140 of the 216) relative to the 76
+   high-confidence ones, so the noisier medium calls contribute less without
+   being discarded.
