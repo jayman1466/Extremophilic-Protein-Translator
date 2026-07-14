@@ -40,6 +40,9 @@ def main():
             metrics = {
                 "biophysical_score": d.get("biophysical_score"),
                 "plddt": ff.get("plddt"),
+                "catalytic_core_rmsd": ff.get("catalytic_core_rmsd"),
+                "passes_rmsd": ff.get("passes_rmsd"),
+                "rmsd_cap": ff.get("rmsd_cap"),
                 "mpnn_model": mpnn.get("model_type"),
                 "wt_mpnn_confidence": mpnn.get("wt_mpnn_confidence"),
                 "n_msa_hits": cand.get("n_msa_hits"),
@@ -48,11 +51,15 @@ def main():
             rows.append(dict(design_id=did, sequence=d["sequence"],
                              classifier_score=d.get("classifier_score"),
                              active_site_rmsd=ff.get("active_site_rmsd"),
+                             passes_rmsd=ff.get("passes_rmsd", True),
                              n_mutations=d.get("n_mutations"),
                              structure_file=ff.get("structure_file", f"{did}.pdb"),
                              metrics=metrics, track=track))
-        # rank by classifier score desc within phenotype
-        rows.sort(key=lambda r: (r["classifier_score"] or 0), reverse=True)
+        # rank: structurally-valid designs (passes_rmsd) first, then by classifier score.
+        # A gaming design with a high score but a collapsed active site sinks below a
+        # lower-scoring but structurally-sound one instead of topping the list.
+        rows.sort(key=lambda r: (bool(r.get("passes_rmsd")), r["classifier_score"] or 0),
+                  reverse=True)
         by_phenotype[ph] = rows
 
     out = dict(wt_structure="wt.pdb", wt_sequence=wt_seq, by_phenotype=by_phenotype)

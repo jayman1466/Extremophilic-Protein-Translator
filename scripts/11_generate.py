@@ -233,6 +233,10 @@ def main():
     ap.add_argument("--backbone-size", default="3B")
     ap.add_argument("--n-designs", type=int, default=3)
     ap.add_argument("--gibbs-iters", type=int, default=24)
+    ap.add_argument("--max-mut-frac", type=float, default=0.25,
+                    help="hard mutation budget as a fraction of length; a proposal that "
+                         "would push the total mutation count past this is rejected even "
+                         "if it improves the classifier score (anti-fold-collapse)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--workdir", default=".")
     ap.add_argument("--seed", type=int, default=1466)
@@ -332,6 +336,13 @@ def main():
     wt_score = score(seq)
     print(f"[11] WT {args.phenotype} score={wt_score:.4f}", flush=True)
 
+    def n_mut(s):
+        return sum(1 for a, b in zip(seq, s) if a != b)
+
+    # hard mutation budget (residues), shared cap across levels; the per-level schedule
+    # still ramps how AGGRESSIVELY each design approaches it via mask_rate/target_mut_frac.
+    mut_budget = max(1, int(round(args.max_mut_frac * L)))
+
     designs = []
     for lvl in range(args.n_designs):
         sch = schedule(lvl, args.n_designs)
@@ -347,8 +358,11 @@ def main():
                 break
             prop = mlm_fill(cur, mask_pos0)
             ps = score(prop)
-            # accept if phenotype score improves (greedy hill-climb toward target)
-            if ps >= cur_score:
+            # accept if the phenotype score improves AND the mutation budget is respected;
+            # a score-improving move that overruns the budget is rejected (fold-collapse
+            # from over-mutation is the failure mode the RMSD gate later catches — this
+            # keeps designs inside the budget so they rarely reach the gate at all).
+            if ps >= cur_score and n_mut(prop) <= mut_budget:
                 cur, cur_score = prop, ps
             trace.append((it + 1, cur_score))
         muts = [dict(pos=i + 1, wt=a, mut=b) for i, (a, b) in enumerate(zip(seq, cur)) if a != b]

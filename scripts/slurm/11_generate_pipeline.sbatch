@@ -16,6 +16,8 @@
 #   GEN_PHENOS    space-separated phenotypes (e.g. "thermophile halophile")
 #   GEN_NDESIGNS  designs per phenotype (default 3)
 #   GEN_GIBBS     gibbs iters per design (default 24)
+#   GEN_MAX_MUT_FRAC  hard mutation budget, fraction of length (default 0.25)
+#   GEN_RMSD_CAP  hard active-site CA-RMSD cap in A (default 2.0)
 set -euo pipefail
 
 PERSIST=/groups/cress/projects/jaymin/IS1111/eptrans
@@ -28,6 +30,8 @@ JOBDIR=${GEN_JOBDIR:?set GEN_JOBDIR}
 PHENOS=${GEN_PHENOS:-thermophile}
 NDES=${GEN_NDESIGNS:-3}
 GIBBS=${GEN_GIBBS:-24}
+MAX_MUT_FRAC=${GEN_MAX_MUT_FRAC:-0.25}   # hard mutation budget (fraction of length)
+RMSD_CAP=${GEN_RMSD_CAP:-2.0}            # hard active-site CA-RMSD cap (A)
 STRUCT=$JOBDIR/structures
 mkdir -p "$STRUCT"
 cd "$JOBDIR"
@@ -89,6 +93,7 @@ for PH in $PHENOS; do
     --uniref-db "$UNIREF" \
     --transfer-json "$JOBDIR/active_site_transfer.json" \
     --backbone-size 3B --n-designs "$NDES" --gibbs-iters "$GIBBS" \
+    --max-mut-frac "$MAX_MUT_FRAC" \
     --device cuda --workdir "$JOBDIR/_work_${PH}" --seed 1466
   CAND_LIST+=("$JOBDIR/candidates_${PH}.json")
 done
@@ -101,7 +106,7 @@ for PH in $PHENOS; do
   python "$REPO/scripts/11b_fold_rmsd.py" \
     --candidates "$JOBDIR/candidates_${PH}.json" \
     --structures "$STRUCT" \
-    --out "$JOBDIR/folded_${PH}.json" --max-len 1000
+    --out "$JOBDIR/folded_${PH}.json" --max-len 1000 --rmsd-cap "$RMSD_CAP"
   FOLD_LIST+=("$JOBDIR/folded_${PH}.json")
 done
 conda deactivate

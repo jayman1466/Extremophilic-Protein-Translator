@@ -39,6 +39,23 @@ def kabsch_rmsd(P, Q):
     return float(np.sqrt(((Pr - Qc) ** 2).sum(1).mean()))
 
 
+# Metal-coordinating / common catalytic residue types. The catalytic-core RMSD is
+# taken over the active-site positions whose WT residue is one of these — the rigid
+# functional geometry (e.g. the laccase copper His/Cys ligands), which should barely
+# move in a good design even when flexible active-site loops flex. Reported alongside
+# the full active-site RMSD; the full-set RMSD remains the hard gate.
+CORE_RESTYPES = set("HCMDE")
+
+
+def rmsd_over(wt_ca, dca, positions):
+    idx = [p for p in positions if p in wt_ca and p in dca]
+    if len(idx) < 3:
+        return None
+    P = np.array([dca[p] for p in idx])
+    Q = np.array([wt_ca[p] for p in idx])
+    return kabsch_rmsd(P, Q)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--candidates", help="candidates.json (design folding mode)")
@@ -47,6 +64,9 @@ def main():
     ap.add_argument("--structures", required=True, help="output dir for PDBs")
     ap.add_argument("--out", help="folded.json path (design mode)")
     ap.add_argument("--max-len", type=int, default=1000)
+    ap.add_argument("--rmsd-cap", type=float, default=2.0,
+                    help="hard cap on full active-site CA-RMSD (A); designs above this "
+                         "get passes_rmsd=False (fold-collapse / classifier gaming)")
     args = ap.parse_args()
 
     import torch
@@ -76,6 +96,10 @@ def main():
 
     cand = json.loads(Path(args.candidates).read_text())
     active = cand.get("active_site", [])  # 1-based
+    wt_seq = cand["wt_sequence"]
+    # catalytic-core positions = active-site residues whose WT type coordinates metals /
+    # is commonly catalytic (rigid functional geometry, tighter tolerance)
+    core = [p for p in active if 1 <= p <= len(wt_seq) and wt_seq[p - 1] in CORE_RESTYPES]
     # reuse a pre-folded WT if present (folded once in the WT-only pre-step)
     wt_path = sd / "wt.pdb"
     if wt_path.exists():
@@ -95,16 +119,20 @@ def main():
         pdb, plddt = fold(seq)
         (sd / f"{did}.pdb").write_text(pdb)
         dca = ca_coords(pdb)
-        # active-site CA-RMSD (matched by residue number; falls back to global if no AS)
-        idx = [p for p in active if p in wt_ca and p in dca] or \
-              [p for p in wt_ca if p in dca]
-        P = np.array([dca[p] for p in idx])
-        Q = np.array([wt_ca[p] for p in idx])
-        rmsd = kabsch_rmsd(P, Q)
+        # full active-site CA-RMSD (the hard gate); fall back to global if no AS annotated
+        rmsd = rmsd_over(wt_ca, dca, active) if active else \
+               rmsd_over(wt_ca, dca, sorted(wt_ca))
+        core_rmsd = rmsd_over(wt_ca, dca, core) if core else None
+        # hard cap: a design whose active-site backbone deviates past the cap is a
+        # fold-collapse / classifier-gaming reject, regardless of classifier score
+        passes = (rmsd is not None and rmsd <= args.rmsd_cap)
         folded[did] = {"plddt": round(plddt, 3),
                        "active_site_rmsd": (round(rmsd, 3) if rmsd is not None else None),
+                       "catalytic_core_rmsd": (round(core_rmsd, 3) if core_rmsd is not None else None),
+                       "passes_rmsd": passes, "rmsd_cap": args.rmsd_cap,
                        "structure_file": f"{did}.pdb"}
-        print(f"[11b] {did} plddt={plddt:.3f} as_rmsd={rmsd}", flush=True)
+        print(f"[11b] {did} plddt={plddt:.3f} as_rmsd={rmsd} core_rmsd={core_rmsd} "
+              f"passes={passes} (cap={args.rmsd_cap})", flush=True)
 
     Path(args.out).write_text(json.dumps(folded, indent=2))
     print(f"[11b] wrote {args.out}", flush=True)
