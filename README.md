@@ -1,4 +1,6 @@
-# Extremophilic Protein Translator
+# Extremolith
+
+*Extremophilic Protein Translator — secreted proteins from life at the edge.*
 
 Build a labeled dataset of **secreted proteins from extremophilic organisms**
 (drawn from GTDB), for fine-tuning a protein language model (e.g. ESM) and/or
