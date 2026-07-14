@@ -481,7 +481,21 @@ def main():
                         print(f"[11]   {args.phenotype[:4]}_{lvl+1}: {consec_fails} consecutive "
                               f"refold fails -> stop, keep last_good", flush=True)
                         break
-        # if refolding was on, return the last structurally-validated sequence
+        # if refolding was on, return a structurally-validated sequence. `cur` may hold
+        # improvements made since the last periodic checkpoint (or, if gibbs_iters <
+        # refold_every, may never have been checkpointed at all) -- do ONE final refold
+        # so we don't silently discard good work OR collapse to WT. Keep `cur` iff it
+        # passes; otherwise fall back to last_good (WT only if nothing ever passed).
+        if refolder is not None and cur != last_good:
+            final_rmsd = refolder.refold_rmsd(cur, active_1b)
+            n_refolds += 1
+            if final_rmsd is not None and final_rmsd <= args.refold_rmsd_cap:
+                last_good, last_good_score = cur, cur_score
+                print(f"[11]   {args.phenotype[:4]}_{lvl+1} final refold OK "
+                      f"rmsd={final_rmsd:.2f} A", flush=True)
+            else:
+                print(f"[11]   {args.phenotype[:4]}_{lvl+1} final refold FAIL "
+                      f"rmsd={final_rmsd} -> keep last_good", flush=True)
         if refolder is not None:
             cur, cur_score = last_good, last_good_score
         muts = [dict(pos=i + 1, wt=a, mut=b) for i, (a, b) in enumerate(zip(seq, cur)) if a != b]
