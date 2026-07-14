@@ -20,7 +20,7 @@
         <label class="form-label">Job Title</label>
         <input type="text" name="title" class="form-control" maxlength="120"
                value="{{ form.get('title','') }}" required
-               placeholder="e.g. Thermostable lipase A">
+               placeholder="e.g. Thermostable laccase">
       </div>
       <div class="mb-3">
         <div class="d-flex justify-content-between align-items-center">
@@ -183,7 +183,7 @@
     ta.value = {{ example_seq | tojson }};
     upd();
     if (!document.querySelector('input[name="title"]').value)
-      document.querySelector('input[name="title"]').value = "Example — B. subtilis lipase A";
+      document.querySelector('input[name="title"]').value = "Example — secreted laccase (multicopper oxidase)";
   });
 
   // aggressiveness spread preview: which levels the N designs will span

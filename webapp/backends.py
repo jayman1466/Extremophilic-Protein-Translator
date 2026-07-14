@@ -28,9 +28,11 @@ explicit `EPT_BACKEND` selects `slurm`.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 import store
 
@@ -77,19 +79,53 @@ class Backend(ABC):
 
 
 class DemoBackend(Backend):
-    """Synthetic results, immediately. No credentials, no network — safe for a
-    public deployment. Wraps the existing `make_demo_results` fixture."""
+    """Serves a REAL cached generation run as the demo output. No credentials, no
+    network — safe for a public deployment. Copies the bundled laccase fixture
+    (`fixtures/laccase_demo/`, the actual results from Biotite job 82374b61:
+    Swiss-Prot annotation transfer + Otsu active-site freeze + Henikoff-weighted
+    conservation) into the job dir, filtered to the phenotypes the user selected.
+
+    Set EPT_DEMO_SYNTHETIC=1 to fall back to the old randomized `make_demo_results`
+    fixture (useful for exercising the "active site not assigned" warning path)."""
 
     name = "demo"
 
+    FIXTURE = Path(__file__).resolve().parent / "fixtures" / "laccase_demo"
+
     def submit(self, job: dict) -> None:
+        if os.environ.get("EPT_DEMO_SYNTHETIC", "0") == "1":
+            return self._synthetic(job)
+        try:
+            import shutil
+            src = json.loads((self.FIXTURE / "results.json").read_text())
+            jd = store.job_dir(job["id"])
+            (jd / "structures").mkdir(parents=True, exist_ok=True)
+            # keep only the phenotypes this job asked for; if none overlap, serve all
+            want = set(job.get("phenotypes") or [])
+            by = {ph: ds for ph, ds in src["by_phenotype"].items()
+                  if not want or ph in want} or src["by_phenotype"]
+            # copy the structure files actually referenced (WT + each kept design)
+            needed = {src["wt_structure"]}
+            for designs in by.values():
+                needed.update(d["structure_file"] for d in designs)
+            for name in needed:
+                fp = self.FIXTURE / "structures" / name
+                if fp.exists():
+                    shutil.copy(fp, jd / "structures" / name)
+            out = dict(src, by_phenotype=by)
+            (jd / "results.json").write_text(json.dumps(out, indent=2))
+            store.set_status(job["id"], "done")
+        except Exception as e:  # noqa: BLE001 — surface any fixture error on the job
+            store.set_status(job["id"], "error", message=f"demo fixture failed: {e}")
+
+    def _synthetic(self, job: dict) -> None:
         try:
             import make_demo_results
             override = (job.get("selection") or {}).get("_advanced_override")
             make_demo_results.main(
                 job["id"], job["phenotypes"], job["n_designs"], override=override
             )
-        except Exception as e:  # noqa: BLE001 — surface any fixture error on the job
+        except Exception as e:  # noqa: BLE001
             store.set_status(job["id"], "error", message=f"demo generation failed: {e}")
 
 
