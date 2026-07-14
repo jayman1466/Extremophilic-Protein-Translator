@@ -31,7 +31,7 @@ BACKEND_NAME = backends.selected_backend_name()
 
 # Example enzyme for the "load example" button — a secreted fungal-type
 # multicopper oxidase (laccase), 519 aa. This is the exact enzyme behind the
-# cached demo run (Cu-binding motifs SIHWHGH / HCHIDFHLD), so "Load example" then
+# cached demo run (Cu-binding motifs SIHWHGF / HCHIDFHLD), so "Load example" then
 # "Generate" reproduces the bundled results.
 EXAMPLE_SEQ = ("MGLQRFSFFVTLALVARSLAAIGPVASLVVANAPVSPDGFLRDAIVVNGVVPSPLITGKK"
                "GDRFQLNVDDTLTNHSMLKSTSIHWHGFFQAGTNWADGPAFVNQCPIASGHSFLYDFHVP"
