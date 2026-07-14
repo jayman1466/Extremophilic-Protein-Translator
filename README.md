@@ -1,5 +1,9 @@
 # Extremolith
 
+**GUI frontend at https://ept-portal-g2qcpwpcsa-uc.a.run.app/**
+(WARNING: currently this just exports synthetic results. Need to work out a
+cheap/scalable GPU solution for runs by the general public.)
+
 *Extremophilic Protein Translator — secreted proteins from life at the edge.*
 
 Build a labeled dataset of **secreted proteins from extremophilic organisms**
