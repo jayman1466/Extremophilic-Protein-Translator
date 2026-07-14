@@ -1,0 +1,157 @@
+{
+  "n_proteins": 1985508,
+  "n_genomes": 7268,
+  "n_groups": 1253362,
+  "group_kind": "sequence_cluster",
+  "label_counts": {
+    "mesophile": 941066,
+    "halophile": 624848,
+    "thermophile": 206930,
+    "acidophile": 81208,
+    "alkaliphile": 42566,
+    "halophile;thermophile": 33647,
+    "alkaliphile;halophile": 24920,
+    "hyperthermophile;thermophile": 10756,
+    "halophile;psychrophile": 3754,
+    "acidophile;thermophile": 3402,
+    "alkaliphile;thermophile": 2759,
+    "acidophile;halophile": 2437,
+    "alkaliphile;psychrophile": 1847,
+    "acidophile;psychrophile": 1845,
+    "alkaliphile;halophile;thermophile": 1004,
+    "halophile;hyperthermophile;thermophile": 817,
+    "acidophile;hyperthermophile;thermophile": 651,
+    "alkaliphile;halophile;psychrophile": 571,
+    "acidophile;halophile;hyperthermophile;thermophile": 157,
+    "alkaliphile;halophile;hyperthermophile;thermophile": 111,
+    "alkaliphile;hyperthermophile;thermophile": 102,
+    "acidophile;halophile;thermophile": 98,
+    "acidophile;halophile;psychrophile": 12
+  },
+  "split_counts": {
+    "train": 1590716,
+    "val": 198322,
+    "test": 196470
+  },
+  "split_by_label": {
+    "acidophile": {
+      "test": 8103,
+      "train": 64957,
+      "val": 8148
+    },
+    "acidophile;halophile": {
+      "test": 229,
+      "train": 1979,
+      "val": 229
+    },
+    "acidophile;halophile;hyperthermophile;thermophile": {
+      "test": 17,
+      "train": 129,
+      "val": 11
+    },
+    "acidophile;halophile;psychrophile": {
+      "test": 1,
+      "train": 10,
+      "val": 1
+    },
+    "acidophile;halophile;thermophile": {
+      "test": 10,
+      "train": 80,
+      "val": 8
+    },
+    "acidophile;hyperthermophile;thermophile": {
+      "test": 61,
+      "train": 519,
+      "val": 71
+    },
+    "acidophile;psychrophile": {
+      "test": 164,
+      "train": 1501,
+      "val": 180
+    },
+    "acidophile;thermophile": {
+      "test": 348,
+      "train": 2712,
+      "val": 342
+    },
+    "alkaliphile": {
+      "test": 4230,
+      "train": 34038,
+      "val": 4298
+    },
+    "alkaliphile;halophile": {
+      "test": 2479,
+      "train": 19905,
+      "val": 2536
+    },
+    "alkaliphile;halophile;hyperthermophile;thermophile": {
+      "test": 12,
+      "train": 85,
+      "val": 14
+    },
+    "alkaliphile;halophile;psychrophile": {
+      "test": 53,
+      "train": 462,
+      "val": 56
+    },
+    "alkaliphile;halophile;thermophile": {
+      "test": 96,
+      "train": 795,
+      "val": 113
+    },
+    "alkaliphile;hyperthermophile;thermophile": {
+      "test": 10,
+      "train": 82,
+      "val": 10
+    },
+    "alkaliphile;psychrophile": {
+      "test": 184,
+      "train": 1480,
+      "val": 183
+    },
+    "alkaliphile;thermophile": {
+      "test": 278,
+      "train": 2199,
+      "val": 282
+    },
+    "halophile": {
+      "test": 61836,
+      "train": 500417,
+      "val": 62595
+    },
+    "halophile;hyperthermophile;thermophile": {
+      "test": 85,
+      "train": 642,
+      "val": 90
+    },
+    "halophile;psychrophile": {
+      "test": 374,
+      "train": 3008,
+      "val": 372
+    },
+    "halophile;thermophile": {
+      "test": 3385,
+      "train": 26903,
+      "val": 3359
+    },
+    "hyperthermophile;thermophile": {
+      "test": 1059,
+      "train": 8627,
+      "val": 1070
+    },
+    "mesophile": {
+      "test": 92839,
+      "train": 754192,
+      "val": 94035
+    },
+    "thermophile": {
+      "test": 20617,
+      "train": 165994,
+      "val": 20319
+    }
+  },
+  "max_splits_per_group": 1,
+  "max_genomes_per_group": 849,
+  "n_protein_pairs": 90984,
+  "protein_pairs_same_split": 90984
+}
