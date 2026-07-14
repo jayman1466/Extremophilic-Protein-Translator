@@ -712,3 +712,60 @@ proposer or the fold-free fallback for structure-poor inputs. The tightly-couple
 PLM→classifier→MPNN path is the high-quality route (needs a trustworthy backbone
 to inverse-fold against); MLM-standalone is the degraded-input path. Pending user
 decision; both share the same oracle stack (§2).
+
+## 17. Known limitations
+
+### 17.1 Hyperthermophile class scarcity
+
+Hyperthermophile is by far the smallest phenotype in the training data. In the
+full labeled secretome (`labeled_dataset_r232_clustered`, 1,985,508 proteins):
+
+| Phenotype (any-label) | Proteins | Share |
+|---|---:|---:|
+| halophile | 692,376 | 34.9% |
+| thermophile (incl. hyperthermophile) | 260,434 | 13.1% |
+| **hyperthermophile** | **12,594** | **0.63%** |
+
+That is a **~55:1 halophile-to-hyperthermophile ratio**. The scarcity is
+intrinsic: hyperthermophily (predicted OGT ≥ 80 °C) is rare in GTDB, and the
+selection kept only the 216 high-confidence hyperthermophile genomes (the
+medium/low tiers were rejected as mesophile-contaminated). Every
+hyperthermophile protein is also labelled `thermophile` — it is the ≥80 °C tail
+of the thermophile class, never a standalone label.
+
+**Where it does and does not bite — the effect is stage-dependent:**
+
+- **Stage 1 (MLM adapter): a coverage effect, not a competitive penalty.** The
+  domain-adaptive MLM (§12, Loss 1) is *label-blind* — it masks residues over the
+  pooled secretome with no phenotype conditioning, so halophile abundance does
+  not "outvote" hyperthermophile. The only consequence of scarcity is **lower
+  exposure**: hyperthermophile-specific sequence signatures (ion-pair /
+  salt-bridge enrichment, charged-residue composition) are seen fewer times and
+  are represented less sharply. This is cushioned two ways: (a) those signatures
+  ride inside the 260k-strong thermophile signal (hyperthermophile ⊂ thermophile),
+  and (b) the 400k cluster-stratified subsample raises the relative weight of
+  rare sequences versus a naive random draw.
+
+- **Stage 2 (per-phenotype classifiers): handled by design, residual variance
+  risk.** Because each phenotype has an **independent** binary classifier
+  (per-phenotype models were chosen precisely to neutralise cross-phenotype
+  imbalance), halophile's 692k proteins are irrelevant to the hyperthermophile
+  head — there is no cross-class disadvantage. The residual issue is **absolute
+  positive scarcity within the hyperthermophile task**: ~12.6k positives
+  concentrated in few sequence clusters (only 169 hyperthermophile matched-protein
+  pairs, vs 63,846 for halophile), which inflates the **variance of the AUPRC
+  estimate** rather than introducing a systematic bias.
+
+**Mitigations (available; apply if the hyperthermophile head underperforms):**
+1. **Oversample / upweight** hyperthermophile positives in *its own* classifier
+   only (`pos_weight` or focal loss, §12 Loss 1) — the per-phenotype design means
+   this is a local knob with no effect on other heads.
+2. **Use thermophile as a prior.** Since hyperthermophile ⊂ thermophile, the
+   thermophile classifier (260k positives, well-populated) can seed or regularise
+   the hyperthermophile head, or serve as a fallback scorer when the
+   hyperthermophile head's confidence interval is wide.
+3. **Report AUPRC with a confidence interval** (bootstrap over test clusters) for
+   the hyperthermophile head specifically, so scarcity-driven estimation variance
+   is visible and not mistaken for a calibrated score.
+4. **Confidence weighting already in place** (`CONFIDENCE_WEIGHTS`) keeps the
+   216 high-confidence hyperthermophile genomes at full weight.
