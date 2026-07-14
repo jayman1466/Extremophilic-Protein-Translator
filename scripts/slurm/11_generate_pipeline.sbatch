@@ -17,7 +17,8 @@
 #   GEN_NDESIGNS  designs per phenotype (default 3)
 #   GEN_GIBBS     gibbs iters per design (default 24)
 #   GEN_MAX_MUT_FRAC  hard mutation budget, fraction of length (default 0.25)
-#   GEN_RMSD_CAP  hard active-site CA-RMSD cap in A (default 2.0)
+#   GEN_RMSD_CAP  hard full active-site CA-RMSD cap in A (default 2.0)
+#   GEN_CORE_RMSD_CAP  hard catalytic-core CA-RMSD cap in A (default 1.5)
 set -euo pipefail
 
 PERSIST=/groups/cress/projects/jaymin/IS1111/eptrans
@@ -31,7 +32,10 @@ PHENOS=${GEN_PHENOS:-thermophile}
 NDES=${GEN_NDESIGNS:-3}
 GIBBS=${GEN_GIBBS:-24}
 MAX_MUT_FRAC=${GEN_MAX_MUT_FRAC:-0.25}   # hard mutation budget (fraction of length)
-RMSD_CAP=${GEN_RMSD_CAP:-2.0}            # hard active-site CA-RMSD cap (A)
+RMSD_CAP=${GEN_RMSD_CAP:-2.0}            # hard full active-site CA-RMSD cap (A)
+CORE_RMSD_CAP=${GEN_CORE_RMSD_CAP:-1.5}  # hard catalytic-core CA-RMSD cap (A)
+REFOLD=${GEN_REFOLD:-1}                  # in-loop periodic ESMFold refold + rollback (1=on)
+REFOLD_EVERY=${GEN_REFOLD_EVERY:-4}     # refold every N Gibbs passes
 STRUCT=$JOBDIR/structures
 mkdir -p "$STRUCT"
 cd "$JOBDIR"
@@ -82,6 +86,20 @@ else
   echo '{"transferred":[]}' > "$JOBDIR/active_site_transfer.json"
 fi
 
+# ---------- optional: persistent ESMFold refold worker (esmfold env, backgrounded) ----------
+# Loads ESMFold ONCE and folds sequences the generation loop hands it via a queue dir,
+# enabling in-loop structural rollback. Shares the GPU with ESM-2 3B (fits on H200).
+REFOLD_WD=""; REFOLD_ARGS=""; WORKER_PID=""
+if [ "$REFOLD" = "1" ] && [ -f "$STRUCT/wt.pdb" ]; then
+  REFOLD_WD="$JOBDIR/_refold"; mkdir -p "$REFOLD_WD"
+  rm -f "$REFOLD_WD/READY" "$REFOLD_WD/STOP"
+  echo "[gen] launching ESMFold refold worker (esmfold env) -> $REFOLD_WD"
+  conda run -n esmfold python "$REPO/scripts/11e_esmfold_worker.py" \
+    --workdir "$REFOLD_WD" --max-len 1000 > "$JOBDIR/_refold_worker.log" 2>&1 &
+  WORKER_PID=$!
+  REFOLD_ARGS="--refold-workdir $REFOLD_WD --wt-pdb $STRUCT/wt.pdb --refold-every $REFOLD_EVERY --refold-rmsd-cap $RMSD_CAP"
+fi
+
 # ---------- Stages 1,2,4,5 per phenotype (eptrans_ml) ----------
 for PH in $PHENOS; do
   echo "[gen] === $PH: masked-gen + scoring ==="
@@ -93,10 +111,15 @@ for PH in $PHENOS; do
     --uniref-db "$UNIREF" \
     --transfer-json "$JOBDIR/active_site_transfer.json" \
     --backbone-size 3B --n-designs "$NDES" --gibbs-iters "$GIBBS" \
-    --max-mut-frac "$MAX_MUT_FRAC" \
+    --max-mut-frac "$MAX_MUT_FRAC" $REFOLD_ARGS \
     --device cuda --workdir "$JOBDIR/_work_${PH}" --seed 1466
   CAND_LIST+=("$JOBDIR/candidates_${PH}.json")
 done
+# stop the refold worker (fold any pending, then exit)
+if [ -n "$WORKER_PID" ]; then
+  touch "$REFOLD_WD/STOP"; wait "$WORKER_PID" 2>/dev/null || true
+  echo "[gen] refold worker stopped"
+fi
 conda deactivate
 
 # ---------- Stage 6b/6c fold designs + RMSD per phenotype (esmfold; WT reused) ----------
@@ -106,7 +129,8 @@ for PH in $PHENOS; do
   python "$REPO/scripts/11b_fold_rmsd.py" \
     --candidates "$JOBDIR/candidates_${PH}.json" \
     --structures "$STRUCT" \
-    --out "$JOBDIR/folded_${PH}.json" --max-len 1000 --rmsd-cap "$RMSD_CAP"
+    --out "$JOBDIR/folded_${PH}.json" --max-len 1000 \
+    --rmsd-cap "$RMSD_CAP" --core-rmsd-cap "$CORE_RMSD_CAP"
   FOLD_LIST+=("$JOBDIR/folded_${PH}.json")
 done
 conda deactivate

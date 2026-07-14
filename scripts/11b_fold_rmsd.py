@@ -67,6 +67,9 @@ def main():
     ap.add_argument("--rmsd-cap", type=float, default=2.0,
                     help="hard cap on full active-site CA-RMSD (A); designs above this "
                          "get passes_rmsd=False (fold-collapse / classifier gaming)")
+    ap.add_argument("--core-rmsd-cap", type=float, default=1.5,
+                    help="hard cap on catalytic-core CA-RMSD (A), the rigid metal/catalytic "
+                         "geometry; tighter than the full-set cap. A design must pass BOTH.")
     args = ap.parse_args()
 
     import torch
@@ -123,16 +126,23 @@ def main():
         rmsd = rmsd_over(wt_ca, dca, active) if active else \
                rmsd_over(wt_ca, dca, sorted(wt_ca))
         core_rmsd = rmsd_over(wt_ca, dca, core) if core else None
-        # hard cap: a design whose active-site backbone deviates past the cap is a
-        # fold-collapse / classifier-gaming reject, regardless of classifier score
-        passes = (rmsd is not None and rmsd <= args.rmsd_cap)
+        # hard gate: a design whose active-site backbone deviates past the cap is a
+        # fold-collapse / classifier-gaming reject, regardless of classifier score. Two
+        # gates, both must hold: the full active-site set (fold integrity, looser cap)
+        # AND the rigid catalytic core (functional geometry, tighter cap). The core gate
+        # is skipped only when no catalytic-core residues were annotated (core is None).
+        passes_full = (rmsd is not None and rmsd <= args.rmsd_cap)
+        passes_core = (core_rmsd is None) or (core_rmsd <= args.core_rmsd_cap)
+        passes = passes_full and passes_core
         folded[did] = {"plddt": round(plddt, 3),
                        "active_site_rmsd": (round(rmsd, 3) if rmsd is not None else None),
                        "catalytic_core_rmsd": (round(core_rmsd, 3) if core_rmsd is not None else None),
-                       "passes_rmsd": passes, "rmsd_cap": args.rmsd_cap,
+                       "passes_rmsd": passes, "passes_full": passes_full, "passes_core": passes_core,
+                       "rmsd_cap": args.rmsd_cap, "core_rmsd_cap": args.core_rmsd_cap,
                        "structure_file": f"{did}.pdb"}
         print(f"[11b] {did} plddt={plddt:.3f} as_rmsd={rmsd} core_rmsd={core_rmsd} "
-              f"passes={passes} (cap={args.rmsd_cap})", flush=True)
+              f"passes={passes} (full<={args.rmsd_cap}:{passes_full} core<={args.core_rmsd_cap}:{passes_core})",
+              flush=True)
 
     Path(args.out).write_text(json.dumps(folded, indent=2))
     print(f"[11b] wrote {args.out}", flush=True)

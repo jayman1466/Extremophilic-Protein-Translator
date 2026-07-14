@@ -43,6 +43,7 @@ def main():
                 "catalytic_core_rmsd": ff.get("catalytic_core_rmsd"),
                 "passes_rmsd": ff.get("passes_rmsd"),
                 "rmsd_cap": ff.get("rmsd_cap"),
+                "core_rmsd_cap": ff.get("core_rmsd_cap"),
                 "mpnn_model": mpnn.get("model_type"),
                 "wt_mpnn_confidence": mpnn.get("wt_mpnn_confidence"),
                 "n_msa_hits": cand.get("n_msa_hits"),

@@ -27,11 +27,77 @@ For a first end-to-end test the MPNN gate runs as a FINAL filter (not the period
 in-loop audit of the production spec) -- the in-loop audit crosses conda envs every
 K steps and is a downstream optimization.
 """
-import sys, os, json, argparse, subprocess, tempfile
+import sys, os, json, argparse, subprocess, tempfile, time, uuid
 from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+
+# ---- in-loop refold client (talks to 11e_esmfold_worker via a shared queue dir) ----
+def _ca_coords(pdb_text):
+    out = {}
+    for ln in pdb_text.splitlines():
+        if ln.startswith("ATOM") and ln[12:16].strip() == "CA":
+            out[int(ln[22:26])] = np.array([float(ln[30:38]), float(ln[38:46]), float(ln[46:54])])
+    return out
+
+
+def _kabsch_rmsd(P, Q):
+    if len(P) < 3:
+        return None
+    Pc, Qc = P - P.mean(0), Q - Q.mean(0)
+    H = Pc.T @ Qc
+    V, S, Wt = np.linalg.svd(H)
+    d = np.sign(np.linalg.det(Wt.T @ V.T))
+    R = Wt.T @ np.diag([1, 1, d]) @ V.T
+    return float(np.sqrt(((Pc @ R.T - Qc) ** 2).sum(1).mean()))
+
+
+def _rmsd_over(wt_ca, dca, positions):
+    idx = [p for p in positions if p in wt_ca and p in dca]
+    if len(idx) < 3:
+        return None
+    return _kabsch_rmsd(np.array([dca[p] for p in idx]), np.array([wt_ca[p] for p in idx]))
+
+
+class RefoldClient:
+    """Hands a sequence to the persistent ESMFold worker and returns active-site RMSD
+    to the WT structure. Returns None on timeout/failure so the loop degrades to
+    no-refold rather than crashing."""
+
+    def __init__(self, workdir, wt_pdb_path, timeout=300.0, poll=0.5):
+        self.wd = Path(workdir)
+        self.req = self.wd / "requests"; self.resp = self.wd / "responses"
+        self.timeout = timeout; self.poll = poll
+        self.wt_ca = _ca_coords(Path(wt_pdb_path).read_text())
+
+    def wait_ready(self, timeout=1200.0):
+        t0 = time.time()
+        while not (self.wd / "READY").exists():
+            if time.time() - t0 > timeout:
+                return False
+            time.sleep(self.poll)
+        return True
+
+    def refold_rmsd(self, seq, positions):
+        """Fold `seq`, return CA-RMSD over `positions` (1-based) to WT, or None."""
+        rid = uuid.uuid4().hex[:12]
+        tmp = self.req / f"{rid}.fasta.tmp"
+        tmp.write_text(seq)
+        tmp.rename(self.req / f"{rid}.fasta")   # atomic submit
+        out = self.resp / f"{rid}.pdb"; err = self.resp / f"{rid}.err"
+        t0 = time.time()
+        while True:
+            if out.exists():
+                pdb = out.read_text(); out.unlink(missing_ok=True)
+                return _rmsd_over(self.wt_ca, _ca_coords(pdb), positions)
+            if err.exists():
+                err.unlink(missing_ok=True)
+                return None
+            if time.time() - t0 > self.timeout:
+                return None
+            time.sleep(self.poll)
 
 # ---- biophysical proxies (non-learnable anti-gaming layer, modeling_design.md S2) ----
 def biophysical_score(seq, phenotype):
@@ -237,6 +303,19 @@ def main():
                     help="hard mutation budget as a fraction of length; a proposal that "
                          "would push the total mutation count past this is rejected even "
                          "if it improves the classifier score (anti-fold-collapse)")
+    ap.add_argument("--refold-workdir", default="",
+                    help="if set, enable in-loop periodic ESMFold refolds via the worker "
+                         "queue at this dir (11e_esmfold_worker.py must be running against it)")
+    ap.add_argument("--wt-pdb", default="", help="cached WT structure for refold RMSD")
+    ap.add_argument("--refold-every", type=int, default=4,
+                    help="refold + RMSD-check every N Gibbs passes (0 disables)")
+    ap.add_argument("--refold-rmsd-cap", type=float, default=2.0,
+                    help="active-site CA-RMSD (A) above which a checkpoint is rejected -> "
+                         "roll back to last passing sequence and reduce mask_rate")
+    ap.add_argument("--refold-backoff", type=float, default=0.5,
+                    help="multiply mask_rate by this after a rollback (more conservative)")
+    ap.add_argument("--refold-max-fails", type=int, default=3,
+                    help="stop this design after this many consecutive failed refolds")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--workdir", default=".")
     ap.add_argument("--seed", type=int, default=1466)
@@ -343,15 +422,32 @@ def main():
     # still ramps how AGGRESSIVELY each design approaches it via mask_rate/target_mut_frac.
     mut_budget = max(1, int(round(args.max_mut_frac * L)))
 
+    # optional in-loop refold client (structural rollback). RMSD is measured over the
+    # active-site residues (same set the final Stage-6b gate uses).
+    refolder = None
+    if args.refold_workdir and args.wt_pdb and args.refold_every > 0 and active_1b:
+        refolder = RefoldClient(args.refold_workdir, args.wt_pdb)
+        if refolder.wait_ready():
+            print(f"[11] refold worker ready; checking every {args.refold_every} passes "
+                  f"(cap {args.refold_rmsd_cap} A over {len(active_1b)} AS residues)", flush=True)
+        else:
+            print("[11] WARN refold worker never became READY -> disabling in-loop refold", flush=True)
+            refolder = None
+
     designs = []
     for lvl in range(args.n_designs):
         sch = schedule(lvl, args.n_designs)
         cur = seq
         cur_score = wt_score
         trace = [(0, cur_score)]
+        mask_rate = sch["mask_rate"]        # mutable: shrinks on rollback
+        last_good = seq                      # last refold-passing sequence
+        last_good_score = wt_score
+        consec_fails = 0
+        n_refolds = n_rollbacks = 0
         for it in range(args.gibbs_iters):
             units = MK.build_mask_units(L, special=special, frozen=frozen)  # singleton units
-            mask = MK.sample_mask_units(cons, units, mask_rate=sch["mask_rate"],
+            mask = MK.sample_mask_units(cons, units, mask_rate=mask_rate,
                                         gamma=sch["gamma"], rng=rng)
             mask_pos0 = np.where(mask)[0].tolist()
             if not mask_pos0:
@@ -365,14 +461,39 @@ def main():
             if ps >= cur_score and n_mut(prop) <= mut_budget:
                 cur, cur_score = prop, ps
             trace.append((it + 1, cur_score))
+            # ---- periodic structural checkpoint: refold + active-site RMSD ----
+            if refolder is not None and (it + 1) % args.refold_every == 0 and cur != last_good:
+                rmsd = refolder.refold_rmsd(cur, active_1b)
+                n_refolds += 1
+                if rmsd is not None and rmsd <= args.refold_rmsd_cap:
+                    last_good, last_good_score, consec_fails = cur, cur_score, 0
+                    print(f"[11]   {args.phenotype[:4]}_{lvl+1} pass {it+1}: refold OK "
+                          f"rmsd={rmsd:.2f} A (checkpoint)", flush=True)
+                else:
+                    # roll back to the last passing sequence, take smaller steps next
+                    consec_fails += 1; n_rollbacks += 1
+                    cur, cur_score = last_good, last_good_score
+                    mask_rate = max(0.01, mask_rate * args.refold_backoff)
+                    print(f"[11]   {args.phenotype[:4]}_{lvl+1} pass {it+1}: refold FAIL "
+                          f"rmsd={rmsd} > {args.refold_rmsd_cap} -> rollback, "
+                          f"mask_rate->{mask_rate:.3f} (fail {consec_fails})", flush=True)
+                    if consec_fails >= args.refold_max_fails:
+                        print(f"[11]   {args.phenotype[:4]}_{lvl+1}: {consec_fails} consecutive "
+                              f"refold fails -> stop, keep last_good", flush=True)
+                        break
+        # if refolding was on, return the last structurally-validated sequence
+        if refolder is not None:
+            cur, cur_score = last_good, last_good_score
         muts = [dict(pos=i + 1, wt=a, mut=b) for i, (a, b) in enumerate(zip(seq, cur)) if a != b]
         did = f"{args.phenotype[:4]}_{lvl+1}"
         designs.append(dict(design_id=did, sequence=cur, level=lvl,
                             classifier_score=round(cur_score, 4),
                             biophysical_score=round(biophysical_score(cur, args.phenotype), 4),
                             n_mutations=len(muts), mutations=muts,
+                            n_refolds=n_refolds, n_rollbacks=n_rollbacks,
                             gibbs_trace=[[int(a), round(float(b), 4)] for a, b in trace]))
-        print(f"[11] design {did}: score {wt_score:.3f}->{cur_score:.3f}, {len(muts)} muts", flush=True)
+        print(f"[11] design {did}: score {wt_score:.3f}->{cur_score:.3f}, {len(muts)} muts, "
+              f"{n_refolds} refolds / {n_rollbacks} rollbacks", flush=True)
 
     out = dict(wt_sequence=seq, phenotype=args.phenotype,
                wt_classifier_score=round(wt_score, 4),
