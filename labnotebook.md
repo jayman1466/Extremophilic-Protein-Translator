@@ -1035,3 +1035,25 @@ Artifacts: `laccase_gen_full_results.json`, `laccase_active_site_transfer.json`,
 `laccase_ther2_full.pdb` (clf 0.911, RMSD 1.36 Å), `laccase_halo3_full.pdb`
 (clf 0.744 but RMSD 14.9 Å — gaming example). Annotation tables archived as
 `annotation_tables.tar.gz`.
+
+## Web portal: real demo output + Cloud Run readiness (07-13)
+
+Wired the public portal to showcase the real generation run instead of synthetic
+placeholders (commits db2110e, 42d95db):
+
+- **Example enzyme** = the 519-aa secreted laccase (multicopper oxidase) behind the
+  demo run, so "Load example → Generate" reproduces the bundled results.
+- **`DemoBackend` now serves the actual results from Biotite job 82374b61** (Swiss-Prot
+  transfer + Otsu active-site freeze + Henikoff-weighted conservation) from a checked-in
+  fixture (`webapp/fixtures/laccase_demo/` = real `results.json` + 7 ESMFold structures),
+  filtered to the requested phenotypes. `EPT_DEMO_SYNTHETIC=1` restores the old
+  randomized fixture. Verified end-to-end in a fresh Flask env: served scores match the
+  artifact byte-for-byte (ther_2 0.9105, halo_3 0.7437), all structures render.
+
+Deploy path (`webapp/deploy_cloudrun.sh`) is unchanged and ready: source deploy of the
+thin gunicorn frontend, GCS bucket FUSE-mounted for the SQLite DB + result files, IAM
+grants for Cloud Build. The public deployment runs the **demo backend** (no SSH keys,
+no cluster access) — the real Slurm generation stays campus-side, so the portal shows
+the laccase results with no credential exposure. Deploy is a user-run step (needs
+authenticated `gcloud` pointed at the target GCP project); everything it ships is on
+`origin/main`.
