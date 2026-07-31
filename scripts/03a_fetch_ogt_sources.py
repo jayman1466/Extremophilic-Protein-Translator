@@ -28,12 +28,33 @@ to the cold tail.
                Pools BacDive, ThermoBase, aciDB, MediaDB, Lyubetsky et al. 2020.
                Ships Type=='growth' AND Type=='optimum'; only optima are OGT.
 
-NOT AVAILABLE. Sauer & Wang 2015 (Biophys J 109:1420, doi
-10.1016/j.bpj.2015.07.026), Toki's dataset I at 11,004 species. PMC4601007 is
-not open access and efetch exposes no supplementary material. If it is obtained,
-drop it at data/ogt/sauer_wang_ogt.csv and add a loader to 03b -- its value is
-corroboration, not coverage, since 57.9% of pooled species currently rest on a
-single measurement.
+CLOSED: Sauer & Wang 2015 -- do not re-chase.
+    Sauer DB, Karpowich NK, Song JM, Wang D-N. 2015. Biophys J 109:1420-1428.
+    doi:10.1016/j.bpj.2015.07.026 (PMC4601007). Toki's dataset I, 11,004 species,
+    the largest of the four and the only one never obtained.
+
+    Every route was exhausted:
+      * PMC4601007 returns idIsNotOpenAccess; efetch XML exposes only main.pdf,
+        no supplementary-material links.
+      * The lab's own distribution,
+            https://med.nyu.edu/skirball-lab/dwanglab/files/thermostability_v1.1.tar.gz
+        is a DEAD LINK (confirmed by the project owner, 2026-07-31). This was the
+        canonical location; the Wang lab page no longer serves it.
+      * github.com/DavidBSauer/OGT_prediction (the 2019 successor) ships
+        calculated features and genome lists, not the raw species->OGT table.
+
+    Judged unrecoverable and NOT worth further effort, on measured grounds:
+    marginal cold yield per added source is falling steeply (+47, +15, +11
+    species at <=15 C for Madin, Toki, OGTFinder), so a fifth source would
+    mostly buy corroboration -- 57.9% of pooled species rest on a single
+    measurement -- rather than new cold species. The pooled cold tail is
+    ground-truth-limited at roughly 200 species below 15 C across every database
+    that exists, which is the same ceiling three independent prediction papers
+    hit. Adding dataset I would not change that.
+
+    If it ever resurfaces: drop it at data/ogt/sauer_wang_ogt.csv, add a loader
+    to 03b alongside the other four, and expect ogt_n_sources to rise (promoting
+    medium -> high via the >=2-source rule) more than the species count.
 """
 
 from __future__ import annotations
