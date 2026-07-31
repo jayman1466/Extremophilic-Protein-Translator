@@ -105,12 +105,40 @@ awk -v n="$N_SAMPLE" -v t="$TOTAL" 'NR % int(t/n ? t/n : 1) == 1' all_mags.txt \
   | head -"$N_SAMPLE" > sample_mags.txt
 echo "MAGS_SAMPLED $(wc -l < sample_mags.txt)"
 
-# stage copies so the reference dir and the source tree stay untouched
+# stage copies so the reference dir and the source tree stay untouched.
+#
+# GENOME IDs MUST BE SANITIZED. Shell quoting is not sufficient here: GTDB-Tk
+# derives a genome ID from the filename and runs its OWN validator on it, which
+# rejects the characters  [ ) = ; ( , ]  and aborts the whole run --
+#   ERROR: Invalid genome ID: 10A(CNS0876618)_bin.16
+# 1,445 of the 4,084 deep-sea MAG names (35.4%) embed an accession in
+# parentheses -- OES 1,264, SAMN 95, CNS 86 -- so this is not an edge case.
+# Counted over the deep-sea labels TSV, and 1,445 is also the count of names
+# holding ANY of GTDB-Tk's invalid characters, i.e. parentheses are the only
+# offending characters present anywhere in the corpus.
+#
+# Staged filenames therefore replace each invalid character with '_', and
+# mag_id_map.tsv records sanitized -> original so downstream joins can recover
+# the true MAG id (which is the key used by the GenomeSPOT predictions table and
+# the deep-sea labels TSV). Verified injective over all 4,084 real MAG names:
+# 4,084 distinct originals -> 4,084 distinct sanitized, zero collisions.
 rm -f genomes/*.fa 2>/dev/null
+: > mag_id_map.tsv
 while IFS= read -r F; do
-  [[ -n "$F" ]] && cp "$F" "genomes/$(basename "$F")"
+  [[ -z "$F" ]] && continue
+  ORIG=$(basename "$F" .fa)
+  SAFE=$(printf '%s' "$ORIG" | tr ' )=;(,' '______')
+  cp "$F" "genomes/${SAFE}.fa"
+  printf '%s\t%s\n' "$SAFE" "$ORIG" >> mag_id_map.tsv
 done < sample_mags.txt
 echo "MAGS_STAGED $(find genomes -name '*.fa' | wc -l)"
+echo "ID_MAP_ROWS $(wc -l < mag_id_map.tsv)"
+echo "ID_MAP_DISTINCT_SAFE $(cut -f1 mag_id_map.tsv | sort -u | wc -l)"
+echo "ID_MAP_RENAMED $(awk -F'\t' '$1!=$2' mag_id_map.tsv | wc -l)"
+# fail loudly rather than silently classifying fewer genomes than intended
+if [[ "$(cut -f1 mag_id_map.tsv | sort -u | wc -l)" != "$(wc -l < mag_id_map.tsv)" ]]; then
+  echo "FATAL sanitized genome IDs collided -- aborting"; exit 1
+fi
 echo "STAGED_CONTIGS_TOTAL $(grep -ch '^>' genomes/*.fa | paste -sd+ | bc 2>/dev/null || echo NA)"
 
 # ---- classify_wf, timed ----
@@ -140,9 +168,25 @@ grep -E '^\[|done in|Finished' out/gtdbtk.log 2>/dev/null | tail -25 || true
 echo "=== summary files produced ==="
 find out -maxdepth 1 -name '*summary.tsv' -exec sh -c 'echo "$1 rows=$(($(wc -l < "$1")-1))"' _ {} \;
 
-echo "=== classification sample ==="
+echo "=== classification sample (genome IDs shown as staged, i.e. sanitized) ==="
 for S in out/gtdbtk.bac120.summary.tsv out/gtdbtk.ar53.summary.tsv; do
   [[ -f "$S" ]] && { echo "--- $S"; cut -f1,2 "$S" | head -6; }
+done
+
+# ---- restore original MAG ids in the summaries ----
+# The summary's first column is the sanitized id; every downstream table (the
+# GenomeSPOT predictions TSV, the deep-sea labels TSV) is keyed by the ORIGINAL
+# MAG name, so emit a joined copy rather than leaving the reconciliation to
+# whoever reads this next.
+for S in out/gtdbtk.bac120.summary.tsv out/gtdbtk.ar53.summary.tsv; do
+  [[ -f "$S" ]] || continue
+  awk -F'\t' -v OFS='\t' '
+    NR==FNR { orig[$1]=$2; next }
+    FNR==1  { print "mag_id", $0; next }
+    { print (($1 in orig) ? orig[$1] : $1), $0 }
+  ' mag_id_map.tsv "$S" > "${S%.tsv}.orig_ids.tsv"
+  echo "RESTORED ${S%.tsv}.orig_ids.tsv rows=$(($(wc -l < "${S%.tsv}.orig_ids.tsv")-1))"
+  echo "UNMAPPED_IDS $(awk -F'\t' 'NR>1{print $1}' "${S%.tsv}.orig_ids.tsv" | grep -c '_bin\._*[0-9]*$' || true)"
 done
 
 echo "=== unclassified / failed ==="
