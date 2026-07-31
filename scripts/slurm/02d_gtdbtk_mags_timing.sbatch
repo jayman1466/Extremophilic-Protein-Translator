@@ -186,7 +186,14 @@ for S in out/gtdbtk.bac120.summary.tsv out/gtdbtk.ar53.summary.tsv; do
     { print (($1 in orig) ? orig[$1] : $1), $0 }
   ' mag_id_map.tsv "$S" > "${S%.tsv}.orig_ids.tsv"
   echo "RESTORED ${S%.tsv}.orig_ids.tsv rows=$(($(wc -l < "${S%.tsv}.orig_ids.tsv")-1))"
-  echo "UNMAPPED_IDS $(awk -F'\t' 'NR>1{print $1}' "${S%.tsv}.orig_ids.tsv" | grep -c '_bin\._*[0-9]*$' || true)"
+  # Count ids that are NOT in the map, i.e. genuinely unmapped. The earlier
+  # pattern matched '_bin.<digits>$', which every id ends with, so it reported
+  # the total row count and would have read as "everything failed" when in fact
+  # the restoration succeeded. Compare against the map instead of guessing from
+  # the id shape.
+  echo "UNMAPPED_IDS $(awk -F'\t' 'NR==FNR{m[$2];next} FNR>1 && !($1 in m){c++} END{print c+0}' \
+      mag_id_map.tsv "${S%.tsv}.orig_ids.tsv")"
+  echo "RESTORED_WITH_PARENS $(awk -F'\t' 'FNR>1{print $1}' "${S%.tsv}.orig_ids.tsv" | grep -c '(' || true)"
 done
 
 echo "=== unclassified / failed ==="

@@ -16,10 +16,19 @@ The mechanism is regression shrinkage, not sampling: predictions regress onto
 the training mean with slope 0.846 and a fixed point at 33.0 C, so a measured
 5 C organism is predicted at 9.3 C and the whole cold tail collapses toward
 ambient. GenomeSPOT's own authors report RMSE 14 C below 15 C against a
-mean-predictor baseline of 12.46 -- worse than guessing. Two other groups
-reproduce the failure with different features and different training sets
-(Sauer & Wang 2019; Toki et al. 2026), and OGTFinder 2025 reports "poor fit for
-psychrophiles" with 58 cold examples out of 6,401 modelled prokaryotes.
+mean-predictor baseline of 12.46 -- worse than guessing.
+
+Independent groups hit the same wall with different features and training sets.
+Sauer & Wang 2019 (Bioinformatics, doi 10.1093/bioinformatics/btz059) report
+RMSE 5.17 C / R^2 0.835 overall and note accuracy "can be further improved ...
+by excluding psychrophiles". Toki et al. 2026 raise psychrophile recall only
+38.4% -> 48.7%, and do it via gene presence/absence rather than composition.
+OGTFinder 2025 devotes a section to "Poor fit for psychrophiles": its training
+set is "only 0.9% (n = 58) psychrophiles" out of 6,401 observations with
+available genomes, and it attributes the failure to weaker amino-acid signals,
+citing Yang et al. 2015 -- the result that low-temperature adaptation is not the
+inverse of high-temperature adaptation, i.e. there is no cold analogue of
+IVYWREL.
 
 So for the cold class we substitute MEASURED optima for predicted ones. This
 stage assembles them and writes a rubric that never consults GenomeSPOT.
@@ -29,9 +38,14 @@ SOURCES (four, pooled by normalised binomial species name)
     TEMPURA    Sato et al. 2020, Microbes Environ 35:ME20074       8,638 species
     Madin      Madin et al. 2020, Sci Data 7:170                  11,629
     Toki       Toki et al. 2026, mSystems, OGT.csv                 3,131
-    OGTFinder  Colette et al. 2025 (bioRxiv), Type=='optimum'      3,168
-                 -- itself pooling BacDive, ThermoBase, aciDB,
-                    MediaDB, Lyubetsky et al. 2020
+    OGTFinder  Colette et al. 2025 (bioRxiv 2025.03.03.640802),    3,168
+               Type=='optimum' rows excluding TEMPURA
+                 -- contributing sources, verified by grouping the
+                    shipped TSV rather than from the paper text:
+                    BacDive, ThermoBase, aciDB, Lyubetsky et al. 2020.
+                    (MediaDB, CECT, CCUG and NIES appear in the file but
+                    supply only Type=='growth' rows, so they contribute
+                    no optima here.)
 
 Each contributes cold species the others lack (uniquely <=15 C: 30 / 37 / 14 /
 12), so none is redundant. Pooled: 16,497 species, of which 9,444 join GTDB
