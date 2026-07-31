@@ -1,4 +1,5 @@
 """Unit tests for eptrans.dataset (labeling + leakage-aware splits)."""
+import numpy as np
 import pandas as pd
 
 from eptrans.dataset import (
@@ -174,3 +175,60 @@ def test_cluster_regime_derives_protein_pairs_no_genome_union():
     assert res.stats["n_protein_pairs"] == 2
     # each derived pair co-clusters -> same split guaranteed
     assert res.stats["protein_pairs_same_split"] == 2
+
+
+def test_pair_cap_is_class_stratified():
+    """The (cluster, class) pair cap must bound universal families WITHOUT
+    starving the rare phenotype class.
+
+    Regression guard for the whole-proteome scope change: core families sit at
+    prevalence f~1.0 and intersect every matched genome pair, so an unstratified
+    cap of k drops the rarest class with probability (1 - p_rare)^k. Capping per
+    (cluster, class) makes that risk zero. If someone "simplifies" the groupby
+    below to cluster-only, this test fails.
+    """
+    from eptrans.dataset import _derive_protein_pairs
+
+    n_genomes, n_clusters, n_universal = 24, 60, 10
+    rng = np.random.default_rng(11)
+    rows = []
+    for gi in range(n_genomes):
+        g = f"GB_GCA_{gi:09d}.1"
+        for ci in range(n_clusters):
+            if ci < n_universal or rng.random() < 0.3:
+                rows.append({"genome": g, "protein_id": f"p{ci}", "group": f"cl{ci}",
+                             "tagged_id": f"{g}~p{ci}", "cs_prob": rng.random()})
+    labeled = pd.DataFrame(rows)
+
+    # 12 genome pairs; only ONE is the rare class (mirrors hyperthermophile at 0.8%)
+    pairs = pd.DataFrame([
+        {"class": "hyperthermophile" if i == 0 else "halophile",
+         "extremophile_acc": f"GB_GCA_{2 * i:09d}.1",
+         "outgroup_acc": f"GB_GCA_{2 * i + 1:09d}.1"}
+        for i in range(12)
+    ])
+
+    uncapped = _derive_protein_pairs(labeled, "group", "genome", pairs)
+    n_rare_uncapped = int((uncapped["class"] == "hyperthermophile").sum())
+    assert n_rare_uncapped > 0
+
+    # universal clusters intersect every genome pair
+    assert uncapped.groupby("cluster").size().max() == len(pairs)
+
+    capped = _derive_protein_pairs(labeled, "group", "genome", pairs,
+                                   max_pairs_per_cluster_class=3, seed=1466)
+    # the cap binds: no (cluster, class) cell exceeds k
+    assert capped.groupby(["cluster", "class"]).size().max() <= 3
+    assert len(capped) < len(uncapped)
+    # and the rare class is preserved intact, because it has <= k pairs per cluster
+    assert int((capped["class"] == "hyperthermophile").sum()) == n_rare_uncapped
+
+    # a large k is an exact no-op
+    noop = _derive_protein_pairs(labeled, "group", "genome", pairs,
+                                 max_pairs_per_cluster_class=10_000, seed=1466)
+    assert len(noop) == len(uncapped)
+
+    # deterministic given seed
+    again = _derive_protein_pairs(labeled, "group", "genome", pairs,
+                                  max_pairs_per_cluster_class=3, seed=1466)
+    assert capped.equals(again)

@@ -191,6 +191,8 @@ def _derive_protein_pairs(
     group_col: str,
     genome_col: str,
     pairs: pd.DataFrame,
+    max_pairs_per_cluster_class: int | None = None,
+    seed: int = 1466,
 ) -> "pd.DataFrame":
     """Derive protein-level ortholog pairs = (cluster INTERSECT matched-genome-pair).
 
@@ -201,6 +203,37 @@ def _derive_protein_pairs(
     proxy for reciprocal-best; a full RBH would need alignment scores). Both
     members share a cluster, hence the same split, so test-fold pairs feed the
     pairwise margin loss (Section 12, L_pair).
+
+    Args:
+        max_pairs_per_cluster_class: if set, emit at most this many pairs per
+            (cluster, class) cell — a REDUNDANCY cap for whole-proteome scope.
+
+            The pair set is a sparse (clusters x matched-genome-pairs) matrix. A
+            cluster's contribution scales with its prevalence f = fraction of
+            genomes carrying it. On the secreted set this self-limits: max
+            observed prevalence is 849/7,268 = 11.7% (no universal secreted
+            protein exists), largest single-cluster contribution 201 pairs.
+            Under whole-proteome scope, core families (Bac120 markers, ribosome,
+            tRNA synthetases, RNAP, chaperones) sit at f~1.0 and each intersect
+            EVERY matched genome pair — 2,687 pairs from one cluster, 13x the
+            current maximum, in a regime with zero representatives in the
+            current data.
+
+            Those pairs are REDUNDANT, not uninformative: thermophile EF-Tu vs
+            mesophile EF-Tu is a real thermostability contrast, and for the
+            temperature classes it is exactly the signal whole-proteome scope
+            exists to capture. So the correct instrument caps duplicate votes
+            within a family rather than dropping the family (do NOT filter
+            clusters on prevalence — that deletes the signal).
+
+            Stratification by class is REQUIRED, not cosmetic. Matched genome
+            pairs are severely imbalanced (halophile 1,472; thermophile 560;
+            acidophile 341; alkaliphile 292; hyperthermophile 22 = 0.8%). An
+            UNSTRATIFIED cap of k drops hyperthermophile entirely with
+            probability (1 - 22/2687)^k: 0.85 at k=20, 0.66 at k=50; k>=365
+            (14% of all genome pairs, barely a cap) is needed for <5% risk.
+            Capping per (cluster, class) makes that risk zero.
+        seed: RNG seed for the subsample, so pair derivation stays reproducible.
 
     Returns columns: class, cluster, ext_acc, outgroup_acc, ext_id, outgroup_id.
     """
@@ -226,8 +259,21 @@ def _derive_protein_pairs(
         for cl in (e_clusters & m_clusters):
             rows.append({"class": cls, "cluster": cl, "ext_acc": e, "outgroup_acc": m,
                          "ext_id": best.loc[(e, cl)], "outgroup_id": best.loc[(m, cl)]})
-    return pd.DataFrame(rows, columns=["class", "cluster", "ext_acc", "outgroup_acc",
-                                       "ext_id", "outgroup_id"])
+    out = pd.DataFrame(rows, columns=["class", "cluster", "ext_acc", "outgroup_acc",
+                                      "ext_id", "outgroup_id"])
+
+    k = max_pairs_per_cluster_class
+    if k is not None and len(out):
+        # Subsample within each (cluster, class) cell. Deterministic given seed.
+        rng = np.random.default_rng(seed)
+        keep = []
+        for _, idx in out.groupby(["cluster", "class"], dropna=False).indices.items():
+            if len(idx) <= k:
+                keep.append(idx)
+            else:
+                keep.append(rng.choice(idx, size=k, replace=False))
+        out = out.iloc[np.sort(np.concatenate(keep))].reset_index(drop=True)
+    return out
 
 
 def assemble_dataset(
@@ -241,6 +287,7 @@ def assemble_dataset(
     seed: int = 1466,
     multi_label: bool = False,
     pairs: pd.DataFrame | None = None,
+    max_pairs_per_cluster_class: int | None = None,
 ) -> SplitResult:
     """Full assembly: label + leakage-aware split.
 
@@ -290,7 +337,9 @@ def assemble_dataset(
     else:
         split_group_col = group_col
         if pairs is not None and len(pairs) and group_kind.startswith("sequence_cluster"):
-            protein_pairs = _derive_protein_pairs(labeled, group_col, genome_col, pairs)
+            protein_pairs = _derive_protein_pairs(
+                labeled, group_col, genome_col, pairs,
+                max_pairs_per_cluster_class=max_pairs_per_cluster_class, seed=seed)
 
     out = stratified_group_split(labeled, group_col=split_group_col, label_col="label",
                                  splits=splits, seed=seed)

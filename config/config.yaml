@@ -165,6 +165,32 @@ dataset:
   splits: { train: 0.8, val: 0.1, test: 0.1 }
   split_seed: 1466
 
+  # Redundancy cap on ortholog pairs, applied per (cluster, phenotype class).
+  # null = uncapped, which reproduces the r232 baseline exactly (90,984 pairs).
+  #
+  # Only binds under whole_proteome scope, where core families (Bac120, ribosome,
+  # tRNA synthetases, RNAP, chaperones) sit at prevalence f~1.0 and each intersect
+  # EVERY matched genome pair. On the secreted set the maximum observed prevalence
+  # is 849/7,268 genomes (11.7%) and the largest single cluster contributes 201
+  # pairs, so any k >= 200 is a no-op.
+  #
+  # Caps redundancy, NOT information: thermophile EF-Tu vs mesophile EF-Tu is a
+  # genuine thermostability contrast and must be kept. Do NOT instead filter
+  # clusters by prevalence — that deletes exactly the conserved-fold signal that
+  # whole_proteome scope exists to capture.
+  #
+  # Stratification by class is load-bearing. Matched genome pairs are imbalanced
+  # (halophile 1,472 / thermophile 560 / acidophile 341 / alkaliphile 292 /
+  # hyperthermophile 22). Measured on the r232 baseline (169 hyperthermophile
+  # pairs uncapped), the stratified cap holds all 169 down to k=3 and first loses
+  # pairs at k=2 (167); the unstratified cap is already at 163 by k=10, 134 at
+  # k=3, and 76 at k=1.
+  #
+  # A value must be chosen against a MEASURED prevalence spectrum from whole
+  # proteomes (see prevalence_probe_accessions.txt, 159 genomes / 86 pairs), not
+  # from assumed core-family strata.
+  max_pairs_per_cluster_class: null
+
   # Per-phenotype protein scope (added 2026-07-30).
   #
   # Rationale: pH and salinity are properties of the EXTRACELLULAR medium. A
