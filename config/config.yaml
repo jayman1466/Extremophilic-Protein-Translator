@@ -201,8 +201,13 @@ dataset:
   #
   # Measured yield, 73 matched pairs from the same clustering: 25,580 protein
   # pairs, i.e. 5.6x (hyperthermophile) to 26x (acidophile) the secreted
-  # pairs-per-genome-pair rate -- ABOVE the 8.9x naive protein-count ratio,
-  # because cytoplasmic proteins are more conserved and recover more orthologs.
+  # pairs-per-genome-pair rate. Four of the five classes EXCEED the 8.9x naive
+  # protein-count ratio (halophile 12.5x, thermophile 12.0x, alkaliphile 20.4x,
+  # acidophile 26.0x) because cytoplasmic proteins are more conserved and recover
+  # more orthologs per genome pair. HYPERTHERMOPHILE IS THE EXCEPTION at 5.6x,
+  # BELOW the naive ratio -- its probe estimate rests on only 15 genome pairs
+  # (22 in production), so it is both the least precise and the class where the
+  # whole-proteome payoff is smallest. Do not generalise the other four to it.
   # Projected to production genome-pair counts: ~1.24M pairs vs 90,984 secreted.
   #
   # Cap sizing is NOT yet settled. The probe's largest (cluster, class) cell was
