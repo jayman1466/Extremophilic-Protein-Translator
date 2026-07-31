@@ -9,6 +9,31 @@
 #
 # GTDB-Tk taxonomy for all 4,084 deep-sea MAGs.
 #
+# PROVENANCE: THREE TIMING SUBMISSIONS, ONLY THE THIRD IS THE MEASUREMENT
+# -----------------------------------------------------------------------
+# The 50-MAG timing job was submitted three times. The ids differ by two digits
+# and the first two both recorded SLURM state COMPLETED while failing inside, so
+# they are easy to confuse. Every number in this script comes from the THIRD.
+#
+#   job       RC   elapsed   peak RSS         what happened
+#   1162978    2   00:02:00      48,440 kB    "unrecognized arguments:
+#                                              --skip_ani_screen" (flag removed
+#                                              in GTDB-Tk 2.7)
+#   1162992    2   00:02:17       1,104 kB    "Invalid genome ID:
+#                                              10A(CNS0876618)_bin.16"
+#   1162998    0   02:13:09 139,125,764 kB    ran to completion, 50/50 classified
+#
+# Both failures aborted in the setup phase before pplacer loaded a reference
+# tree, so their peak-RSS values measure nothing: 48,440 kB is 2,872x smaller
+# than the real figure, and 1,104 kB is smaller still. DO NOT size from either.
+#
+# 1162998 is distinguishable from them by artifacts a 2-minute abort cannot
+# produce -- 1162978's out/ directory was empty ("total 0"):
+#   out/gtdbtk.bac120.summary.tsv    45 rows
+#   out/gtdbtk.ar53.summary.tsv       5 rows   (= 50 MAGs)
+#   family named 49/50, genus 41/50, 47 distinct families
+#   gtdbtk.log runs 11:06:31 -> 13:17:23 through 5 class-level trees
+#
 # WHY THIS IS ONE JOB AND NOT AN ARRAY
 # ------------------------------------
 # Measured from the 50-MAG timing run (job 1162998, 02:13:09, exit 0):
