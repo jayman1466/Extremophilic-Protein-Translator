@@ -1,0 +1,29 @@
+{
+  "genomes_total": 199923,
+  "genomes_with_species_key": 199923,
+  "genomes_without_species_key": 0,
+  "genomes_with_measured_ogt": 5907,
+  "pooled_species_total": 9577,
+  "pooled_species_matched_to_r232": 5907,
+  "pooled_species_unmatched": 3670,
+  "tiers": {
+    "high": 146,
+    "medium": 241,
+    "low": 1919,
+    "none": 197617
+  },
+  "genomes_le_15C": 132,
+  "genomes_le_20C": 359,
+  "promoted_by_tmin": 21,
+  "measured_warm_overriding_cold_metadata": 36,
+  "multi_source_species": 3891,
+  "multi_source_median_spread_C": 0.5,
+  "multi_source_disagree_over_10C": 68,
+  "sources_loaded": [
+    "tempura=4312",
+    "madin=4749",
+    "toki=3131",
+    "ogtfinder=3168"
+  ],
+  "sources_missing": []
+}
