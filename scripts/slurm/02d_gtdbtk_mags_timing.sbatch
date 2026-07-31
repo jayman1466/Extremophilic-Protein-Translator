@@ -74,21 +74,24 @@ else
   echo "TAR_MISSING $TARBALL"
 fi
 
-# ---- mash / ANI-screen availability ----
-# classify_wf runs a mash-based ANI pre-screen by default; without a sketch db
-# it either builds one (slow, and writes into the reference dir) or must be
-# skipped. Detect rather than assume.
-MASH_DB=""
-for cand in "$GTDBTK_DATA_PATH"/mash/*.msh /shared/db/gtdbtk/latest/mash/*.msh; do
-  [[ -f "$cand" ]] && { MASH_DB="$cand"; break; }
-done
-if [[ -n "$MASH_DB" ]]; then
-  echo "MASH_DB_FOUND $MASH_DB"
-  ANI_ARGS=(--mash_db "$MASH_DB")
-else
-  echo "MASH_DB_FOUND none -- using --skip_ani_screen"
-  ANI_ARGS=(--skip_ani_screen)
-fi
+# ---- ANI screen: nothing to configure on 2.7.2 ----
+# MEASURED, not assumed: GTDB-Tk 2.7.2 replaced the mash-based ANI screen with
+# skani and REMOVED --skip_ani_screen and --mash_db altogether. `classify_wf
+# --help` on this install lists an "optional skani arguments" group whose only
+# member is --place_species; the screen runs unconditionally and needs no
+# user-supplied sketch database (the reference skani db ships in the r232 data
+# dir, which is why /shared/db/gtdbtk/r232/skani exists and .../mash does not).
+#
+# A first version of this script passed --skip_ani_screen (correct for 2.2-2.3,
+# which is the version the source paper used) and classify_wf aborted in 1.5 s
+# with "unrecognized arguments". Kept as a note because the flag appears in most
+# online GTDB-Tk recipes and in the paper's own methods.
+echo "SKANI_REF_DIR $(ls -d "$GTDBTK_DATA_PATH"/skani 2>/dev/null || echo absent)"
+# NOTE: "${ANI_ARGS[@]}" on an EMPTY array is an unbound-variable error under
+# `set -u` on bash < 4.4 (verified: `set -u; A=(); f "${A[@]}"` -> "A[@]:
+# unbound variable"). Seed with one harmless real flag so the array is never
+# empty; --min_af 0.5 is classify_wf's own default, so this changes nothing.
+ANI_ARGS=(--min_af 0.5)
 
 # ---- deterministic spread sample ----
 # Quoting is load-bearing: MAG filenames contain parentheses, e.g.
