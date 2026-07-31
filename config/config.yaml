@@ -165,6 +165,41 @@ dataset:
   splits: { train: 0.8, val: 0.1, test: 0.1 }
   split_seed: 1466
 
+  # Per-phenotype protein scope (added 2026-07-30).
+  #
+  # Rationale: pH and salinity are properties of the EXTRACELLULAR medium. A
+  # cytoplasmic protein in an acidophile sits at near-neutral pH (acidophiles
+  # maintain cytoplasmic pH ~6.5 against a >2-unit gradient), and a halophile
+  # using the salt-out strategy keeps its cytoplasm low-salt. So for those
+  # classes the adaptive signal really is concentrated in the secretome, and
+  # restricting to it improves the signal-to-noise ratio.
+  #
+  # Temperature is not compartmentalised. Heat and cold penetrate the cell;
+  # every protein in a hyperthermophile must fold and function at 80 C+.
+  # Restricting to the secretome therefore discards ~89% of the informative
+  # sequence for no biophysical reason, and it is exactly the thermal classes
+  # that are pair-starved (hyperthermophile: 169 protein pairs from 22 genome
+  # pairs; validation AUPRC 0.898 rests on 23 pairs).
+  #
+  # SignalP retains 11.28% of proteins (1,985,508 / 17,603,649 in r232), so
+  # whole-proteome scope is an ~8.9x increase in candidate sequence.
+  protein_scope:
+    default: secreted
+    by_phenotype:
+      halophile:        secreted
+      acidophile:       secreted
+      alkaliphile:      secreted
+      hyperthermophile: whole_proteome
+      psychrophile:     whole_proteome
+      # thermophile: UNDECIDED — currently `secreted` via the default above.
+      # The same biophysical argument applies (temperature is not
+      # compartmentalised), but thermophile is not pair-starved the way
+      # hyperthermophile is: 15,604 protein pairs from 560 genome pairs,
+      # cached-probe AUPRC 0.862 on 1,495 validation pairs. Switching it is a
+      # cost decision, not a necessity — whole-proteome embedding for the two
+      # classes above is ~$76 of H200 spot; adding thermophile is the single
+      # largest increment after halophile. Awaiting an explicit call.
+
 # --------------------------------------------------------------------------
 # SLURM defaults
 # --------------------------------------------------------------------------

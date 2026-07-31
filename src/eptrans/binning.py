@@ -62,6 +62,18 @@ ISOLATION_KEYWORDS: dict[str, list[str]] = {
         r"permafrost", r"glacier", r"glacial", r"ice core", r"sea ice",
         r"polar", r"antarctic", r"arctic", r"cryo", r"snow", r"ice sheet",
         r"subglacial", r"cold desert", r"tundra", r"ice shelf",
+        # Deep-sea cold habitats (added 2026-07-30). Below the permanent
+        # thermocline the water column sits at 1-4 C worldwide, so depth is a
+        # reliable proxy for cold EXCEPT where hydrothermal input overrides it
+        # (see EXCLUSIONS). Terms are deliberately depth-specific: bare
+        # "marine sediment" is NOT included because it matches coastal and
+        # shallow samples that are not cold (it would have added 678 genomes
+        # in r232, including a thermophilic enrichment culture).
+        r"hadal", r"abyssal", r"abyssopelagic", r"bathypelagic",
+        r"deep-sea sediment", r"deep sea sediment",
+        r"deep-sea water", r"deep sea water",
+        r"mariana trench", r"trench sediment",
+        r"ocean crust", r"seafloor sediment",
     ],
     "acidophile": [
         r"acid mine", r"acid drainage", r"\bamd\b", r"acidic", r"acid lake",
@@ -102,6 +114,20 @@ EXCLUSIONS: list[tuple[str, str]] = [
     (r"basalt", "halophile"),                     # 'salt' inside basalt
     (r"cold seep", "psychrophile"),               # ambient deep-sea, not psychrophilic
     (r"cold-adapted enrichment", "psychrophile"),
+    # Hydrothermal input overrides the depth-implies-cold inference: a hadal
+    # vent sample is thermophilic, not psychrophilic. These guard the deep-sea
+    # keywords added above.
+    (r"hydrothermal", "psychrophile"),
+    (r"black smoker", "psychrophile"),
+    (r"chimney", "psychrophile"),
+    (r"hot vent", "psychrophile"),
+    (r"warm vent", "psychrophile"),
+    # Culture-derived samples describe the culture, not the habitat.
+    (r"thermophilic", "psychrophile"),
+    (r"enrichment culture", "psychrophile"),
+    # Depth qualifiers that contradict the deep-sea terms.
+    (r"shallow", "psychrophile"),
+    (r"coastal", "psychrophile"),
 ]
 
 
