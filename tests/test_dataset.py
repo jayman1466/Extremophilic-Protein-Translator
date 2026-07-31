@@ -232,3 +232,69 @@ def test_pair_cap_is_class_stratified():
     again = _derive_protein_pairs(labeled, "group", "genome", pairs,
                                   max_pairs_per_cluster_class=3, seed=1466)
     assert capped.equals(again)
+
+
+def test_tiebreak_is_scope_conditional():
+    """cs_prob is only a valid representative-selection proxy on the secretome.
+
+    Under whole_proteome scope ~89% of proteins are SignalP class OTHER with no
+    cleavage site, so cs_prob is NaN/0 for most rows and sorting on it silently
+    degenerates to arbitrary order. 'auto' must therefore route to the explicit
+    deterministic rule when cs_prob is sparse, and to cs_prob when it is dense.
+
+    NOTE: the tie-break only engages on (genome, cluster) cells holding MORE THAN
+    ONE protein. The fixture below gives every cell 3 paralogs on purpose -- with
+    singleton cells all rules pick the same protein and the test would be vacuous.
+    """
+    from eptrans.dataset import _derive_protein_pairs
+
+    rng = np.random.default_rng(5)
+    rows = []
+    for gi in range(12):
+        g = f"GB_GCA_{gi:09d}.1"
+        for ci in range(60):
+            for rep in range(3):
+                rows.append({
+                    "genome": g, "protein_id": f"c{ci}_{rep}", "group": f"cl{ci}",
+                    "tagged_id": f"{g}~c{ci}_{rep}",
+                    # sparse, as under whole-proteome scope
+                    "cs_prob": rng.random() if rng.random() < 0.11 else float("nan"),
+                })
+    sparse = pd.DataFrame(rows)
+    assert (sparse.groupby(["genome", "group"]).size() > 1).all()
+
+    pairs = pd.DataFrame([
+        {"class": "hyperthermophile",
+         "extremophile_acc": f"GB_GCA_{2 * i:09d}.1",
+         "outgroup_acc": f"GB_GCA_{2 * i + 1:09d}.1"}
+        for i in range(6)
+    ])
+
+    auto = _derive_protein_pairs(sparse, "group", "genome", pairs, tiebreak="auto")
+    forced_cs = _derive_protein_pairs(sparse, "group", "genome", pairs, tiebreak="cs_prob")
+    det = _derive_protein_pairs(sparse, "group", "genome", pairs, tiebreak="deterministic")
+
+    # sparse cs_prob -> auto must NOT use it
+    assert auto.equals(det)
+    assert not auto.equals(forced_cs)
+    # the cap/tiebreak never changes how MANY pairs exist, only which protein represents each
+    assert len(auto) == len(forced_cs) == len(det)
+
+    # dense cs_prob (secretome-like) -> auto must use it
+    dense = sparse.copy()
+    dense["cs_prob"] = rng.random(len(dense))
+    assert _derive_protein_pairs(dense, "group", "genome", pairs, tiebreak="auto").equals(
+        _derive_protein_pairs(dense, "group", "genome", pairs, tiebreak="cs_prob"))
+
+    # deterministic is reproducible and independent of input row order
+    shuffled = sparse.sample(frac=1.0, random_state=7)
+    assert _derive_protein_pairs(shuffled, "group", "genome", pairs,
+                                 tiebreak="deterministic").equals(det)
+
+    # explicit errors beat silent fallback
+    import pytest
+    with pytest.raises(ValueError):
+        _derive_protein_pairs(sparse.drop(columns=["cs_prob"]), "group", "genome",
+                              pairs, tiebreak="cs_prob")
+    with pytest.raises(ValueError):
+        _derive_protein_pairs(sparse, "group", "genome", pairs, tiebreak="bogus")

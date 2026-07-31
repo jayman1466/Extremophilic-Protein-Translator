@@ -193,6 +193,7 @@ def _derive_protein_pairs(
     pairs: pd.DataFrame,
     max_pairs_per_cluster_class: int | None = None,
     seed: int = 1466,
+    tiebreak: str = "auto",
 ) -> "pd.DataFrame":
     """Derive protein-level ortholog pairs = (cluster INTERSECT matched-genome-pair).
 
@@ -234,15 +235,54 @@ def _derive_protein_pairs(
             (14% of all genome pairs, barely a cap) is needed for <5% risk.
             Capping per (cluster, class) makes that risk zero.
         seed: RNG seed for the subsample, so pair derivation stays reproducible.
+        tiebreak: which within-cluster representative rule to use.
+            'auto' (default) uses cs_prob when it is populated for >=50% of rows
+            (i.e. secretome input) and the deterministic id order otherwise;
+            'cs_prob' forces the SignalP proxy and raises if the column is absent;
+            'deterministic' forces lexicographic id order. See the note in the
+            body — cs_prob is meaningless outside the secretome.
 
     Returns columns: class, cluster, ext_acc, outgroup_acc, ext_id, outgroup_id.
     """
     from .gtdb import bare_accession
     lab = labeled.copy()
     lab["_bare"] = lab[genome_col].astype(str).map(bare_accession)
-    # index: (bare genome, cluster) -> best tagged_id
-    sort_col = "cs_prob" if "cs_prob" in lab.columns else group_col
-    lab = lab.sort_values(sort_col, ascending=False)
+
+    # Within-cluster representative choice: one protein per (genome, cluster).
+    #
+    # cs_prob (SignalP cleavage-site probability) is a cheap proxy for
+    # reciprocal-best, but it is ONLY meaningful on the secretome, where every
+    # protein carries a signal peptide by construction (r232: non-null for all
+    # 1,985,508 rows, median 0.966, IQR 0.838-0.979). Under whole_proteome scope
+    # ~89% of proteins are SignalP class OTHER with no cleavage site, so cs_prob
+    # is 0/NaN for most of them and sorting on it degenerates to arbitrary order
+    # while LOOKING principled.
+    #
+    # So the tie-break is scope-conditional: use cs_prob only when asked for it
+    # (secretome scope), and otherwise fall back to an explicit, documented
+    # deterministic order rather than a silently-meaningless numeric sort. A real
+    # orthology criterion (reciprocal best hit / bidirectional coverage) is the
+    # correct long-term fix for whole_proteome scope and is not implemented here.
+    if tiebreak == "auto":
+        frac_usable = 0.0
+        if "cs_prob" in lab.columns and len(lab):
+            frac_usable = float((lab["cs_prob"].fillna(0) > 0).mean())
+        use_cs = frac_usable >= 0.5
+    elif tiebreak == "cs_prob":
+        if "cs_prob" not in lab.columns:
+            raise ValueError("tiebreak='cs_prob' but the labeled table has no cs_prob column")
+        use_cs = True
+    elif tiebreak == "deterministic":
+        use_cs = False
+    else:
+        raise ValueError(f"tiebreak must be 'auto', 'cs_prob' or 'deterministic'; got {tiebreak!r}")
+
+    if use_cs:
+        lab = lab.sort_values("cs_prob", ascending=False, kind="mergesort")
+    else:
+        # Stable, reproducible, and honest about being arbitrary: lexicographic
+        # on the tagged id. Does NOT pretend to approximate reciprocal-best.
+        lab = lab.sort_values("tagged_id", ascending=True, kind="mergesort")
     best = (lab.groupby(["_bare", group_col])["tagged_id"].first())
 
     rows = []
@@ -288,6 +328,7 @@ def assemble_dataset(
     multi_label: bool = False,
     pairs: pd.DataFrame | None = None,
     max_pairs_per_cluster_class: int | None = None,
+    tiebreak: str = "auto",
 ) -> SplitResult:
     """Full assembly: label + leakage-aware split.
 
@@ -339,7 +380,8 @@ def assemble_dataset(
         if pairs is not None and len(pairs) and group_kind.startswith("sequence_cluster"):
             protein_pairs = _derive_protein_pairs(
                 labeled, group_col, genome_col, pairs,
-                max_pairs_per_cluster_class=max_pairs_per_cluster_class, seed=seed)
+                max_pairs_per_cluster_class=max_pairs_per_cluster_class, seed=seed,
+                tiebreak=tiebreak)
 
     out = stratified_group_split(labeled, group_col=split_group_col, label_col="label",
                                  splits=splits, seed=seed)
