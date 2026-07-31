@@ -80,7 +80,7 @@ echo "GENOMES_MISSING $MISSING"
 cut -f2 genome_paths.txt > fna_list.txt
 
 # ---- one triangle over all genomes ----
-# Only ~500 of the 947*946/2 = 447,731 possible comparisons are wanted, but skani
+# Only ~500 of the 947*946/2 = 447,931 possible comparisons are wanted, but skani
 # has no "just these pairs" mode. The alternative is ~500 separate `dist` calls,
 # each re-reading and re-sketching two genomes. `triangle` sketches each genome
 # exactly once and screens with FracMinHash before any alignment, so distant
