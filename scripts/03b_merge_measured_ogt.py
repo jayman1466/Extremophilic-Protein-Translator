@@ -25,10 +25,20 @@ by excluding psychrophiles". Toki et al. 2026 raise psychrophile recall only
 38.4% -> 48.7%, and do it via gene presence/absence rather than composition.
 OGTFinder 2025 devotes a section to "Poor fit for psychrophiles": its training
 set is "only 0.9% (n = 58) psychrophiles" out of 6,401 observations with
-available genomes, and it attributes the failure to weaker amino-acid signals,
-citing Yang et al. 2015 -- the result that low-temperature adaptation is not the
-inverse of high-temperature adaptation, i.e. there is no cold analogue of
-IVYWREL.
+available genomes, and it gives a second reason beyond imbalance --
+"psychrophiles have weaker signals in their amino acid composition (Yang et al.,
+2015)" (quoted verbatim from that section).
+
+Separately, and NOT a claim made by the OGTFinder paper: Yang et al. 2015
+(doi 10.1093/gbe/evv232) is the primary source for low-temperature adaptation
+not being the mirror image of high-temperature adaptation in amino-acid
+composition -- i.e. there is no cold analogue of the IVYWREL index (Zeldovich
+et al. 2007), which reaches r up to 0.93 with OGT across 204 proteomes but is a
+monotone thermophily index with no psychrophile-specific term. That is the
+mechanistic reason a composition-based cold predictor has no strong signal to
+learn, and it is why this stage relies on measured optima rather than on any
+predictor. Recorded in the project's cold-methods review; cite the DOI, not this
+docstring.
 
 So for the cold class we substitute MEASURED optima for predicted ones. This
 stage assembles them and writes a rubric that never consults GenomeSPOT.

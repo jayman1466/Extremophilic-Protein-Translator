@@ -42,8 +42,25 @@
 # chunking was the right call -- the shape of the cost curve, not habit, picks
 # the architecture.
 #
-# MEMORY: 132.7 GiB peak measured (139,125,764 kB, /usr/bin/time -v). 600 G
-# requested = 4.5x headroom, and `standard` (257 G/node) cannot host this.
+# MEMORY. Peak measured on the completed timing run 1162998, corroborated by two
+# independent accounting paths:
+#   /usr/bin/time -v, classify step : 139,125,764 kB = 132.68 GiB
+#   sacct 1162998.batch MaxRSS      : 140,725,016 kB = 134.21 GiB
+# The two agree to 1.2%, as expected -- sacct samples the whole batch step, the
+# time -v figure is the classify process alone. 600 G requested = 4.5x headroom
+# over the time -v figure.
+#
+# Note on the partition choice: `standard` nodes (257,821 MB = 251.8 GiB) would
+# TECHNICALLY fit 132.7 GiB, but at only ~1.9x headroom on a shared node, and
+# 4,084 genomes may place into class-level trees that the 50-MAG sample never
+# touched (it reached 5 of the 8). `memory` (677,146 MB = 661.3 GiB) is the
+# defensible choice, not a necessary one -- stated that way because an earlier
+# version of this comment claimed standard "cannot host this", which the numbers
+# do not support.
+#
+# Do NOT size from the FAILED run 1162978: its peak was 48,440 kB (0.046 GiB),
+# 2,872x smaller, because it aborted in 1.5 s on an unrecognized flag before
+# pplacer ever loaded a tree. That figure is a measurement of nothing.
 #
 # WALLTIME: 48 h requested against a fixed component of ~3.2 h. The per-genome
 # marginal cost could NOT be estimated from the timing run -- with n = 2..6 per
