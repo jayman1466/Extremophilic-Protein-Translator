@@ -186,9 +186,32 @@ dataset:
   # pairs at k=2 (167); the unstratified cap is already at 163 by k=10, 134 at
   # k=3, and 76 at k=1.
   #
-  # A value must be chosen against a MEASURED prevalence spectrum from whole
-  # proteomes (see prevalence_probe_accessions.txt, 159 genomes / 86 pairs), not
-  # from assumed core-family strata.
+  # MEASURED on biotite job 1162872 (158 genomes, 323,178 proteins, mmseqs
+  # easy-cluster at the production 50% id / 80% cov -> 224,022 clusters):
+  #
+  #   max prevalence f = 108/158 = 0.684. ZERO clusters above f=0.70.
+  #   8 clusters at f>=0.50; 49 in 0.25-0.50; 98.96% of clusters below f=0.05;
+  #   83.7% singletons.
+  #
+  # This REFUTES the f~1.0 core-family assumption used to size this cap earlier
+  # (assumed 120 families at f=1.00, 480 at 0.90, 1500 at 0.50 -- none of those
+  # strata exist). At 50% identity the universal families fragment into many
+  # sub-family clusters rather than forming single pan-genome clusters, so no
+  # cluster spans even three-quarters of genomes.
+  #
+  # Measured yield, 73 matched pairs from the same clustering: 25,580 protein
+  # pairs, i.e. 5.6x (hyperthermophile) to 26x (acidophile) the secreted
+  # pairs-per-genome-pair rate -- ABOVE the 8.9x naive protein-count ratio,
+  # because cytoplasmic proteins are more conserved and recover more orthologs.
+  # Projected to production genome-pair counts: ~1.24M pairs vs 90,984 secreted.
+  #
+  # Cap sizing is NOT yet settled. The probe's largest (cluster, class) cell was
+  # 17, exactly its largest class size -- so cell size is bounded by the number
+  # of genome pairs in the class, not by anything intrinsic. At production scale
+  # the ceiling is therefore the class size itself (halophile 1,472). Set k as a
+  # FRACTION of each class's genome-pair count, not as an absolute integer; a
+  # single global k would bind very differently on halophile (1,472 pairs) than
+  # on hyperthermophile (22).
   max_pairs_per_cluster_class: null
 
   # Per-phenotype protein scope (added 2026-07-30).
