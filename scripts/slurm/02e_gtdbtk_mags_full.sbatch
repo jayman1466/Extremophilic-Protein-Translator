@@ -42,13 +42,23 @@
 # chunking was the right call -- the shape of the cost curve, not habit, picks
 # the architecture.
 #
-# MEMORY. Peak measured on the completed timing run 1162998, corroborated by two
-# independent accounting paths:
-#   /usr/bin/time -v, classify step : 139,125,764 kB = 132.68 GiB
-#   sacct 1162998.batch MaxRSS      : 140,725,016 kB = 134.21 GiB
-# The two agree to 1.2%, as expected -- sacct samples the whole batch step, the
-# time -v figure is the classify process alone. 600 G requested = 4.5x headroom
-# over the time -v figure.
+# MEMORY. Peak measured on the completed timing run 1162998 (02:13:09,
+# CLASSIFY_RC 0), via two accounting mechanisms that agree to 1.2%:
+#
+#   139,125,764 kB = 132.68 GiB   getrusage, GNU time
+#       $ grep 'Maximum resident set size' \
+#           /groups/cress/projects/jaymin/eptrans_scratch/gtdbtk_timing/logs/classify.time
+#   140,725,016 kB = 134.21 GiB   SLURM cgroup polling
+#       $ sacct -j 1162998 --format=JobID,State,Elapsed,MaxRSS   # .batch row
+#
+# Both re-derivable from the paths above rather than from any transcript. They
+# are not fully independent -- same run, same process tree -- but they are
+# different measurement mechanisms: GNU time reports the peak of the largest
+# single process it wrapped, SLURM polls the whole batch step's cgroup. Hence the
+# small excess in the sacct figure. Wall clock corroborates too: time -v 2:10:53
+# inside sacct's 02:13:09 step.
+#
+# 600 G requested = 4.5x headroom over the getrusage figure.
 #
 # Note on the partition choice: `standard` nodes (257,821 MB = 251.8 GiB) would
 # TECHNICALLY fit 132.7 GiB, but at only ~1.9x headroom on a shared node, and
