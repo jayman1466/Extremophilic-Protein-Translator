@@ -252,8 +252,13 @@ done
 
 # ---- rank completeness: does selection.py have what it needs? ------------
 echo "=== rank completeness (selection.py needs family and genus) ==="
-cat out/gtdbtk.*.summary.orig_ids.tsv 2>/dev/null \
-  | awk -F'\t' 'FNR>1{print $3}' \
+# NB: awk must receive the files as ARGUMENTS, not through `cat`. FNR resets per
+# input file, but a single piped stream has one FNR, so `cat A B | awk 'FNR>1'`
+# skips only A's header and counts B's header as a data row. Run 1163066 printed
+# rows=4085 for 4,084 MAGs for exactly that reason. The named-rank tallies were
+# unaffected (a header line has no f__/g__/s__ field), but the denominator was.
+awk -F'\t' 'FNR>1{print $3}' out/gtdbtk.bac120.summary.orig_ids.tsv \
+                             out/gtdbtk.ar53.summary.orig_ids.tsv 2>/dev/null \
   | awk -F';' '{
       f=""; g=""; s="";
       for(i=1;i<=NF;i++){ if($i ~ /^f__/) f=substr($i,4);
@@ -262,8 +267,9 @@ cat out/gtdbtk.*.summary.orig_ids.tsv 2>/dev/null \
       tf += (f!=""); tg += (g!=""); ts += (s!=""); n++ }
     END{ printf "rows=%d family_named=%d genus_named=%d species_named=%d\n", n, tf, tg, ts }'
 echo -n "distinct families: "
-cat out/gtdbtk.*.summary.orig_ids.tsv 2>/dev/null \
-  | awk -F'\t' 'FNR>1{print $3}' | tr ';' '\n' | grep '^f__' | grep -v 'f__$' | sort -u | wc -l
+awk -F'\t' 'FNR>1{print $3}' out/gtdbtk.bac120.summary.orig_ids.tsv \
+                             out/gtdbtk.ar53.summary.orig_ids.tsv 2>/dev/null \
+  | tr ';' '\n' | grep '^f__' | grep -v 'f__$' | sort -u | wc -l
 
 echo "END $(date)"
 echo "FULL_RUN_DONE"
