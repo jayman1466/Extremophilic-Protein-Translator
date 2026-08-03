@@ -153,6 +153,22 @@ selection:
   max_per_lineage_rank: "family"     # cap extremophile picks per this rank for diversity
   max_per_lineage: 5                 # max extremophiles drawn from any one lineage-rank group
   max_total_per_class: 100           # cap selected extremophiles per class (null = no cap)
+  # Cap genomes drawn from any ONE environmental sample. MAG labels are
+  # sample-level: the deep-sea set is 4,084 MAGs from 858 samples, and the
+  # per-family cap cannot control this because co-occurring bins from one sample
+  # are phylogenetically diverse by construction (worst sample: 38 thermophile
+  # MAGs across 30 families). Measured on the merged 204,007-row table,
+  # thermophile MAG extremophiles by cap:
+  #   None -> 423 MAGs / 112 samples / worst sample 21 / 4,994 pairs
+  #   5    -> 302 MAGs / 117 samples / worst sample  5 / 4,927 pairs
+  #   2    -> 192 MAGs / 120 samples / worst sample  2 / 4,868 pairs
+  # 5 cuts worst-case replication 4x (21->5) for 1.3% of total pairs, and raises
+  # the sample count because freed slots go to other samples. Set to 5 rather
+  # than a new number so there is one diversity convention, not two. Other
+  # classes retain 100%: they never had multiple MAGs per sample.
+  # NULL is a no-op, verified identical on the GTDB-only baseline.
+  max_per_sample: 5
+  sample_col: "source_sample_id"     # blank = isolate genome (its own sample), exempt
   outgroup_match_rank: "genus"       # try nearest mesophile at this rank, then walk up
   outgroup_match_fallback_ranks: ["family", "order", "class"]
 

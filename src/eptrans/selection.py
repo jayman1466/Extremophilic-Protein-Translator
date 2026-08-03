@@ -59,6 +59,8 @@ def select_extremophiles(
     max_total: int | None = None,
     confidence_col: str = "final_confidence",
     confidence_levels: tuple | None = None,
+    max_per_sample: int | None = None,
+    sample_col: str = "source_sample_id",
     seed: int = 1466,
 ) -> pd.DataFrame:
     """Diversity-capped selection of extremophiles for one class.
@@ -68,6 +70,22 @@ def select_extremophiles(
 
     If ``confidence_levels`` is given (e.g. ``("high", "medium")``), genomes
     outside those tiers are excluded entirely (not just deprioritised).
+
+    ``max_per_sample`` additionally caps how many genomes may come from one
+    environmental sample, identified by ``sample_col``. This exists because
+    metagenome-assembled genomes are labelled from SAMPLE-level metadata: the
+    deep-sea set contributes 4,084 MAGs from only 858 samples, and its worst
+    single sample yields 38 thermophile MAGs spanning 30 distinct families. Those
+    38 pass a per-family cap untouched while resting on ONE environmental
+    observation -- a single temperature reading -- so counting them as 38
+    independent pieces of evidence is pseudoreplication. The per-lineage cap
+    cannot catch this: it controls phylogenetic redundancy, and co-occurring bins
+    from one sample are phylogenetically diverse by construction.
+
+    Rows with no value in ``sample_col`` (every isolate genome in GTDB, which is
+    its own sample) are exempt: NaN means "not from a shared metagenome", not
+    "unknown sample". Passing ``max_per_sample=None`` disables the cap entirely
+    and reproduces pre-MAG behaviour exactly.
     """
     cls_col = f"final_{cls}"
     pool = df[df[cls_col].fillna(False)].copy()
@@ -84,12 +102,23 @@ def select_extremophiles(
 
     selected_idx = []
     per_lineage: dict[str, int] = {}
+    per_sample: dict[str, int] = {}
     for idx, row in pool.iterrows():
         lin = row.get(lineage_rank, "") or "__NA__"
         if per_lineage.get(lin, 0) >= max_per_lineage:
             continue
+        # Per-sample cap: only for genomes that declare a source sample. A blank
+        # means an isolate genome (its own sample), which must not be pooled into
+        # one shared bucket -- doing so would cap ALL of GTDB at max_per_sample.
+        smp = row.get(sample_col, None) if sample_col in pool.columns else None
+        has_sample = smp is not None and pd.notna(smp) and str(smp) != ""
+        if max_per_sample is not None and has_sample:
+            if per_sample.get(smp, 0) >= max_per_sample:
+                continue
         selected_idx.append(idx)
         per_lineage[lin] = per_lineage.get(lin, 0) + 1
+        if max_per_sample is not None and has_sample:
+            per_sample[smp] = per_sample.get(smp, 0) + 1
         if max_total and len(selected_idx) >= max_total:
             break
 
@@ -132,6 +161,8 @@ def select_with_outgroups(
     acc_col: str = "accession",
     confidence_levels: tuple | None = None,
     reuse_outgroups: bool = False,
+    max_per_sample: int | None = None,
+    sample_col: str = "source_sample_id",
     seed: int = 1466,
 ) -> SelectionResult:
     """Full phylo-controlled selection: diverse extremophiles + matched outgroups.
@@ -139,6 +170,10 @@ def select_with_outgroups(
     Args:
         labels: combined-labels table (stage 03) with per-class ``final_<cls>``
             booleans, taxonomy rank columns, and a ``confident_mesophile`` column.
+        max_per_sample: cap on genomes drawn from any one environmental sample
+            (see ``select_extremophiles``). Applies to the extremophile draw only;
+            mesophile outgroups are matched individually by taxonomy, so a sample
+            cannot dominate them the same way. ``None`` disables it.
     """
     cfg = load_config()
     classes = classes or ["thermophile", "hyperthermophile", "psychrophile",
@@ -167,7 +202,8 @@ def select_with_outgroups(
                     else confidence_levels)
         extremo = select_extremophiles(
             labels, cls, max_per_lineage=max_per_lineage, lineage_rank=lineage_rank,
-            max_total=max_total_per_class, confidence_levels=conf_cls, seed=seed,
+            max_total=max_total_per_class, confidence_levels=conf_cls,
+            max_per_sample=max_per_sample, sample_col=sample_col, seed=seed,
         )
         if extremo.empty:
             continue

@@ -1,0 +1,34 @@
+{
+  "rows_total": 204007,
+  "rows_gtdb": 199923,
+  "rows_deepsea": 4084,
+  "deepsea_samples": 858,
+  "mags_per_sample_max": 81,
+  "deepsea_tiers_by_class": {
+    "thermophile": {
+      "low": 1191,
+      "high": 590,
+      "medium": 272
+    },
+    "hyperthermophile": {
+      "low": 242,
+      "medium": 40
+    },
+    "psychrophile": {
+      "low": 1376,
+      "medium": 3,
+      "high": 2
+    },
+    "acidophile": {
+      "medium": 34
+    },
+    "alkaliphile": {
+      "medium": 5
+    },
+    "halophile": {
+      "medium": 81
+    }
+  },
+  "deepsea_confident_mesophile": 1576,
+  "output": "/Users/jaymin/Documents/GitHub/Extremophilic Protein Translator/results/combined_labels_r232_plus_deepsea.parquet"
+}
