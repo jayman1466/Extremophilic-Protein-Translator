@@ -287,9 +287,14 @@ def _derive_protein_pairs(
         # on the tagged id. Does NOT pretend to approximate reciprocal-best.
         lab = lab.sort_values("tagged_id", ascending=True, kind="mergesort")
     # ---- PER-CLASS PROTEIN SCOPE (config dataset.protein_scope) ----
-    # pH and salt classes train on the SECRETOME (the extracellular interface is
-    # where those adaptations act); temperature classes train on the WHOLE
-    # PROTEOME (thermostability is a global property of the fold). A single
+    # Scope is per class and comes from config, NOT from a rule about phenotype
+    # families. As committed: halophile/acidophile/alkaliphile are `secreted` (the
+    # extracellular interface is where pH and salt adaptation acts), and
+    # hyperthermophile/psychrophile are `whole_proteome` (thermostability is a
+    # global property of the fold). THERMOPHILE IS ALSO A TEMPERATURE CLASS BUT IS
+    # SCOPED `secreted` -- deliberately held at the default on 2026-08-04 pending
+    # the large-cluster question, so "temperature => whole proteome" is NOT a valid
+    # generalization to encode anywhere. A single
     # `labeled` table therefore cannot serve both: derivation must filter per
     # class, not once up front.
     #
