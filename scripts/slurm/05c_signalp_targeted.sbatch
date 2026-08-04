@@ -19,9 +19,22 @@
 #
 # No --gres is requested: SignalP 6.0 in `fast` mode was measured at 12.75 seq/s
 # on an H200 vs 8.86 seq/s on 16 CPU cores, i.e. only ~1.4x, so a GPU
-# reservation would idle an accelerator for a marginal gain. These partitions are
-# chosen purely for their free CPU capacity (measured: gpu 312 idle CPUs,
-# gpu_h200 212 idle, memory 0 idle despite its short queue).
+# reservation would idle an accelerator for a marginal gain. (Throughput source:
+# SignalP 6.0 fast-mode benchmark, 10k proteins, Jul 2026 -- H200 12.75 seq/s at
+# bsize 32, A5000/gpu 9.60 at bsize 64, CPU standard 16-thread 8.86.)
+#
+# These partitions were chosen for free CPU capacity, from a POINT-IN-TIME
+# snapshot taken 2026-08-04 via
+#   sinfo -p gpu,gpu_h200 -o '%P %D %C %m %G %t'   # %C = alloc/idle/other/total
+# which returned  gpu 40/312/0/352 | gpu_h200 12/212/0/224 | memory 3008/0/0/3008
+# i.e. 312 and 212 idle CPUs on the two gpu partitions and ZERO on memory, whose
+# short pending queue (20 jobs vs standard's 261) reflects nothing finishing
+# rather than room to run.
+#
+# CLUSTER LOAD IS VOLATILE -- these counts are certainly stale by the time you
+# read this. Re-run the sinfo line above before resubmitting; if memory has freed
+# up it is the better target (more cores per node, no GPU jobs to crowd), and if
+# gpu_h200 is busy leave it clear, since the MLM training stage needs it.
 #
 # Submit BOTH halves (partition on the command line overrides the directive):
 #   sbatch --partition=gpu      --array=0-3 scripts/slurm/05c_signalp_targeted.sbatch
