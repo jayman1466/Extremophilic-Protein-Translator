@@ -31,7 +31,27 @@ S=/groups/cress/projects/jaymin/eptrans_scratch
 P=/groups/cress/projects/jaymin/IS1111/eptrans
 W=$S/assemble
 LOGS=$S/logs/assemble
-mkdir -p "$W" "$LOGS"
+OGT_DIR=$S/data/ogt
+mkdir -p "$W" "$LOGS" "$OGT_DIR"
+
+# ---- preflight, run on the LOGIN node before any job is submitted ----
+# The OGT sources are fetched over the network, and compute nodes have NO egress
+# (login node does). 03a is therefore run here rather than inside the chain.
+$PY "$REPO/scripts/03a_fetch_ogt_sources.py" --ogt-dir "$OGT_DIR" || {
+  echo "FATAL: could not fetch OGT sources (needed by 03b)"; exit 1; }
+
+# 03c needs the merged deep-sea MAG table (taxonomy + GenomeSPOT + isolation).
+if [ ! -s "$W/deepsea_mags_merged.tsv" ]; then
+  echo "FATAL: $W/deepsea_mags_merged.tsv is missing."
+  echo "  Stage it first: it is built locally and is the input 03c joins the 330"
+  echo "  ingested MAGs through (--id-map $S/mag_ingest/map.tsv)."
+  exit 1
+fi
+
+# Absolute interpreter: `conda` is NOT on the non-login PATH on biotite and bare
+# `python` does not exist there either (only /usr/bin/python3, which lacks pandas).
+# Verified by smoke test: this interpreter has pandas 3.0.3 / pyarrow 25.0.0.
+PY=/home/jayminp/miniconda3/envs/eptrans_ml/bin/python
 
 SB="sbatch --parsable"
 COMMON="--partition=standard --output=$LOGS/%x_%j.out"
@@ -42,7 +62,7 @@ COMMON="--partition=standard --output=$LOGS/%x_%j.out"
 # straight from the two GTDB metadata dumps.
 G=/groups/cress/projects/jaymin/IS1111/gtdb
 A0=$($SB $COMMON --job-name=asm_meta --cpus-per-task=4 --mem=32G --time=01:00:00 \
-  --wrap "set -uo pipefail; cd $W && python3 - <<'PYEOF'
+  --wrap "set -uo pipefail; cd $W && $PY - <<'PYEOF'
 import csv, gzip, sys
 G='/groups/cress/projects/jaymin/IS1111/gtdb'
 W='/groups/cress/projects/jaymin/eptrans_scratch/assemble'
@@ -68,16 +88,19 @@ echo "A0 gtdb meta    $A0"
 A=$($SB $COMMON --job-name=asm_labels --cpus-per-task=8 --mem=64G --time=02:00:00 \
   --dependency=afterok:$A0 \
   --wrap "set -uo pipefail; cd $REPO && export PYTHONPATH=$REPO/src && \
-    python scripts/01b_flag_metadata.py \
+    $PY scripts/01b_flag_metadata.py \
       --tsv $W/gtdb_meta.tsv --out $W/metadata_flags.parquet \
       --fig $W/metadata_flags_counts.png && \
-    python scripts/03_combine_bins.py \
+    $PY scripts/03_combine_bins.py \
       --flags $W/metadata_flags.parquet \
       --predictions $P/genomespot_predictions_r232.tsv \
       --bare-join --out $W/labels_a.parquet && \
-    python scripts/03b_merge_measured_ogt.py \
-      --labels $W/labels_a.parquet --out $W/labels_b.parquet && \
-    python scripts/03c_merge_deepsea_mags.py \
+    $PY scripts/03b_merge_measured_ogt.py \
+      --ogt-dir $OGT_DIR \
+      --labels $W/labels_a.parquet --out-labels $W/labels_b.parquet \
+      --out-pooled $W/pooled_measured_ogt.tsv \
+      --out-stats $W/measured_ogt_merge.stats.json && \
+    $PY scripts/03c_merge_deepsea_mags.py \
       --labels $W/labels_b.parquet \
       --mags $W/deepsea_mags_merged.tsv \
       --id-map $S/mag_ingest/map.tsv \
@@ -91,12 +114,12 @@ echo "A labels        $A"
 B=$($SB $COMMON --job-name=asm_pairs --cpus-per-task=8 --mem=64G --time=02:00:00 \
   --dependency=afterok:$A \
   --wrap "set -uo pipefail; cd $REPO && export PYTHONPATH=$REPO/src && \
-    python scripts/04_select_genomes.py --labels $W/combined_labels.parquet \
+    $PY scripts/04_select_genomes.py --labels $W/combined_labels.parquet \
       --classes thermophile --confidence high \
       --max-total-per-class 1000000000 --reuse-outgroups \
       --out-prefix $W/sel_thermophile && \
     for CLS in halophile acidophile alkaliphile hyperthermophile psychrophile; do \
-      python scripts/04_select_genomes.py --labels $W/combined_labels.parquet \
+      $PY scripts/04_select_genomes.py --labels $W/combined_labels.parquet \
         --classes \$CLS --confidence high,medium \
         --max-total-per-class 1000000000 --reuse-outgroups \
         --out-prefix $W/sel_\$CLS || exit 1; done && \
@@ -109,7 +132,7 @@ echo "B genome pairs  $B"
 C=$($SB $COMMON --job-name=asm_secreted --cpus-per-task=16 --mem=96G --time=04:00:00 \
   --dependency=afterok:$B \
   --wrap "set -uo pipefail; cd $REPO && export PYTHONPATH=$REPO/src && \
-    python -c \"
+    $PY -c \"
 import pandas as pd, yaml, sys
 cfg=yaml.safe_load(open('config/config.yaml'))
 scope=cfg['dataset']['protein_scope']
@@ -128,7 +151,7 @@ if 'class' in p.columns:
 open('$W/whole_scope_accessions.txt','w').write('\\n'.join(sorted(a for a in acc if a and a!='nan'))+'\\n')
 print('WHOLE_SCOPE_GENOMES',len(acc),'classes',whole)
 \" && \
-    python scripts/05_aggregate_signalp.py \
+    $PY scripts/05_aggregate_signalp.py \
       --pred-dirs '$S/signalp_targeted/chunk_*' '$S/signalp_gtdb_fill/chunk_*' \
       --legacy $P/secreted_proteins_r232.tsv \
       --proteome-root $P/../gtdb/protein_faa_reps \
@@ -163,7 +186,7 @@ echo "E cluster 40%   $E"
 F=$($SB $COMMON --job-name=asm_final --cpus-per-task=16 --mem=256G --time=06:00:00 \
   --dependency=afterok:$D:$E \
   --wrap "set -uo pipefail; cd $REPO && export PYTHONPATH=$REPO/src && \
-    python scripts/06_assemble_dataset.py \
+    $PY scripts/06_assemble_dataset.py \
       --secreted $W/secreted_all.tsv \
       --labels $W/combined_labels.parquet \
       --pairs $W/all_pairs.tsv \
