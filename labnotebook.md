@@ -1678,3 +1678,65 @@ need an orthology check — the natural one is reciprocal best hit on a sample o
 hyperthermophile pairs unique to the lower threshold, which also retires the
 `cs_prob` tiebreak stopgap. Recommend deciding after that check, and applying the
 lower threshold ONLY to whole-proteome classes.
+
+### SignalP for the retrain — COMPLETE (jobs 1164156 + 1164157)
+
+All 8 tasks COMPLETED, exit 0:0, `SIGNALP_RC 0` on all eight.
+
+| task | partition | elapsed | proteins |
+|---|---|--:|--:|
+| 1164156_0 | gpu | 08:35:05 | 717,183 |
+| 1164156_1 | gpu | 08:33:28 | 716,681 |
+| 1164156_2 | gpu | 11:32:37 | 711,417 |
+| 1164156_3 | gpu | 15:14:53 | 865,594 |
+| 1164157_4 | gpu_h200 | 09:34:34 | 749,131 |
+| 1164157_5 | gpu_h200 | 10:54:19 | 865,179 |
+| 1164157_6 | gpu_h200 | 11:02:28 | 875,661 |
+| 1164157_7 | gpu_h200 | 13:07:42 | 1,139,270 |
+
+**TOTAL_ROWS 6,640,116 — exactly the staged protein count**, so no chunk silently
+truncated. Wall 15:14:53, set by task 3 on `gpu` rather than the 1.14M-protein task
+7 on `gpu_h200` (13:07:42): the H200s absorbed the largest chunk faster than the
+A5000s handled a 24% smaller one. My ~15 h estimate from the 2-minute progress-bar
+rate was right for the wrong chunk.
+
+**Coverage against the training requirement: complete.**
+
+```
+REQUIRED (req2.txt)   9,286
+PRECOVERED           10,444   (r232 production + completed 05b chunks)
+TARGETED (this run)   2,582
+TRAIN_COVERED        13,026
+TRAIN_MISSING           320  -> resolved to 0, see below
+```
+
+The 320 apparent gaps were an **identifier artifact, not missing data**: `req2.txt`
+lists MAGs under their original parenthesised names (`CU_10C(CNS0876620)_bin.42`)
+because it was generated before the ingest, while the ingest renamed them to the
+`CU_CUST_*` scheme. Resolving every one through `mag_ingest/map.tsv`:
+
+```
+RESOLVED_VIA_MAP            320
+UNMAPPED                      0
+MAPPED_BUT_NOT_PREDICTED      0
+TRUE_GAP                      0
+```
+
+All 320 MAGs were predicted, as `CU_CUST_000000001.1` onward. Worth noting for
+future diffs: any comparison against a pre-ingest requirement list must pass
+through `map.tsv` or it will report the entire renamed set as missing.
+
+**Prediction-class distribution** over the first 5 chunks (3,923,835 predictions):
+OTHER 88.01%, SP 7.69%, LIPO 3.45%, TAT 0.47%, PILIN 0.27%, TATLIPO 0.10%. Any
+signal peptide = **11.99%** vs the 11.28% r232 production fraction (+0.71 pp),
+confirming nothing systematic is wrong with the new genomes. Which classes count as
+"secreted" is a definition choice in `signalp.py`, not a measurement — SP alone is
+7.69%, SP+TAT 8.17%, and PILIN/TATLIPO are membrane-anchored.
+
+**Unrelated: the 05b whole-GTDB fill array (1152569) is NOT part of this.** It is
+the months-long background job covering all r232 representatives, and 4 of its
+tasks (13/25/27/39) hit the 3-day wall with no output. That does not touch the
+retrain: the coverage diff above is scoped to `req2.txt`, and the union already
+satisfies it with TRUE_GAP 0. The 4 timed-out chunks need resubmission only for the
+full-GTDB secretome goal, and should be split finer — 3 days was insufficient at
+their chunk size.
