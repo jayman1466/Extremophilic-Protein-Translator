@@ -68,6 +68,20 @@ PART="${PART:-memory}"
 # GPUs, not cores. Running the CPU-only stages there costs no GPU and starts hours
 # sooner. The clustering and assembly stages stay on $PART for the RAM.
 LIGHT_PART="${LIGHT_PART:-gpu}"
+
+# HEAVY stages: gpu_h200's single node carries 2,063,701 MB (2 TB) with 186 of 224
+# CPUs idle, which comfortably exceeds the largest request here (320 G / 48 CPU) and
+# beats the fully-allocated `memory` partition on start time. No GPU is requested --
+# verified these jobs allocate cpu-only (AllocTRES=cpu=N, no gres), MaxTime=UNLIMITED
+# and AllowAccounts=ALL on that partition.
+#
+# NOTE ON --mem HERE: biotite runs SelectTypeParameters=CR_CPU, so memory is NOT a
+# consumable resource -- `--mem` does not reserve RAM and does not gate scheduling.
+# It is kept as documentation of the expected footprint, but it means a heavy job can
+# be co-scheduled with others onto the same node and OOM. Preferring the 2 TB node is
+# therefore a real safety margin, not just a queue-time optimisation.
+HEAVY_PART="${HEAVY_PART:-gpu_h200}"
+HEAVY="--partition=$HEAVY_PART --output=$LOGS/%x_%j.out"
 LIGHT="--partition=$LIGHT_PART --output=$LOGS/%x_%j.out"
 
 SB="sbatch --parsable"
@@ -153,7 +167,16 @@ C=$($SB $LIGHT --job-name=asm_secreted --cpus-per-task=16 --mem=96G --time=04:00
 import pandas as pd, yaml, sys
 cfg=yaml.safe_load(open('config/config.yaml'))
 scope=cfg['dataset']['protein_scope']
-whole=[k for k,v in scope.items() if k!='default' and v=='whole_proteome']
+# The per-class map is nested under 'by_phenotype'; the top level holds only
+# 'default' and 'by_phenotype'. Iterating the top level silently yields [] and
+# produces an EMPTY whole-proteome FASTA, which stage E then hard-fails on.
+# This matches how 06_assemble_dataset.py reads it (ps.get('by_phenotype', {})).
+by_ph=scope.get('by_phenotype') or {}
+if not by_ph:
+    sys.exit('FATAL: dataset.protein_scope.by_phenotype is empty')
+whole=[k for k,v in by_ph.items() if v=='whole_proteome']
+if not whole:
+    sys.exit('FATAL: no class is whole_proteome scope; stage E would get an empty FASTA')
 pr=pd.read_parquet('$W/combined_labels.parquet')
 m=pd.Series(False,index=pr.index)
 for cl in whole:
@@ -181,7 +204,7 @@ echo "C secreted      $C"
 
 # ---------------------------------------------------------------- D/E: clustering
 MM=/shared/software/bin/mmseqs
-D=$($SB $COMMON --job-name=asm_clu50 --cpus-per-task=48 --mem=200G --time=12:00:00 \
+D=$($SB $HEAVY --job-name=asm_clu50 --cpus-per-task=48 --mem=200G --time=12:00:00 \
   --dependency=afterok:$C \
   --wrap "set -u; cd $W && \
     test -s secretome.faa || { echo \"FATAL: secretome.faa missing or empty -- stage C did not emit it\"; exit 1; }; \\
@@ -190,7 +213,7 @@ D=$($SB $COMMON --job-name=asm_clu50 --cpus-per-task=48 --mem=200G --time=12:00:
     rm -rf tmp50 && wc -l < clu50_cluster.tsv && touch $W/.D_done")
 echo "D cluster 50%   $D"
 
-E=$($SB $COMMON --job-name=asm_clu40 --cpus-per-task=48 --mem=320G --time=16:00:00 \
+E=$($SB $HEAVY --job-name=asm_clu40 --cpus-per-task=48 --mem=320G --time=16:00:00 \
   --dependency=afterok:$C \
   --wrap "set -u; cd $W && \
     test -s wholeproteome.faa || { echo \"FATAL: wholeproteome.faa missing or empty -- stage C did not emit it\"; exit 1; }; \\
@@ -200,7 +223,7 @@ E=$($SB $COMMON --job-name=asm_clu40 --cpus-per-task=48 --mem=320G --time=16:00:
 echo "E cluster 40%   $E"
 
 # ---------------------------------------------------------------- F: assemble
-F=$($SB $COMMON --job-name=asm_final --cpus-per-task=16 --mem=256G --time=06:00:00 \
+F=$($SB $HEAVY --job-name=asm_final --cpus-per-task=16 --mem=256G --time=06:00:00 \
   --dependency=afterok:$D:$E \
   --wrap "set -u; cd $REPO && export PYTHONPATH=$REPO/src && \
     $PY scripts/06_assemble_dataset.py \

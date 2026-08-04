@@ -2019,3 +2019,54 @@ looked wrong against 199,923 species representatives. Counting the
 `gtdb_representative` column resolves it — **exactly 199,923 rows carry `t`**,
 matching the known r232 representative count, because the GTDB metadata dumps cover
 all genomes and 01b filters to reps itself.
+
+**Heavy stages moved to `gpu_h200` — and a cluster-wide scheduling fact behind it.**
+`gpu_h200`'s single node carries **2,063,701 MB (2 TB)** with 186 of 224 CPUs idle,
+which exceeds the largest request in the chain (320 G / 48 CPU) while `memory` sat
+at 3008/0/0. All three heavy stages (D, E, F) now default to `HEAVY_PART=gpu_h200`;
+the four light stages stay on `LIGHT_PART=gpu`. No GPU is requested — verified by
+`AllocTRES=cpu=N` with no gres on the stages that already ran, plus
+`MaxTime=UNLIMITED` and `AllowAccounts=ALL` on that partition.
+
+**Biotite runs `SelectTypeParameters=CR_CPU`.** Memory is *not* a consumable
+resource here: `--mem` reserves nothing and does not gate scheduling. Confirmed on
+every node — `AllocMem=0` while `AllocTRES=cpu=64` on a fully allocated
+`memory`-partition node. Two consequences worth carrying forward:
+
+- Only CPUs gate scheduling, so a job pending on `Resources` is waiting on **cores**,
+  never on RAM.
+- A heavy job can be co-scheduled onto a node with others and **OOM**, since nothing
+  reserves its footprint. Preferring the 2 TB node is therefore a genuine safety
+  margin, not just a queue-time optimisation. `FreeMem` (real, live) is the number to
+  check before placing a large job — not `RealMemory`.
+
+Measured free memory at the time of the move: `node-344-8t-1` 1,731,092 MB free;
+`node-224-3t-1` 692,176; `node-224-2t-8gpu-1` (gpu_h200) 272,817; `node-64-768g-1`
+19,622; `node-128-512g-8gpu-1` only **1,949 MB free** despite 515,799 MB installed —
+a vivid illustration that installed capacity says nothing about availability under
+CR_CPU.
+
+**Stage C bug caught from its own log: `WHOLE_SCOPE_GENOMES 0 classes []`.** My
+inline scope-derivation snippet iterated the TOP level of
+`dataset.protein_scope`, but the per-class map is nested under `by_phenotype` — the
+top level holds only `default` and `by_phenotype`, so the comprehension matched
+nothing and returned `[]`. The whole-proteome FASTA would have been written empty and
+stage E would have hard-failed its non-empty guard (that guard is why this surfaced
+as a diagnosable log line rather than a 16-hour clustering run on an empty file).
+
+`06_assemble_dataset.py` already reads this correctly (`ps.get("by_phenotype", {})`)
+and even raises if it is empty — my snippet simply didn't match the repo's own
+contract. Fixed to use the same access path, and it now `sys.exit`s loudly if either
+`by_phenotype` is empty or no class is whole-scope. Verified against the real config:
+`['hyperthermophile', 'psychrophile']` vs the buggy `[]`.
+
+Cancelled C and its dependents; A0/A/B outputs were correct and preserved
+(`gtdb_meta.tsv` 192,586,661 B, `combined_labels.parquet` 84,804,901 B,
+`all_pairs.tsv` 514,004 B, all three done-markers present). Resubmitted
+`1164460`–`1164466`. Note the rerun does redo A0/A/B — I passed a `SKIP_DONE=1` the
+script does not implement. Harmless (~5 min, idempotent), but the done-markers the
+chain writes are currently decorative; wiring them into a real skip is worth doing.
+
+Stage B results, first time measured end-to-end on the merged dataset: **6,568 genome
+pairs** — 2,667 `high` / 3,901 `medium` — across all six classes (halophile,
+thermophile, acidophile, alkaliphile, psychrophile, hyperthermophile all non-empty).
