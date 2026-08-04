@@ -8,14 +8,33 @@ Chains, for ONE input enzyme + ONE phenotype:
   Stage 3  active-site   frozen[] = high-conservation columns U detected
                           multicopper-oxidase Cu-site motif residues (His/Cys)
   Stage 4  masked-gen    ESM-2 3B + MLM adapter, conservation-gated masking units
-                          (masking.py), Gibbs passes. NOTE: this first end-to-end
-                          version uses SINGLETON mask units (build_mask_units with
-                          no contact_pairs) — the contact-pair COUPLED masking of the
-                          production spec (decode coupled residues jointly) is the
-                          documented next enhancement: it needs the WT ESM-2 contact
-                          map fed as contact_pairs, computed once per job.
+                          (masking.py), Metropolis-annealed mask-and-fill passes.
+                          Masking uses COUPLED units (contact pairs + spans) to
+                          match the trained adapter, whose production run used
+                          coupling_mode='both'; the WT ESM-2 contact map is
+                          computed ONCE per job (~1% wall overhead) since the
+                          sequence is fixed and the RMSD gate keeps the fold, so
+                          the coupling topology is invariant along a trajectory.
   Stage 5  scoring       per-phenotype cached head (directional signal) +
                           non-learnable biophysical proxy (anti-gaming gate)
+
+Search behaviour (Stage 4). Proposals are stochastic (which units get masked, and
+what the MLM fills them with); ACCEPTANCE is Metropolis with a geometric
+annealing schedule --mh-t0 -> --mh-t1. A worsening proposal is accepted with
+probability exp(dScore / T), so the chain can cross a score barrier instead of
+being trapped at the first local optimum. --mh-t0 0 reproduces the earlier strict
+hill-climbing exactly. Because the chain may end below its peak, the BEST-scoring
+sequence of the trajectory is returned, not the last one visited.
+
+Three escape/robustness mechanisms, distinguished because they serve different
+objectives:
+  * Metropolis acceptance      escapes SCORE local minima
+  * refold rollback + backoff  enforces the FOLD constraint (RMSD over the
+                               active site); reverts to last_good and shrinks
+                               mask_rate, which --refold-recover then restores
+                               after sustained success so one structural failure
+                               does not permanently throttle exploration
+  * mutation budget            hard constraint, checked before acceptance
 
 Writes candidates.json: {wt_sequence, phenotype, conservation, active_site (1-based),
 active_site_assigned, designs:[{design_id, sequence, level, classifier_score,
@@ -316,6 +335,40 @@ def main():
                     help="multiply mask_rate by this after a rollback (more conservative)")
     ap.add_argument("--refold-max-fails", type=int, default=3,
                     help="stop this design after this many consecutive failed refolds")
+    # ---- Metropolis acceptance (escape score local minima) ----
+    # The prior loop accepted a proposal only if `ps >= cur_score`, i.e. strict
+    # hill-climbing: the score could never decrease, so a design that reached a
+    # local optimum could only drift laterally across exact ties. Metropolis
+    # accepts a worsening move with probability exp(dScore / T), annealing T from
+    # --mh-t0 to --mh-t1 geometrically over the passes. T=0 reproduces the old
+    # monotone behaviour exactly (kept as the reproducibility escape hatch).
+    ap.add_argument("--mh-t0", type=float, default=0.05,
+                    help="initial Metropolis temperature (0 = old hill-climbing)")
+    ap.add_argument("--mh-t1", type=float, default=0.005,
+                    help="final Metropolis temperature (annealed geometrically)")
+    # ---- mask_rate recovery (undo the one-way refold ratchet) ----
+    # --refold-backoff only ever SHRANK mask_rate; a design failing one RMSD check
+    # ran every remaining pass at half step size, so structural backtracking
+    # silently made score exploration more conservative for the rest of the
+    # trajectory. Recover geometrically after sustained success.
+    ap.add_argument("--refold-recover", type=float, default=1.25,
+                    help="multiply mask_rate by this after --refold-recover-after "
+                         "consecutive passing checkpoints (1.0 = no recovery)")
+    ap.add_argument("--refold-recover-after", type=int, default=2,
+                    help="consecutive passing checkpoints before recovery kicks in")
+    # ---- coupled (contact-pair) masking: match the TRAINING distribution ----
+    # The production MLM adapter was trained with coupling_mode='both'
+    # (contact_threshold 0.5, contact_min_sep 6, top_k 128 -- see labnotebook
+    # "Coupling-aware masking"). Generation masked SINGLETONS only, so inference
+    # masking did not match training masking. Computing the WT contact map ONCE
+    # per job (the sequence is fixed; only substitutions change) closes that gap.
+    ap.add_argument("--coupling-mode", default="both",
+                    choices=["none", "contact", "span", "both"],
+                    help="mask unit construction; 'both' matches the trained adapter")
+    ap.add_argument("--contact-threshold", type=float, default=0.5)
+    ap.add_argument("--contact-min-sep", type=int, default=6)
+    ap.add_argument("--contact-top-k", type=int, default=128)
+    ap.add_argument("--span-len", type=int, default=3)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--workdir", default=".")
     ap.add_argument("--seed", type=int, default=1466)
@@ -405,6 +458,49 @@ def main():
     # special mask (CLS/EOS handled by residue indexing; only frozen matters here)
     special = np.zeros(L, dtype=bool)
 
+    # ---- WT contact pairs + spans, computed ONCE (Stage 4 coupled masking) ----
+    # Cost is one 3B contact-head forward pass for the whole job, not per pass:
+    # the WT sequence is fixed and substitutions do not move the backbone enough
+    # to invalidate the coupling topology (the RMSD gate enforces exactly that).
+    # Marginal runtime is therefore ~1 extra forward pass against
+    # n_designs * gibbs_iters * (1 fill + 1 score) -- under 1% at defaults.
+    contact_pairs = None
+    spans = None
+    if args.coupling_mode in ("contact", "both"):
+        t_cp = time.time()
+        cm = None
+        try:
+            from eptrans.modeling.data import _predict_contacts
+            cm = _predict_contacts(model, tok, seq)
+        except Exception as e:
+            print(f"[11] WARN contact head failed ({type(e).__name__}: {e})", flush=True)
+        if cm is not None:
+            contact_pairs = MK.contact_pairs_from_map(
+                cm, threshold=args.contact_threshold,
+                min_sep=args.contact_min_sep, top_k=args.contact_top_k)
+            print(f"[11] contact pairs: {len(contact_pairs)} "
+                  f"(thr {args.contact_threshold}, min_sep {args.contact_min_sep}, "
+                  f"top_k {args.contact_top_k}) in {time.time()-t_cp:.1f}s", flush=True)
+        else:
+            # Do NOT silently fall back to singleton masking: that is the
+            # train/inference mismatch this block exists to remove. Say so.
+            print("[11] WARN no contact map -> coupled masking DISABLED, "
+                  "masking reverts to singletons (does NOT match the trained "
+                  "adapter's coupling_mode=both)", flush=True)
+    if args.coupling_mode in ("span", "both"):
+        spans = MK.make_span_units(L, span_len=args.span_len)
+        print(f"[11] span units: {len(spans)} (span_len {args.span_len})", flush=True)
+
+    # Units depend only on L/frozen/coupling, all fixed across passes -> build once
+    # instead of rebuilding every iteration as the previous loop did.
+    units = MK.build_mask_units(L, special=special, frozen=frozen,
+                                contact_pairs=contact_pairs, spans=spans)
+    _sizes = [len(u) for u in units]
+    print(f"[11] mask units: {len(units)} "
+          f"(coupled {sum(1 for s in _sizes if s > 1)}, singleton "
+          f"{sum(1 for s in _sizes if s == 1)}, "
+          f"max size {max(_sizes) if _sizes else 0})", flush=True)
+
     # per-design aggressiveness schedule (inline: conservative->aggressive)
     def schedule(level, n):
         # level in [0, n-1]; interpolate mask_rate/gamma/target_mut_frac
@@ -440,13 +536,23 @@ def main():
         cur = seq
         cur_score = wt_score
         trace = [(0, cur_score)]
-        mask_rate = sch["mask_rate"]        # mutable: shrinks on rollback
+        mask_rate0 = sch["mask_rate"]       # schedule value; the recovery ceiling
+        mask_rate = mask_rate0              # mutable: shrinks on rollback, recovers on success
         last_good = seq                      # last refold-passing sequence
         last_good_score = wt_score
         consec_fails = 0
-        n_refolds = n_rollbacks = 0
+        consec_passes = 0
+        n_refolds = n_rollbacks = n_recover = 0
+        # Metropolis temperature, annealed geometrically t0 -> t1 over the passes.
+        T = args.mh_t0
+        t_decay = (1.0 if args.mh_t0 <= 0 or args.gibbs_iters <= 1
+                   else (args.mh_t1 / args.mh_t0) ** (1.0 / (args.gibbs_iters - 1)))
+        # best-so-far tracking: with Metropolis the chain can END below its peak,
+        # so the peak must be remembered explicitly or annealing loses work the
+        # old monotone loop kept by construction.
+        best, best_score = cur, cur_score
+        n_downhill = 0
         for it in range(args.gibbs_iters):
-            units = MK.build_mask_units(L, special=special, frozen=frozen)  # singleton units
             mask = MK.sample_mask_units(cons, units, mask_rate=mask_rate,
                                         gamma=sch["gamma"], rng=rng)
             mask_pos0 = np.where(mask)[0].tolist()
@@ -454,25 +560,48 @@ def main():
                 break
             prop = mlm_fill(cur, mask_pos0)
             ps = score(prop)
-            # accept if the phenotype score improves AND the mutation budget is respected;
-            # a score-improving move that overruns the budget is rejected (fold-collapse
-            # from over-mutation is the failure mode the RMSD gate later catches — this
-            # keeps designs inside the budget so they rarely reach the gate at all).
-            if ps >= cur_score and n_mut(prop) <= mut_budget:
-                cur, cur_score = prop, ps
+            # Mutation budget is a HARD constraint, checked before acceptance: a
+            # score-improving move that overruns it is still rejected, because
+            # fold collapse from over-mutation is the failure mode the RMSD gate
+            # catches downstream and we would rather never reach that gate.
+            if n_mut(prop) <= mut_budget:
+                d = ps - cur_score
+                if d >= 0:
+                    cur, cur_score = prop, ps
+                elif T > 0.0 and rng.random() < np.exp(d / T):
+                    # Metropolis: accept a WORSE proposal to cross a barrier.
+                    cur, cur_score = prop, ps
+                    n_downhill += 1
+                if cur_score > best_score:
+                    best, best_score = cur, cur_score
             trace.append((it + 1, cur_score))
+            T *= t_decay
             # ---- periodic structural checkpoint: refold + active-site RMSD ----
             if refolder is not None and (it + 1) % args.refold_every == 0 and cur != last_good:
                 rmsd = refolder.refold_rmsd(cur, active_1b)
                 n_refolds += 1
                 if rmsd is not None and rmsd <= args.refold_rmsd_cap:
                     last_good, last_good_score, consec_fails = cur, cur_score, 0
+                    consec_passes += 1
+                    msg = ""
+                    # Recover step size after sustained structural success, capped at
+                    # the level's scheduled value so recovery can never make a design
+                    # more aggressive than its aggressiveness level allows.
+                    if (args.refold_recover > 1.0 and mask_rate < mask_rate0
+                            and consec_passes >= args.refold_recover_after):
+                        new_mr = min(mask_rate0, mask_rate * args.refold_recover)
+                        if new_mr > mask_rate:
+                            msg = f" -> mask_rate {mask_rate:.3f}->{new_mr:.3f} (recover)"
+                            mask_rate = new_mr
+                            n_recover += 1
+                        consec_passes = 0
                     print(f"[11]   {args.phenotype[:4]}_{lvl+1} pass {it+1}: refold OK "
-                          f"rmsd={rmsd:.2f} A (checkpoint)", flush=True)
+                          f"rmsd={rmsd:.2f} A (checkpoint){msg}", flush=True)
                 else:
                     # roll back to the last passing sequence, take smaller steps next
                     consec_fails += 1; n_rollbacks += 1
                     cur, cur_score = last_good, last_good_score
+                    consec_passes = 0
                     mask_rate = max(0.01, mask_rate * args.refold_backoff)
                     print(f"[11]   {args.phenotype[:4]}_{lvl+1} pass {it+1}: refold FAIL "
                           f"rmsd={rmsd} > {args.refold_rmsd_cap} -> rollback, "
@@ -486,6 +615,17 @@ def main():
         # refold_every, may never have been checkpointed at all) -- do ONE final refold
         # so we don't silently discard good work OR collapse to WT. Keep `cur` iff it
         # passes; otherwise fall back to last_good (WT only if nothing ever passed).
+        # Metropolis may leave the chain below its peak. Return the BEST scoring
+        # sequence seen, not the last one visited -- otherwise annealing would
+        # discard work the old monotone loop retained by construction. Only
+        # promote if it respects the budget (it always does: best is only ever
+        # assigned inside the budget-checked branch).
+        if best_score > cur_score:
+            print(f"[11]   {args.phenotype[:4]}_{lvl+1}: returning best-so-far "
+                  f"{best_score:.4f} over chain end {cur_score:.4f} "
+                  f"({n_downhill} downhill moves accepted)", flush=True)
+            cur, cur_score = best, best_score
+
         if refolder is not None and cur != last_good:
             final_rmsd = refolder.refold_rmsd(cur, active_1b)
             n_refolds += 1
@@ -505,6 +645,10 @@ def main():
                             biophysical_score=round(biophysical_score(cur, args.phenotype), 4),
                             n_mutations=len(muts), mutations=muts,
                             n_refolds=n_refolds, n_rollbacks=n_rollbacks,
+                            n_downhill_accepted=n_downhill, n_mask_rate_recoveries=n_recover,
+                            mh_t0=args.mh_t0, mh_t1=args.mh_t1,
+                            coupling_mode=args.coupling_mode,
+                            n_contact_pairs=(len(contact_pairs) if contact_pairs else 0),
                             gibbs_trace=[[int(a), round(float(b), 4)] for a, b in trace]))
         print(f"[11] design {did}: score {wt_score:.3f}->{cur_score:.3f}, {len(muts)} muts, "
               f"{n_refolds} refolds / {n_rollbacks} rollbacks", flush=True)
