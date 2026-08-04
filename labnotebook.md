@@ -1452,3 +1452,49 @@ hyperthermophile and thermophile. Reporting per-phenotype AUPRC without it will
 overstate both, and the overstatement is largest exactly where n is smallest.
 
 Table: `results/matched_rank_by_phenotype.csv`
+
+### MAG ingest into custom_genomes/ — complete (job 1164146)
+
+`03d_ingest_mags_custom_tree.sbatch`, 48:47 wall on `gpu`, exit 0:0.
+
+```
+INGESTED 330      FAILED 0      SKIPPED_ALREADY_PRESENT 0
+INDEX_BEFORE 199923  ->  INDEX_AFTER 200253  (INDEX_ADDED 330, INDEX_CU_ROWS 330)
+TOTAL_PROTEINS 728895     FNA_ON_DISK 330     FAA_ON_DISK 330
+```
+
+Mean 2,209 proteins/genome (vs the 2,045 GTDB average used in the projections,
+so the whole-proteome protein counts are conservative by ~8%).
+
+Post-ingest verification, not assumed: 205 bacteria / 125 archaea on disk
+matching the GTDB-Tk domain split exactly; **all 320 SignalP-needed accessions
+resolve** through the same `$ROOT/$DOM/${ACC}_protein.faa.gz` lookup the GTDB
+path uses (UNRESOLVED_COUNT 0); headers are bare `>{PROTID}` as the convention
+requires (e.g. `>10E_k119_382340_1`).
+
+Runtime note: 14.9 s/genome, not the ~1 s I projected from the GTDB-Tk timing
+run's Prodigal figure (1.74 s/genome). That figure was Prodigal alone; this loop
+also gzips contigs and the proteome to the VAST mount per genome. Use ~15
+s/genome for future custom-genome ingests.
+
+### SignalP on the 2,582 uncovered genomes — submitted
+
+Requirement recomputed under the locked tiers: **9,286 genomes** (5,726
+extremophile + 3,560 outgroup, zero overlap) — down from 13,946 before the
+thermophile high-only lock. 6,641 already covered by the r232 production run plus
+completed chunks of the still-running `05b` fill array (1152569, 41/190 chunks
+done), leaving **2,582 new** (2,262 GTDB + 320 custom).
+
+Split 8 ways at CHUNK_SIZE=323, per the partition capacity measured immediately
+before submit (`sinfo -p gpu,gpu_h200,memory -o '%P %D %C %t'`): gpu
+10/342/0/352, gpu_h200 4/220/0/224, memory 3008/0/0/3008 — memory has ZERO idle
+CPUs despite its short queue, so the earlier plan to use it was redirected.
+
+| job | partition | tasks |
+|---|---|---|
+| 1164156 | gpu | 0–3 |
+| 1164157 | gpu_h200 | 4–7 |
+
+No `--gres` requested: SignalP 6.0 fast mode is CPU-decode-bound (see the
+throughput benchmark section), so reserving a GPU would idle an accelerator for
+~1.4×. `05b` left running alongside on `standard` as agreed.
