@@ -1,0 +1,7 @@
+phenotype,scope,emitted,usable,no_outgroup,pct_lost,needs_signalp
+thermophile,secreted,4927,3413,1514,30.7,True
+halophile,secreted,2935,2459,476,16.2,True
+acidophile,secreted,799,766,33,4.1,True
+alkaliphile,secreted,581,565,16,2.8,True
+hyperthermophile,whole_proteome,291,234,57,19.6,False
+psychrophile,whole_proteome,214,214,0,0.0,False

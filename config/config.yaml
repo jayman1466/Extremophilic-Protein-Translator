@@ -261,14 +261,24 @@ dataset:
       alkaliphile:      secreted
       hyperthermophile: whole_proteome
       psychrophile:     whole_proteome
-      # thermophile: UNDECIDED — currently `secreted` via the default above.
-      # The same biophysical argument applies (temperature is not
-      # compartmentalised), but thermophile is not pair-starved the way
-      # hyperthermophile is: 15,604 protein pairs from 560 genome pairs,
-      # cached-probe AUPRC 0.862 on 1,495 validation pairs. Switching it is a
-      # cost decision, not a necessity — whole-proteome embedding for the two
-      # classes above is ~$76 of H200 spot; adding thermophile is the single
-      # largest increment after halophile. Awaiting an explicit call.
+      # thermophile: DECIDED `secreted` (via the default above), 2026-08-04.
+      # The same biophysical argument for whole-proteome applies (temperature is
+      # not compartmentalised), and the concern that originally held this open --
+      # that a few huge protein clusters would dominate whole-proteome pairs --
+      # HAS since been resolved two ways:
+      #   (1) measured prevalence spectrum over 158 genomes / 224,022 clusters:
+      #       max cluster prevalence f = 108/158 = 0.684, with ZERO clusters
+      #       above f = 0.70. At 50% identity the universal families fragment
+      #       into sub-family clusters instead of forming one pan-genome cluster,
+      #       so the "one cluster intersects every genome pair" worst case does
+      #       not occur.
+      #   (2) `max_pairs_per_cluster_class` (class-stratified) is implemented and
+      #       tested, so even a pathological cluster is bounded per class.
+      # The user nonetheless chose to keep thermophile secreted: at 4,927 matched
+      # genome pairs, whole-proteome scope would add roughly 1M protein pairs and
+      # make thermophile ~90% of the dataset, and the extra data is not needed.
+      # This is a deliberate balance decision, NOT an unresolved question --
+      # do not re-open it without a new reason.
 
 # --------------------------------------------------------------------------
 # SLURM defaults
