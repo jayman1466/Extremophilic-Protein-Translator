@@ -2070,3 +2070,51 @@ chain writes are currently decorative; wiring them into a real skip is worth doi
 Stage B results, first time measured end-to-end on the merged dataset: **6,568 genome
 pairs** — 2,667 `high` / 3,901 `medium` — across all six classes (halophile,
 thermophile, acidophile, alkaliphile, psychrophile, hyperthermophile all non-empty).
+
+### Chain running clean through stage C (1164460–1164466)
+
+| stage | job | partition | state | elapsed |
+|---|---|---|---|---|
+| A0 gtdb meta | 1164460 | gpu | COMPLETED | 00:00:21 |
+| A labels | 1164461 | gpu | COMPLETED | 00:07:52 |
+| B genome pairs | 1164462 | gpu | COMPLETED | 00:01:24 |
+| C secreted + FASTAs | 1164463 | gpu | RUNNING | — |
+| D cluster 50% | 1164464 | gpu_h200 | PENDING (dep) | — |
+| E cluster 40% | 1164465 | gpu_h200 | PENDING (dep) | — |
+| F assemble | 1164466 | gpu_h200 | PENDING (dep) | — |
+
+**The scope fix is confirmed on real data**, which was the open risk:
+`WHOLE_SCOPE_GENOMES 7320 classes ['hyperthermophile', 'psychrophile']`, against the
+previous run's `0 classes []`. Stage C is now past the point where it silently
+produced an empty whole-proteome FASTA.
+
+**Stage A (labels).** 901,341 GTDB genomes flagged; isolation source present for
+483,545; iso-flagged 16,598, org-flagged 26,130. Confidence tiers after GenomeSPOT
+merge: high 3,642 / medium 18,859 / low 12,494 / none 866,346; confident mesophiles
+104,279. Final per-class: thermophile 15,047, halophile 11,019, acidophile 5,968,
+psychrophile 3,748, alkaliphile 2,496, hyperthermophile 1,365. Measured-OGT merge
+pooled 9,577 species (tempura 4,312 / madin 4,749 / toki 3,131 / ogtfinder 3,168),
+matched 5,907 to r232, giving OGT tiers high 694 / medium 1,520 / low 4,686, with 432
+genomes ≤15 °C, 2,077 ≤20 °C, 63 promoted by Tmin, and **450 measured-warm genomes
+overriding cold metadata**. Deep-sea confident mesophiles 1,576.
+
+**Stage B: 6,568 taxa-matched genome pairs**, the first end-to-end count on the
+merged GTDB + deep-sea dataset:
+
+| class | pairs | high | medium |
+|---|--:|--:|--:|
+| halophile | 2,934 | 522 | 2,412 |
+| thermophile | 1,630 | 1,630 | 0 |
+| acidophile | 798 | 300 | 498 |
+| alkaliphile | 581 | 115 | 466 |
+| psychrophile | 332 | 12 | 320 |
+| hyperthermophile | 293 | 88 | 205 |
+
+Thermophile is high-only and halophile high+medium, as locked in earlier.
+
+**Verified the label table's scope rather than trusting the row count.**
+`combined_labels.parquet` has 905,425 rows = 901,341 GTDB + 4,084 MAGs, of which
+exactly **199,923 carry `gtdb_representative == 't'`** — the known r232 count. The
+table deliberately spans all genomes; selection filters. Confirmed no leakage: of the
+**10,092 distinct genomes appearing in the 6,568 pairs, 10,092 are representatives or
+MAGs and 0 are non-representative GTDB genomes.** 439 MAGs participate in pairs.
