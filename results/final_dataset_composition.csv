@@ -1,7 +1,7 @@
-phenotype,scope,tier,evidence,emitted,usable,proteins,pairs_lo,pairs_hi,pair_basis,protein_pct,unusable,unusable_pct
-halophile,secreted,high+medium,keyword + GenomeSPOT prediction,2935,2459,1134464,83286,83286,production end-to-end rate 33.87/gp,27.7,476,16.2
-hyperthermophile,whole_proteome,high+medium,keyword + GenomeSPOT prediction,291,234,957060,10108,10108,probe direct 43.2/gp (n=15 gp),23.4,57,19.6
-psychrophile,whole_proteome,high+medium,measured OGT (GenomeSPOT excluded),214,214,875260,131396,350104,bounded (ortholog-sharing 30-80%); UNMEASURED,21.4,0,0.0
-thermophile,secreted,high only,keyword + GenomeSPOT prediction,1555,1117,515330,19257,19257,production end-to-end rate 17.24/gp,12.6,438,28.2
-acidophile,secreted,high+medium,keyword + GenomeSPOT prediction,799,766,353395,6886,6886,production end-to-end rate 8.99/gp,8.6,33,4.1
-alkaliphile,secreted,high+medium,keyword + GenomeSPOT prediction,581,565,260663,7689,7689,production end-to-end rate 13.61/gp,6.4,16,2.8
+phenotype,scope,tier,evidence,emitted,usable,proteins,pairs_lo,pairs_hi,pair_basis,protein_pct,unusable,unusable_pct,pairs_per_gp_lo
+halophile,secreted,high+medium,keyword + GenomeSPOT prediction,2935,2459,1134464,83286,83286,production end-to-end 33.87/gp (secreted),27.7,476,16.2,33.9
+hyperthermophile,whole_proteome,high+medium,keyword + GenomeSPOT prediction,291,234,957060,6309,6309,probe raw 43.2/gp discounted by measured 1.60x raw->end-to-end loss,23.4,57,19.6,27.0
+psychrophile,whole_proteome,high+medium,measured OGT (GenomeSPOT excluded),214,214,875260,72156,125366,floor = best-matched measured class (halophile 540 raw); ceiling = rank-fit extrapolation (939 raw); both /1.60,21.4,0,0.0,337.2
+thermophile,secreted,high only,keyword + GenomeSPOT prediction,1555,1117,515330,19257,19257,production end-to-end 17.24/gp (secreted),12.6,438,28.2,17.2
+acidophile,secreted,high+medium,keyword + GenomeSPOT prediction,799,766,353395,6886,6886,production end-to-end 8.99/gp (secreted),8.6,33,4.1,9.0
+alkaliphile,secreted,high+medium,keyword + GenomeSPOT prediction,581,565,260663,7689,7689,production end-to-end 13.61/gp (secreted),6.4,16,2.8,13.6

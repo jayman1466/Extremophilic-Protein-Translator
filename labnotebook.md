@@ -1332,12 +1332,12 @@ four sources (TEMPURA, Madin, Toki, OGTFinder-optima).
 | phenotype | scope | tier | emitted | **usable** (drop) | proteins | share | protein pairs |
 |---|---|---|--:|--:|--:|--:|--:|
 | halophile | secreted | high+med | 2,935 | **2,459** (−476, 16.2%) | 1,134,464 | 27.7% | 83,286 |
-| hyperthermophile | whole | high+med | 291 | **234** (−57, 19.6%) | 957,060 | 23.4% | 10,108 |
-| psychrophile | whole | high+med | 214 | **214** (−0, 0.0%) | 875,260 | 21.4% | 131,396–350,104 |
+| hyperthermophile | whole | high+med | 291 | **234** (−57, 19.6%) | 957,060 | 23.4% | 6,309 |
+| psychrophile | whole | high+med | 214 | **214** (−0, 0.0%) | 875,260 | 21.4% | 72,156–125,366 |
 | thermophile | secreted | high only | 1,555 | **1,117** (−438, 28.2%) | 515,330 | 12.6% | 19,257 |
 | acidophile | secreted | high+med | 799 | **766** (−33, 4.1%) | 353,395 | 8.6% | 6,886 |
 | alkaliphile | secreted | high+med | 581 | **565** (−16, 2.8%) | 260,663 | 6.4% | 7,689 |
-| **TOTAL** | | | 6,375 | **5,355** (−1,020, 16.0%) | **4,096,172** | | **258,622–477,330** |
+| **TOTAL** | | | 6,375 | **5,355** (−1,020, 16.0%) | **4,096,172** | | **195,583–248,793** |
 
 **emitted vs usable (the parenthesised drop).** `select_with_outgroups` emits a
 row per selected extremophile even when no mesophile outgroup can be found. Only
@@ -1565,3 +1565,58 @@ exist, in order of expected effect:
 Not yet measured: whether a 30% threshold actually recovers cross-phylum core
 pairs at acceptable precision. A cheap test is re-clustering the probe's 15
 hyperthermophile genome pairs at 30/40/50% and reading pairs/gp at each.
+
+### Correction: the pair column mixed two incompatible rate definitions
+
+Prompted by the question "does the table need updating, unless end-to-end means
+something I'm not seeing." It does mean something specific — and that is exactly
+why the column was wrong.
+
+**Two rate kinds were sitting in one column.**
+
+- `SEC_RATE` (secreted classes) is a production **end-to-end** rate: pairs that
+  survived the *full* pipeline — clustering, redundancy cap, leakage-aware split —
+  per selected genome pair.
+- `DIRECT` (hyperthermophile) is a prevalence-probe **raw** rate: pairs straight
+  out of mmseqs, before cap or split.
+
+Raw and end-to-end are not interchangeable. Measuring the gap on the four classes
+where both exist (probe raw ÷ whole/secreted multiplier vs production end-to-end):
+
+| phenotype | probe raw, secreted-equiv | production end-to-end | loss |
+|---|--:|--:|--:|
+| halophile | 43.4 | 33.9 | 1.28× |
+| thermophile | 27.9 | 17.2 | 1.62× |
+| alkaliphile | 21.6 | 13.6 | 1.59× |
+| acidophile | 14.8 | 9.0 | 1.65× |
+
+**Median raw→end-to-end loss = 1.60×** (range 1.28–1.65). Hyperthermophile's 43.2
+was therefore ~1.6× too generous relative to its column-mates: discounted, 27.0
+pairs/gp → **6,309 pairs** (was 10,108).
+
+**Psychrophile was worse — the assumption exceeded every measurement.** Its
+614–1,636 pairs/gp came from 2,045 proteins × 30–80% ortholog sharing. But the
+highest whole-proteome raw rate ever measured is halophile's 540.2, so my *lower*
+bound was 1.14× above the observed maximum. The error is the one the core-gene
+analysis identified: it assumed each shared ortholog becomes a pair, when
+clustering fragmentation means only a fraction do. Ortholog sharing is not pair
+conversion.
+
+Re-derived from the rank–yield relationship (`pairs/gp = 9.54 × genus+family% +
+11.4`, R² = 0.947 on the 5 measured classes):
+
+- **floor 337 pairs/gp** — the best-matched *measured* class (halophile, 540 raw)
+  discounted 1.60×; defensible because psychrophile is better-matched still
+- **ceiling 586 pairs/gp** — fit extrapolated to its 97.2% genus+family, then
+  discounted
+- → **72,156–125,366 pairs** (was 131,396–350,104)
+
+⚠️ The ceiling is an **extrapolation**: the fit spans 5.6–53.1% genus+family and
+psychrophile sits at 97.2%, 1.8× beyond the fitted range. Treat the floor as the
+planning number and measure directly — a ~90 s mmseqs run on its 214 genome pairs
+settles it.
+
+**Revised total: 195,583–248,793 protein pairs** (was 258,622–477,330). Protein
+counts are **unchanged at 4,096,172** — they derive from genome counts, not pair
+rates, so the MLM training set is unaffected. Only the classifier's auxiliary
+pair-margin term sees this.
