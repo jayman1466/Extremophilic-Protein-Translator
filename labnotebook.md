@@ -1931,3 +1931,27 @@ Queue state at submit: 9 RUNNING / 3 PENDING from unrelated work (deeploc arrays
 operon jobs, the long-running SignalP fill `1152569`). MaxJobsPerUser=10 caps
 concurrent *running* jobs, not submissions (MaxSubmitJobsPerUser=200), so the chain
 pends rather than being rejected.
+
+**Resubmitted onto the `memory` partition (2026-08-04).** Cancelled the standard-partition
+chain (`1164413`–`1164419`, all still PENDING, nothing lost) and resubmitted as
+`1164424` A0 → `1164425` A → `1164426` B → `1164427` C → {`1164428` D, `1164429` E}
+→ `1164430` F.
+
+**Chosen on queue depth, not idle capacity.** Both partitions reported zero idle
+CPUs (standard 3680/0/48/3728, memory 3008/0/0/3008), so the throughput argument
+isn't about free cores — it's the backlog: cluster-wide pending jobs were **11 on
+`memory` against 139 on `standard`**, a 12.6× shorter queue. Secondary benefits:
+memory nodes carry 677 GB vs standard's 258 GB, which suits the 40% whole-proteome
+clustering (the largest job in the chain, previously requesting 320 G on a 258 G
+partition — it would have been unschedulable as written), and `memory` is
+time-unlimited here.
+
+Partition is now a `PART` variable (default `memory`) rather than hardcoded.
+
+Dependency graph verified post-submit via `scontrol` rather than assumed: A0 `(null)`,
+each stage `afterok` on its predecessor, D and E both `afterok:1164427`, and F
+`afterok:1164428,afterok:1164429` — so the assembly waits on *both* cluster maps,
+which is required since the split is grouped on their merge.
+
+The preflight correctly skipped all four OGT fetches as already present
+(idempotent), so the resubmit cost no network work.
