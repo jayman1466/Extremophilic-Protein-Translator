@@ -70,7 +70,7 @@ COMMON="--partition=$PART --output=$LOGS/%x_%j.out"
 # straight from the two GTDB metadata dumps.
 G=/groups/cress/projects/jaymin/IS1111/gtdb
 A0=$($SB $COMMON --job-name=asm_meta --cpus-per-task=4 --mem=32G --time=01:00:00 \
-  --wrap "set -uo pipefail; cd $W && $PY - <<'PYEOF'
+  --wrap "set -u; cd $W && $PY - <<'PYEOF'
 import csv, gzip, sys
 G='/groups/cress/projects/jaymin/IS1111/gtdb'
 W='/groups/cress/projects/jaymin/eptrans_scratch/assemble'
@@ -95,7 +95,7 @@ echo "A0 gtdb meta    $A0"
 # ---------------------------------------------------------------- A: labels
 A=$($SB $COMMON --job-name=asm_labels --cpus-per-task=8 --mem=64G --time=02:00:00 \
   --dependency=afterok:$A0 \
-  --wrap "set -uo pipefail; cd $REPO && export PYTHONPATH=$REPO/src && \
+  --wrap "set -u; cd $REPO && export PYTHONPATH=$REPO/src && \
     $PY scripts/01b_flag_metadata.py \
       --tsv $W/gtdb_meta.tsv --out $W/metadata_flags.parquet \
       --fig $W/metadata_flags_counts.png && \
@@ -121,7 +121,7 @@ echo "A labels        $A"
 # max_total_per_class uncapped -- the config default of 100 is a pilot setting.
 B=$($SB $COMMON --job-name=asm_pairs --cpus-per-task=8 --mem=64G --time=02:00:00 \
   --dependency=afterok:$A \
-  --wrap "set -uo pipefail; cd $REPO && export PYTHONPATH=$REPO/src && \
+  --wrap "set -u; cd $REPO && export PYTHONPATH=$REPO/src && \
     $PY scripts/04_select_genomes.py --labels $W/combined_labels.parquet \
       --classes thermophile --confidence high \
       --max-total-per-class 1000000000 --reuse-outgroups \
@@ -139,7 +139,7 @@ echo "B genome pairs  $B"
 # ---------------------------------------------------------------- C: secreted table
 C=$($SB $COMMON --job-name=asm_secreted --cpus-per-task=16 --mem=96G --time=04:00:00 \
   --dependency=afterok:$B \
-  --wrap "set -uo pipefail; cd $REPO && export PYTHONPATH=$REPO/src && \
+  --wrap "set -u; cd $REPO && export PYTHONPATH=$REPO/src && \
     $PY -c \"
 import pandas as pd, yaml, sys
 cfg=yaml.safe_load(open('config/config.yaml'))
@@ -174,7 +174,7 @@ echo "C secreted      $C"
 MM=/shared/software/bin/mmseqs
 D=$($SB $COMMON --job-name=asm_clu50 --cpus-per-task=48 --mem=200G --time=12:00:00 \
   --dependency=afterok:$C \
-  --wrap "set -uo pipefail; cd $W && \
+  --wrap "set -u; cd $W && \
     test -s secretome.faa || { echo \"FATAL: secretome.faa missing or empty -- stage C did not emit it\"; exit 1; }; \\
     $MM easy-cluster secretome.faa clu50 tmp50 \
       --min-seq-id 0.5 -c 0.8 --cov-mode 0 --threads 48 && \
@@ -183,7 +183,7 @@ echo "D cluster 50%   $D"
 
 E=$($SB $COMMON --job-name=asm_clu40 --cpus-per-task=48 --mem=320G --time=16:00:00 \
   --dependency=afterok:$C \
-  --wrap "set -uo pipefail; cd $W && \
+  --wrap "set -u; cd $W && \
     test -s wholeproteome.faa || { echo \"FATAL: wholeproteome.faa missing or empty -- stage C did not emit it\"; exit 1; }; \\
     $MM easy-cluster wholeproteome.faa clu40 tmp40 \
       --min-seq-id 0.4 -c 0.8 --cov-mode 0 --threads 48 && \
@@ -193,7 +193,7 @@ echo "E cluster 40%   $E"
 # ---------------------------------------------------------------- F: assemble
 F=$($SB $COMMON --job-name=asm_final --cpus-per-task=16 --mem=256G --time=06:00:00 \
   --dependency=afterok:$D:$E \
-  --wrap "set -uo pipefail; cd $REPO && export PYTHONPATH=$REPO/src && \
+  --wrap "set -u; cd $REPO && export PYTHONPATH=$REPO/src && \
     $PY scripts/06_assemble_dataset.py \
       --secreted $W/secreted_all.tsv \
       --labels $W/combined_labels.parquet \
