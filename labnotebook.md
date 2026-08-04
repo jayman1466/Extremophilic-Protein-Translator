@@ -1800,3 +1800,81 @@ precision than the other four classes achieve at 40% and comparable to their 50%
 baseline. 30% buys another 1.7× but drops added-pair precision to 86.90% and, more
 importantly, pushes max cluster prevalence toward one-cluster-per-family. 40% is
 the point where the sparse class gains most per unit of precision lost.
+
+### Identifier audit before the assembly chain — one silent data-loss bug found
+
+Asked to double-check that the MAG parenthesis renaming and the GTDB prefix
+handling wouldn't create label conflicts. They would have. Five identifier spaces
+are in play:
+
+| space | form | where it lives |
+|---|---|---|
+| GTDB accession | `GB_GCA_000008085.1` / `RS_GCF_...` | labels, index, proteomes |
+| GTDB bare | `GCA_000008085.1` | `work/genome_index.tsv` (join key) |
+| MAG original id | `10A(CNS0876618)_bin.16` | `deepsea_mags_merged.tsv`, GenomeSPOT |
+| MAG sanitised | `10A_CNS0876618__bin.16` | GTDB-Tk input only (its validator rejects parens) |
+| MAG assigned | `CU_CUST_000000001.1` | **proteomes, FASTA headers, all SignalP predictions** |
+
+**THE BUG.** `03c` line 109 built `accession = "CU_" + mag_id`, i.e.
+`CU_10A(CNS0876618)_bin.16`. But the ingest assigns sequential accessions, so every
+proteome file, FASTA header and SignalP prediction uses `CU_CUST_000000001.1`.
+The two spaces share **no key**. `assign_labels` joins on `bare_accession`
+equality, so **every MAG protein would have failed to get a label and been dropped
+— no error, no warning, a plausible-looking output table.** This is the failure
+mode that produces a quietly wrong dataset rather than a crash.
+
+Fixed: `build_mag_rows` takes the ingest `map.tsv` and translates through it;
+`03c` gains `--id-map` (validated injective), `--require-proteome`, a loud warning
+when no map is given, and a hard failure if a map matches zero `mag_id` values.
+
+**Validated on the real files, not fixtures:** 330/330 map entries matched,
+0 unmatched, join to `CU_CUST_000000001.1` confirmed via `bare_accession`, 0
+parentheses and 0 duplicates among mapped accessions, all retaining `CU_`.
+
+Seven further checks, all pass: no CUST bare id resembles GCA/GCF; label-only rows
+cannot collide with mapped ones; no `mag_id` contains a tab or newline (TSV
+round-trip safe); the merged table does carry the original parenthesised form for
+exactly 1,445 MAGs; `map.tsv` is injective 330→330→330; `genome_index.tsv` has
+zero duplicate keys.
+
+**Also settled:** `genome_index.tsv` carries the 330 MAGs keyed **bare**
+(`CUST_000000001.1`), matching the GTDB convention (`GCA_...`), not prefixed. My
+initial `grep '^CU_'` returned 0 and looked like a missing append; the rows are
+there.
+
+**Scope finding:** only **330 of 4,084** MAGs have a proteome on disk (the 320
+needed for SignalP plus 10). The other 3,754 are retained as label-only rows —
+countable in summaries, never selectable as a training genome, because a pair built
+on them would contribute zero protein pairs.
+
+### Assembly chain staged as one dependency-linked series
+
+`scripts/slurm/14_assemble_chain.sh`:
+`A0` gtdb metadata → `A` labels (01b/03/03b/03c) → `B` genome pairs (04 per class)
+→ `C` secreted table + both clustering FASTAs → {`D` cluster 50%, `E` cluster 40%}
+→ `F` assemble. Every step `afterok`-dependent, so a failure halts the chain rather
+than feeding garbage forward.
+
+Four defects found by dry-validating rather than submitting:
+
+1. **Chain started mid-pipeline.** The stage-01b metadata flags parquet and the
+   combined-labels parquet are no longer on the cluster (in-kernel state lost on
+   reset), so the chain now starts from the GTDB metadata dumps. A repo checkout
+   *does* exist at `eptrans_scratch/repo` — I had earlier said there was none,
+   which was wrong.
+2. **No interpreter.** Bare `python` doesn't exist on the non-login PATH, `conda`
+   isn't on it either, and `/usr/bin/python3` lacks pandas. All 10 call sites now
+   use the absolute `eptrans_ml` interpreter (verified: pandas 3.0.3, pyarrow
+   25.0.0).
+3. **Wrong flags.** 03b was called with `--out`, which it doesn't accept. Every
+   stage's flags are now checked against its own argparse: **6 stages, 34 flags,
+   zero unknown.**
+4. **03a can't run in a batch job.** It fetches over the network and compute nodes
+   have no egress. It now runs as a login-node preflight, which also hard-fails
+   early if the merged MAG table isn't staged.
+
+`05_aggregate_signalp.py` is new. Smoke-tested on real output (chunk_0): 717,183
+predictions parsed, **72,804 secreted (10.15%)** across 323 genomes; SP 50,123 /
+LIPO 17,648 / TAT 2,683 / PILIN 2,032 / TATLIPO 318 / OTHER 644,379. It carries an
+`anchoring` column so a later stage can restrict to `soluble` without re-running
+SignalP — 19,998 of the secreted calls are membrane-anchored, not released.
