@@ -144,6 +144,7 @@ MM=/shared/software/bin/mmseqs
 D=$($SB $COMMON --job-name=asm_clu50 --cpus-per-task=48 --mem=200G --time=12:00:00 \
   --dependency=afterok:$C \
   --wrap "set -uo pipefail; cd $W && \
+    test -s secretome.faa || { echo \"FATAL: secretome.faa missing or empty -- stage C did not emit it\"; exit 1; }; \\
     $MM easy-cluster secretome.faa clu50 tmp50 \
       --min-seq-id 0.5 -c 0.8 --cov-mode 0 --threads 48 && \
     rm -rf tmp50 && wc -l < clu50_cluster.tsv && touch $W/.D_done")
@@ -152,6 +153,7 @@ echo "D cluster 50%   $D"
 E=$($SB $COMMON --job-name=asm_clu40 --cpus-per-task=48 --mem=320G --time=16:00:00 \
   --dependency=afterok:$C \
   --wrap "set -uo pipefail; cd $W && \
+    test -s wholeproteome.faa || { echo \"FATAL: wholeproteome.faa missing or empty -- stage C did not emit it\"; exit 1; }; \\
     $MM easy-cluster wholeproteome.faa clu40 tmp40 \
       --min-seq-id 0.4 -c 0.8 --cov-mode 0 --threads 48 && \
     rm -rf tmp40 && wc -l < clu40_cluster.tsv && touch $W/.E_done")
