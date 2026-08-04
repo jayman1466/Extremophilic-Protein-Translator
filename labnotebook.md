@@ -1878,3 +1878,31 @@ predictions parsed, **72,804 secreted (10.15%)** across 323 genomes; SP 50,123 /
 LIPO 17,648 / TAT 2,683 / PILIN 2,032 / TATLIPO 318 / OTHER 644,379. It carries an
 `anchoring` column so a later stage can restrict to `soluble` without re-running
 SignalP — 19,998 of the secreted calls are membrane-anchored, not released.
+
+**Chain defect 5, found by testing the A0 handoff rather than reading it.** An
+audit flagged that A0's `gtdb_meta.tsv` (10 columns: `domain`, `accession`,
+`gtdb_taxonomy`, `ncbi_isolation_source`, `ncbi_organism_name`, plus checkm/rep
+columns) might not match 01b's `--tsv` help string, which paraphrases the format as
+"(domain, accession, isolation, organism, taxonomy)". The help string is a
+paraphrase; 01b's module docstring (lines 8-9) names the real columns —
+`ncbi_isolation_source`, `ncbi_organism_name`, `gtdb_taxonomy` — which A0 emits
+exactly, and its `read_csv` takes all columns as-is with extras ignored.
+
+Proven end-to-end on a 2,000-row real sample built with the exact A0 code:
+representatives 2,000, with isolation_source 980, iso-flagged 247, org-flagged 418
+(thermophile iso 136 / org 282, hyperthermophile 27/15, psychrophile 16/0,
+acidophile 58/215, alkaliphile 15/14, halophile 40/99), both parquet and figure
+written. The handoff is sound.
+
+That test did expose a real blocker the audit didn't name: **no conda environment on
+biotite had matplotlib**, and four of the seven chain stages (01b, 03, 04, 06)
+import it at top level, so the chain would have died at stage A regardless of the
+column question. Installed matplotlib 3.11.1 into `eptrans_ml` (now pandas 3.0.3 /
+pyarrow 25.0.0 / matplotlib 3.11.1).
+
+Lesson worth keeping: checking a consumer's *help text* is not checking its
+*contract*. Running one stage on one real sample found both the false alarm and a
+true blocker in the same minute.
+
+`deepsea_mags_merged.tsv` staged to `$W` (gzip + base64, 66 chunks; md5
+`549575c1ee49e12e409ae93684adb681` verified on arrival, 4,085 lines, 20 columns).
