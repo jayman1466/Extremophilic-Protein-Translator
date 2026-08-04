@@ -1955,3 +1955,43 @@ which is required since the split is grouped on their merge.
 
 The preflight correctly skipped all four OGT fetches as already present
 (idempotent), so the resubmit cost no network work.
+
+**asm_meta failed instantly — dash has no `pipefail` (2026-08-04).** Job `1164424`
+exited 2 in under a second:
+
+```
+/var/spool/slurmd/job1164424/slurm_script: 4: set: Illegal option -o pipefail
+```
+
+`sbatch --wrap` bodies execute under `/bin/sh`, and on biotite `/bin/sh -> dash`,
+which does not implement `pipefail`. All **7** wrap bodies carried
+`set -uo pipefail`, so the chain would have died at whichever stage ran first —
+this was never partition-related.
+
+**A wrong fix I tried and discarded, recorded so it isn't retried.** Prefixing each
+wrap body with `#!/bin/bash` does *not* work: SLURM prepends its own `#!/bin/sh` to
+the generated `slurm_script`, so a shebang inside the body lands mid-file and is
+inert. The tell was in the original error — it reported `slurm_script` **line 4**,
+not line 1. Confirmed with real dash locally: `dash script_with_bash_shebang` still
+rejects `pipefail`, because a shebang only governs execution when the kernel execs
+the file directly. I had "verified" the shebang approach against local `/bin/sh`
+first, which proved nothing — macOS `/bin/sh` is bash-backed and accepts `pipefail`
+happily.
+
+Also considered and rejected: wrapping each body in `/bin/bash -c '...'`. The bodies
+contain heredocs and nested quotes, so an extra quoting layer is a correctness
+hazard for no benefit.
+
+**Adopted:** wrap bodies use plain `set -u`; `pipefail` stays in the driver script,
+which has a real shebang. Verified this costs nothing — audited every wrap body for
+pipes whose failure `pipefail` would have caught and found **none**: the `|`
+occurrences are Python bitwise-or and shell `||`, and every `wc -l <` is a redirect,
+not a pipe. The bodies are `&&` chains, and dash already stops on the first non-zero
+(`dash -c 'set -u; false && echo X'` exits 1).
+
+Resubmitted as `1164438` A0 → `1164439` A → `1164440` B → `1164441` C →
+{`1164442` D, `1164443` E} → `1164444` F on `memory`.
+
+**Practice change:** shell-portability bugs in `--wrap` bodies cannot be caught
+locally, because macOS `/bin/sh` is bash. Test wrap-body syntax with `dash -c`
+explicitly before submitting.
