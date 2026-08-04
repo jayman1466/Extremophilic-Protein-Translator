@@ -1142,7 +1142,7 @@ genus-matched. The psychrophile:thermophile gap is 16x on usable pairs, not 23x.
 ### SignalP requirement
 13,946 distinct genomes = 8,799 extremophiles + 5,147 outgroups
 (13,548 GTDB + 398 MAG-derived). `reuse_outgroups=True` saves **1,567 genomes**
-(6,715 -> 5,148 outgroups) at IDENTICAL pair counts, so reuse is free here rather
+(6,714 -> 5,147 outgroups) at IDENTICAL pair counts, so reuse is free here rather
 than a tradeoff. Thermophile is 59.8% of the bill — the direct cost of keeping it
 secreted. Accession list: results/ (signalp_required_accessions.tsv artifact).
 
