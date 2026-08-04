@@ -1,0 +1,7 @@
+phenotype,scope,usable_gp,pairs_lo,pairs_hi,basis,share_lo_pct,share_hi_pct
+thermophile,secreted,3413,58840,58840,measured end-to-end secreted rate,17.7,11.6
+halophile,secreted,2459,83286,83286,measured end-to-end secreted rate,25.0,16.4
+acidophile,secreted,766,6886,6886,measured end-to-end secreted rate,2.1,1.4
+alkaliphile,secreted,565,7689,7689,measured end-to-end secreted rate,2.3,1.5
+hyperthermophile,whole_proteome,234,1275,1275,measured secreted rate x probe whole/secreted multiplier,0.4,0.3
+psychrophile,whole_proteome,214,175052,350104,"UNMEASURED: 40-80% ortholog sharing x 2,045 proteome (rank_dist 1.16, tighter than halophile's 2.68 which measured 26%)",52.6,68.9

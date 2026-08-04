@@ -1,0 +1,4 @@
+tier,weight,evidence,mlm_included,classifier_included
+high,1.0,"two independent lines agree (metadata AND prediction), or measured OGT <=15C",True,True
+medium,0.5,"one line only (prediction-only, or measured OGT in the 15-20C band)",True,True
+low,0.1,"habitat keyword alone, uncorroborated; measured at 0.14-0.63% precision at the cold end",True,False

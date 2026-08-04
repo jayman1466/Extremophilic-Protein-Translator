@@ -1057,3 +1057,153 @@ no cluster access) — the real Slurm generation stays campus-side, so the porta
 the laccase results with no credential exposure. Deploy is a user-run step (needs
 authenticated `gcloud` pointed at the target GCP project); everything it ships is on
 `origin/main`.
+
+## 2026-08-04 — Retrain staging: scope decision, pair audit, class balance
+
+Retrain of the adapter and classifiers from scratch on the merged (GTDB + deep-sea)
+dataset. Phase 0 of the approved plan. Cluster stages are blocked on login-node
+instability; everything below is local and measured.
+
+### Merge (committed f1ca5fc)
+`results/combined_labels_r232_plus_deepsea.parquet` = 204,007 rows
+= 199,923 GTDB r232 species reps + 4,084 deep-sea MAGs. Idempotent re-run.
+
+MAG confidence tiers earned under the standard rubric:
+
+| class | high | medium | low |
+|---|--:|--:|--:|
+| thermophile | 590 | 272 | 1,191 |
+| hyperthermophile | 0 | 40 | 242 |
+| halophile | 0 | 81 | 0 |
+| acidophile | 0 | 34 | 0 |
+| alkaliphile | 0 | 5 | 0 |
+| psychrophile | 2 | 3 | 1,376 |
+
+Corrects an earlier claim in-session that the MAGs had no route above `low`:
+thermophile reaches `high` for 590, because vent metadata and hot GenomeSPOT
+predictions agree. The psychrophile row is the honest non-contribution — 1,417
+cold-flagged MAGs, 1,376 stuck at `low`.
+
+In-situ temperature was TESTED as a promotion route for cold and REJECTED, using
+the hot end as control on the same tag: ambient >=50 C (n=12) agrees with
+prediction 11/12 (92%); ambient <=15 C (n=201) agrees 2/201 (1.0%), mean
+over-prediction +23.5 C. Ambient corroborates where hot, is uninformative where
+cold.
+
+### Per-sample cap (committed f1ca5fc)
+MAG labels are SAMPLE-level: 4,084 MAGs from 858 samples, worst sample 38
+thermophile MAGs across 30 distinct families — passes a per-family cap while
+resting on ONE environmental observation. Added `max_per_sample` to
+`select_extremophiles` / `select_with_outgroups`, config value 5.
+
+Measured on the merged table, thermophile:
+
+| cap | MAG extremophiles | samples | worst sample | pairs |
+|---|--:|--:|--:|--:|
+| None | 423 | 112 | 21 | 4,994 |
+| 5 | 302 | 117 | 5 | 4,927 |
+| 2 | 192 | 120 | 2 | 4,868 |
+
+cap=5 cuts worst-case replication 4x for 1.3% of total pairs and RAISES the
+sample count (freed slots go to other samples). Blank `source_sample_id` means
+"isolate genome, its own sample" and is EXEMPT — pooling blanks would cap all of
+GTDB. Verified an exact no-op on the GTDB-only baseline.
+
+### Protein scope — DECIDED (committed 9028ef3)
+    secreted:       thermophile, halophile, acidophile, alkaliphile
+    whole_proteome: hyperthermophile, psychrophile
+
+Thermophile stays secreted. The large-cluster concern that held it open WAS
+resolved (measured prevalence spectrum: f_max = 108/158 = 0.684, ZERO clusters
+above f=0.70 over 158 genomes / 224,022 clusters; plus the class-stratified
+`max_pairs_per_cluster_class`), but the user chose to keep it secreted anyway:
+whole-proteome scope would add ~1M pairs and make thermophile ~90% of the
+dataset. Recorded in config as a decision with its evidence, not an open question.
+
+### CORRECTION: emitted vs usable genome pairs (committed 9028ef3)
+Every genome-pair count quoted earlier this session was rows EMITTED by
+`select_with_outgroups`, which include extremophiles where `find_outgroup`
+returned None at every rank. Those have no mesophile contrast and are not pairs.
+
+| class | emitted | usable | no outgroup | % lost |
+|---|--:|--:|--:|--:|
+| thermophile | 4,927 | 3,413 | 1,514 | 30.7 |
+| halophile | 2,935 | 2,459 | 476 | 16.2 |
+| acidophile | 799 | 766 | 33 | 4.1 |
+| alkaliphile | 581 | 565 | 16 | 2.8 |
+| hyperthermophile | 291 | 234 | 57 | 19.6 |
+| psychrophile | 214 | 214 | 0 | 0.0 |
+| **TOTAL** | **9,747** | **7,651** | **2,096** | **21.5** |
+
+Thermophile loses most: most extremophiles competing for a finite mesophile pool
+under used-once matching. Psychrophile loses none, consistent with being 87.4%
+genus-matched. The psychrophile:thermophile gap is 16x on usable pairs, not 23x.
+
+### SignalP requirement
+13,946 distinct genomes = 8,799 extremophiles + 5,147 outgroups
+(13,548 GTDB + 398 MAG-derived). `reuse_outgroups=True` saves **1,567 genomes**
+(6,715 -> 5,148 outgroups) at IDENTICAL pair counts, so reuse is free here rather
+than a tradeoff. Thermophile is 59.8% of the bill — the direct cost of keeping it
+secreted. Accession list: results/ (signalp_required_accessions.tsv artifact).
+
+### Class balance — the imbalance runs OPPOSITE to expectation
+Question asked was whether to downsample thermophile and halophile. Under the
+committed scope they are NOT the over-represented classes.
+
+| phenotype | scope | usable gp | protein pairs | share |
+|---|---|--:|--:|--:|
+| psychrophile | whole | 214 | 175k-350k | 53-69% |
+| halophile | secreted | 2,459 | 83,286 | 16-25% |
+| thermophile | secreted | 3,413 | 58,840 | 12-18% |
+| alkaliphile | secreted | 565 | 7,689 | 1.5-2.3% |
+| acidophile | secreted | 766 | 6,886 | 1.4-2.1% |
+| hyperthermophile | whole | 234 | 1,275 | 0.3-0.4% |
+
+Total 333k-508k protein pairs. Two decisions compound for psychrophile: whole
+proteomes (~9x more protein per genome) AND the tightest rank matching (1.16), so
+nearly every genome pair yields orthologs. Downsampling thermophile/halophile
+would make imbalance WORSE.
+
+Psychrophile yield is UNMEASURED. A rank-distance log-linear fit over the three
+measured classes (r = -0.97) extrapolated to rank distance 1.16 gave 6,152
+pairs/genome-pair — **6x more than a 2,045-protein proteome can contain**. The fit
+extrapolated outside its range [2.68, 4.46] on n=3 points; DISCARDED. Replaced
+with an ortholog-sharing bound (40-80% x 2,045), anchored on halophile's measured
+26% at a looser rank distance. The ~90 s cluster probe on the 214 pairs would
+replace this with a real number and should be run before training.
+
+### Decision: loss weighting, not downsampling
+Inverse-frequency loss weighting for psychrophile lands at 0.45-0.89 across the
+whole 53-69% uncertainty band — under 2x swing — so the classifier decision is
+ROBUST to the unmeasured yield and no downsampling is needed. Precedent:
+OGTFinder (2025) chose weighted RMSE over under/oversampling at 0.9% (n=58)
+psychrophiles of 6,401.
+
+The real risk is not thermophile over-representation but psychrophile genome
+REDUNDANCY in the MLM: 214 genome pairs supplying most tokens means the adapter
+sees ~400 genomes repeatedly. Admitting low-tier psychrophiles mitigates this 6x.
+Post-training check: per-class AUPRC on a balanced validation slice.
+
+### Rubric-rank sample weights
+| tier | weight | MLM | classifier |
+|---|--:|:--:|:--:|
+| high | 1.00 | yes | yes |
+| medium | 0.50 | yes | yes |
+| low | 0.10 | yes | **no** |
+
+`low` = 0.10 is anchored on the measured 0.14-0.63% precision of habitat-only
+cold evidence across four populations (n=1452/639/443/1417). A calibrated weight
+would be ~0.005, indistinguishable from exclusion; 0.10 keeps the sequence
+visible to the MLM for embedding structure without letting it drive the loss. It
+is a deliberate floor, not a likelihood ratio.
+
+Psychrophile genome counts by rule: MLM (h+m+l) 2,306; classifiers (h+m) 387.
+Admitting `low` buys the MLM 1,919 extra genomes, a 6x increase — the specific
+thing that decision purchases.
+
+### Blocked
+SignalP coverage diff, staging, protein collection, clustering, splits, and the
+combined gpu_h200 job all require biotite. The login node wedged on every SSH
+call for several hours (5+ force-cleared executions, two of them delegation
+dispatches that spawned zero children after 20+ min). Resume from the coverage
+diff; the accession list is already computed.
