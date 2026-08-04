@@ -56,6 +56,16 @@ def main() -> None:
                          "table is used as-is (historical behaviour).")
     ap.add_argument("--secreted-col", default="is_secreted",
                     help="boolean column marking secreted proteins (--protein-scope only)")
+    ap.add_argument("--cluster-map-named", action="append", default=None,
+                    metavar="NAME=PATH",
+                    help="named cluster map, repeatable (e.g. id50=clu50_cluster.tsv "
+                         "id40=clu40_cluster.tsv). Each becomes a cluster_<NAME> column; "
+                         "the SPLIT is grouped on the union-find merge of ALL of them, "
+                         "because clustering at a lower identity is NOT a coarsening of "
+                         "clustering at a higher one (measured: 4.09% of 50% clusters are "
+                         "split across 40% clusters), so grouping on any single map leaks. "
+                         "Pair derivation routes each scope to its own map via "
+                         "dataset.cluster_identity_by_scope.")
     ap.add_argument("--out", default="results/labeled_dataset.parquet")
     ap.add_argument("--fig", default="results/dataset_splits.png")
     args = ap.parse_args()
@@ -100,8 +110,41 @@ def main() -> None:
         print(f"[06] input {len(secreted):,} proteins, {n_sec:,} secreted "
               f"({100*n_sec/max(1,len(secreted)):.2f}%)")
 
+    # ---- named cluster maps -> per-scope thresholds + merged split grouping ----
+    cluster_maps = None
+    cluster_col_by_scope = None
+    if args.cluster_map_named:
+        cluster_maps = {}
+        for spec in args.cluster_map_named:
+            if "=" not in spec:
+                raise SystemExit(f"--cluster-map-named expects NAME=PATH, got {spec!r}")
+            name, path = spec.split("=", 1)
+            cm = pd.read_csv(path, sep="\t", header=None, names=["cluster", "member"])
+            cluster_maps[name] = cm
+            print(f"[06] cluster map {name}: {len(cm):,} rows, "
+                  f"{cm['cluster'].nunique():,} clusters")
+        # map each scope to its own cluster column using the measured thresholds
+        ident = cfg.get_path("dataset.cluster_identity_by_scope", {}) or {}
+        if ident:
+            by_id = {}
+            for nm in cluster_maps:
+                digits = "".join(ch for ch in nm if ch.isdigit())
+                if digits:
+                    by_id[float(f"0.{digits}") if not digits.startswith("0") else float(digits)] = nm
+            cluster_col_by_scope = {}
+            for scope, val in ident.items():
+                nm = by_id.get(float(val))
+                if nm is None:
+                    raise SystemExit(
+                        f"[06] scope {scope!r} wants identity {val} but no cluster map "
+                        f"matches it; supplied: {sorted(cluster_maps)} "
+                        f"(parsed as {sorted(by_id)})")
+                cluster_col_by_scope[scope] = f"cluster_{nm}"
+            print(f"[06] scope -> cluster column: {cluster_col_by_scope}")
+
     res = assemble_dataset(
         secreted, labels, cluster_map=cluster_map, pairs=pairs,
+        cluster_maps=cluster_maps, cluster_col_by_scope=cluster_col_by_scope,
         protein_id_col=args.protein_id_col, genome_col=args.genome_col,
         splits=cfg.get_path("dataset.splits", {"train": 0.8, "val": 0.1, "test": 0.1}),
         seed=cfg.get_path("dataset.split_seed", 1466),

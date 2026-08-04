@@ -82,9 +82,11 @@ n=0
 while IFS=$'\t' read -r CLS EXT OUT REST; do
   [ "$CLS" = "class" ] && continue
   [ -z "${EXT:-}" ] && continue
-  # strip GB_/RS_/CU_ prefix to match the FASTA-derived filenames
-  EB=$(echo "$EXT" | sed -E 's/^(GB_|RS_|CU_)//')
-  OB=$(echo "$OUT" | sed -E 's/^(GB_|RS_|CU_)//')
+  # Use the accession AS-IS: the pooled FASTA headers are {GENOME}~{PROTID} where
+  # GENOME retains its GB_/RS_/CU_ prefix, so the split files are GB_GCA_x.faa.
+  # (An earlier version stripped the prefix here and every proteome lookup missed,
+  # producing 0 RBH files and an all-nan report that still exited 0.)
+  EB="$EXT"; OB="$OUT"
   FE="$W/genomes/${EB}.faa"; FO="$W/genomes/${OB}.faa"
   OUTF="$W/rbh/${EB}__${OB}.tsv"
   if [ -s "$OUTF" ]; then n=$((n+1)); continue; fi
@@ -98,25 +100,32 @@ while IFS=$'\t' read -r CLS EXT OUT REST; do
   n=$((n+1))
 done < "$W/pairs.tsv"
 echo "RBH_PAIRS_DONE $n"
-echo "RBH_FILES $(ls $W/rbh 2>/dev/null | wc -l)"
+NRBH=$(ls "$W/rbh" 2>/dev/null | wc -l)
+echo "RBH_FILES $NRBH"
+# Guard: 0 RBH outputs means every proteome lookup missed. Without this the scorer
+# happily reports 0 pairs / nan precision and the job exits 0 -- a silent failure
+# indistinguishable from "the thresholds add nothing".
+if [ "$NRBH" -eq 0 ]; then
+  echo "FATAL: no RBH outputs produced -- proteome filename lookup is broken."
+  echo "  expected files like: $(ls $W/genomes | head -1)"
+  echo "  first pair wanted:   $(awk -F'\t' 'NR==2{print $2" / "$3}' $W/pairs.tsv)"
+  exit 3
+fi
 
 # ---------------------------------------------------------------- 4. score
 python3 - <<'PY'
 import os, csv, json, collections
 W = "/groups/cress/projects/jaymin/eptrans_scratch/rbh"
 
-def strip(a):
-    for p in ("GB_", "RS_", "CU_"):
-        if a.startswith(p):
-            return a[len(p):]
-    return a
-
+# Accessions are used AS-IS: FASTA headers are {GENOME}~{PROTID} with the
+# GB_/RS_/CU_ prefix retained, so both the split filenames and the protein ids
+# carry it. Stripping here would break the join in both directions.
 pairs = []
 with open(f"{W}/pairs.tsv") as fh:
     for row in csv.reader(fh, delimiter="\t"):
         if not row or row[0] == "class":
             continue
-        pairs.append((row[0], strip(row[1]), strip(row[2])))
+        pairs.append((row[0], row[1], row[2]))
 n_by_class = collections.Counter(c for c, _, _ in pairs)
 
 # RBH sets: (query_id, target_id) both directions, keyed by genome pair
