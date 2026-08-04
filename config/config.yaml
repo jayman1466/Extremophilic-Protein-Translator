@@ -66,7 +66,10 @@ biotite:
 # --------------------------------------------------------------------------
 conventions:
   # genome id keeps GTDB source prefix: GB_ (GenBank/GCA) or RS_ (RefSeq/GCF)
-  genome_prefixes: ["GB_", "RS_"]
+  # CU_ = custom (non-GTDB) genomes ingested into the parallel custom_genomes/
+  # tree. bare_accession() must strip it, or every accession-keyed join silently
+  # drops custom rows rather than erroring.
+  genome_prefixes: ["GB_", "RS_", "CU_"]
   # combined FASTA header: >{GENOME}~{PROTID}  e.g. >GB_GCA_000008085.1~AE017199.1_1
   faa_header_sep: "~"
   # protein_coords.tsv.gz columns:

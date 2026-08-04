@@ -45,7 +45,7 @@ METADATA_FIELDS = [
 GTDB_RANKS = ["domain", "phylum", "class", "order", "family", "genus", "species"]
 _RANK_PREFIX = {"d__": "domain", "p__": "phylum", "c__": "class", "o__": "order",
                 "f__": "family", "g__": "genus", "s__": "species"}
-_PREFIX_RE = re.compile(r"^(GB_|RS_)")
+_PREFIX_RE = re.compile(r"^(GB_|RS_|CU_)")
 
 
 # --------------------------------------------------------------------------
