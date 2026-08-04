@@ -194,6 +194,9 @@ def _derive_protein_pairs(
     max_pairs_per_cluster_class: int | None = None,
     seed: int = 1466,
     tiebreak: str = "auto",
+    scope_by_class: dict | None = None,
+    default_scope: str = "secreted",
+    secreted_col: str = "is_secreted",
 ) -> "pd.DataFrame":
     """Derive protein-level ortholog pairs = (cluster INTERSECT matched-genome-pair).
 
@@ -283,7 +286,51 @@ def _derive_protein_pairs(
         # Stable, reproducible, and honest about being arbitrary: lexicographic
         # on the tagged id. Does NOT pretend to approximate reciprocal-best.
         lab = lab.sort_values("tagged_id", ascending=True, kind="mergesort")
-    best = (lab.groupby(["_bare", group_col])["tagged_id"].first())
+    # ---- PER-CLASS PROTEIN SCOPE (config dataset.protein_scope) ----
+    # pH and salt classes train on the SECRETOME (the extracellular interface is
+    # where those adaptations act); temperature classes train on the WHOLE
+    # PROTEOME (thermostability is a global property of the fold). A single
+    # `labeled` table therefore cannot serve both: derivation must filter per
+    # class, not once up front.
+    #
+    # This matters because outgroups are REUSED across classes. One mesophile can
+    # be the outgroup for a halophile (secreted scope) and a hyperthermophile
+    # (whole scope) simultaneously, so eligibility is a property of the
+    # (protein, class) pair -- not of the protein. Filtering the input table once
+    # would either starve the secreted classes of their scope restriction or
+    # cap the temperature classes at the secretome.
+    # Scope filtering is OPT-IN: with scope_by_class=None the input table is taken
+    # as already being the intended scope (the historical contract -- stage 06 was
+    # fed a secreted-only table), so every caller that predates this parameter
+    # keeps its exact behaviour. Only an explicit scope map activates filtering.
+    if scope_by_class is None:
+        scope_by_class, scope_active = {}, False
+    else:
+        scope_by_class, scope_active = dict(scope_by_class), True
+
+    classes_present = (list(pd.Series(pairs["class"]).dropna().unique())
+                       if "class" in pairs else [None])
+    scopes_needed = (set(scope_by_class.get(c, default_scope) for c in classes_present)
+                     if scope_active else {"_asis"})
+    if scope_active and "secreted" in scopes_needed and secreted_col not in lab.columns:
+        need = sorted(c for c in classes_present
+                      if scope_by_class.get(c, default_scope) == "secreted")
+        raise ValueError(
+            f"protein scope 'secreted' requested for {need} but the labeled table has no "
+            f"{secreted_col!r} column. Pass a whole-proteome table carrying that boolean, "
+            f"or set those classes to 'whole_proteome'. Refusing to emit whole-proteome "
+            f"pairs for a secreted-scope class.")
+
+    # One representative map per SCOPE, built once and reused across classes.
+    best_by_scope = {}
+    for sc in scopes_needed:
+        sub = lab
+        if sc == "secreted":
+            sub = lab[lab[secreted_col].fillna(False).astype(bool)]
+        best_by_scope[sc] = sub.groupby(["_bare", group_col])["tagged_id"].first()
+
+    def _scope_of(cls):
+        return scope_by_class.get(cls, default_scope) if scope_active else "_asis"
 
     rows = []
     for cls, e_raw, m_raw in zip(pairs.get("class", [None] * len(pairs)),
@@ -291,6 +338,8 @@ def _derive_protein_pairs(
         e, m = bare_accession(e_raw), bare_accession(m_raw)
         if not e or not m:
             continue
+        sc = _scope_of(cls)
+        best = best_by_scope[sc]
         try:
             e_clusters = set(best.loc[e].index)
             m_clusters = set(best.loc[m].index)
@@ -298,9 +347,10 @@ def _derive_protein_pairs(
             continue
         for cl in (e_clusters & m_clusters):
             rows.append({"class": cls, "cluster": cl, "ext_acc": e, "outgroup_acc": m,
-                         "ext_id": best.loc[(e, cl)], "outgroup_id": best.loc[(m, cl)]})
+                         "ext_id": best.loc[(e, cl)], "outgroup_id": best.loc[(m, cl)],
+                         "scope": sc})
     out = pd.DataFrame(rows, columns=["class", "cluster", "ext_acc", "outgroup_acc",
-                                      "ext_id", "outgroup_id"])
+                                      "ext_id", "outgroup_id", "scope"])
 
     k = max_pairs_per_cluster_class
     if k is not None and len(out):
@@ -329,6 +379,9 @@ def assemble_dataset(
     pairs: pd.DataFrame | None = None,
     max_pairs_per_cluster_class: int | None = None,
     tiebreak: str = "auto",
+    scope_by_class: dict | None = None,
+    default_scope: str = "secreted",
+    secreted_col: str = "is_secreted",
 ) -> SplitResult:
     """Full assembly: label + leakage-aware split.
 
@@ -381,7 +434,8 @@ def assemble_dataset(
             protein_pairs = _derive_protein_pairs(
                 labeled, group_col, genome_col, pairs,
                 max_pairs_per_cluster_class=max_pairs_per_cluster_class, seed=seed,
-                tiebreak=tiebreak)
+                tiebreak=tiebreak, scope_by_class=scope_by_class,
+                default_scope=default_scope, secreted_col=secreted_col)
 
     out = stratified_group_split(labeled, group_col=split_group_col, label_col="label",
                                  splits=splits, seed=seed)

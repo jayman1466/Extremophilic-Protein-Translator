@@ -48,6 +48,14 @@ def main() -> None:
     ap.add_argument("--protein-id-col", default="protein_id")
     ap.add_argument("--genome-col", default="genome")
     ap.add_argument("--multi-label", action="store_true")
+    ap.add_argument("--protein-scope", action="store_true",
+                    help="apply config dataset.protein_scope per class: secreted-scope "
+                         "classes draw pairs only from secreted proteins, whole_proteome "
+                         "classes from all. Requires --secreted to be a whole-proteome "
+                         "table with an is_secreted column. Without this flag the input "
+                         "table is used as-is (historical behaviour).")
+    ap.add_argument("--secreted-col", default="is_secreted",
+                    help="boolean column marking secreted proteins (--protein-scope only)")
     ap.add_argument("--out", default="results/labeled_dataset.parquet")
     ap.add_argument("--fig", default="results/dataset_splits.png")
     args = ap.parse_args()
@@ -67,12 +75,42 @@ def main() -> None:
     if args.pairs:
         pairs = pd.read_csv(args.pairs, sep="\t", dtype=str)
 
+    # ---- per-class protein scope (config dataset.protein_scope) ----
+    # Activated only when --protein-scope is given, so the historical
+    # secreted-table-in / secreted-pairs-out behaviour is unchanged by default.
+    # Passing the flag asserts that --secreted is a WHOLE-PROTEOME table carrying
+    # an is_secreted boolean; the derivation then filters per class.
+    scope_by_class = None
+    default_scope = "secreted"
+    if args.protein_scope:
+        ps = cfg.get_path("dataset.protein_scope", {}) or {}
+        scope_by_class = dict(ps.get("by_phenotype", {}) or {})
+        default_scope = ps.get("default", "secreted")
+        if not scope_by_class:
+            raise SystemExit("--protein-scope given but config dataset.protein_scope."
+                             "by_phenotype is empty; nothing to apply")
+        print(f"[06] protein scope active: default={default_scope} "
+              f"by_phenotype={scope_by_class}")
+        if args.secreted_col not in secreted.columns:
+            raise SystemExit(
+                f"--protein-scope needs a {args.secreted_col!r} column in --secreted "
+                f"(a whole-proteome table flagging which proteins are secreted); "
+                f"columns present: {list(secreted.columns)[:12]}")
+        n_sec = int(secreted[args.secreted_col].fillna(False).astype(bool).sum())
+        print(f"[06] input {len(secreted):,} proteins, {n_sec:,} secreted "
+              f"({100*n_sec/max(1,len(secreted)):.2f}%)")
+
     res = assemble_dataset(
         secreted, labels, cluster_map=cluster_map, pairs=pairs,
         protein_id_col=args.protein_id_col, genome_col=args.genome_col,
         splits=cfg.get_path("dataset.splits", {"train": 0.8, "val": 0.1, "test": 0.1}),
         seed=cfg.get_path("dataset.split_seed", 1466),
         multi_label=args.multi_label,
+        max_pairs_per_cluster_class=cfg.get_path(
+            "dataset.max_pairs_per_cluster_class", None),
+        scope_by_class=scope_by_class,
+        default_scope=default_scope,
+        secreted_col=args.secreted_col,
     )
 
     out = Path(args.out)
