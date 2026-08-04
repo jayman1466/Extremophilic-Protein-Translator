@@ -1620,3 +1620,61 @@ settles it.
 counts are **unchanged at 4,096,172** — they derive from genome counts, not pair
 rates, so the MLM training set is unaffected. Only the classifier's auxiliary
 pair-margin term sees this.
+
+### Identity-threshold sweep — the low hyperthermophile yield is a clustering artifact (job 1164165)
+
+`12_identity_sweep_probe.sbatch`, 8:09 wall on `gpu`. Re-clustered the same
+158-genome probe proteome (323,178 proteins) at 30/40/50% identity, changing only
+`--min-seq-id`; all other flags byte-identical to the original probe.
+
+**Positive control passed exactly.** id50 reproduced 43.2 / 334.3 / 385.3 / 440.4 /
+540.2 pairs/gp — the published probe values to the decimal. The harness is sound,
+so the other arms are interpretable.
+
+| phenotype | genus+family | 50% | 40% | 30% | fold (30 vs 50) |
+|---|--:|--:|--:|--:|--:|
+| alkaliphile | 45.7% | 440.4 | 521.3 | 571.7 | 1.30× |
+| halophile | 53.1% | 540.2 | 698.6 | 784.0 | 1.45× |
+| acidophile | 44.8% | 385.3 | 502.8 | 574.9 | 1.49× |
+| thermophile | 27.6% | 334.3 | 473.3 | 568.9 | 1.70× |
+| **hyperthermophile** | **5.6%** | **43.2** | **122.8** | **210.5** | **4.87×** |
+
+**Prediction recorded before the run: hyperthermophile 2–5×, genus/family classes
+1.2–1.5×. Measured: 4.87× vs 1.30–1.70×.** The differential is **3.28× beyond the
+global lift**, so this is a targeted fix, not a global sensitivity knob — the
+distinction the all-five-classes control was built to decide.
+
+Gain is inversely correlated with phylogenetic closeness (Pearson r = **−0.904**,
+p = 0.035; Spearman rho = −0.900, n = 5): the more distantly a class is matched,
+the more it recovers. That is the mechanism confirmed directly — lowering identity
+recovers ortholog pairs that cross-phylum divergence had split into separate
+clusters.
+
+**Sensitivity control settles the confound.** id30 at default sensitivity 210.5
+vs id30 `-s 7.5` 220.7 pairs/gp, only +4.8%. So the **identity threshold was the
+binding constraint, not the prefilter** — had the gap been large, the result would
+have been an artifact of mmseqs missing remote homologs rather than evidence about
+identity.
+
+**Specificity cost, the reason not to simply adopt 30% everywhere:**
+
+| run | clusters | singleton % | max prevalence | total pairs |
+|---|--:|--:|--:|--:|
+| id50 | 224,022 | 83.7% | 0.684 | 25,580 |
+| id40 | 176,087 | 78.4% | 0.848 | 34,130 |
+| id30 | 130,712 | 74.4% | 0.867 | 39,925 |
+| id30 -s 7.5 | 126,564 | 73.6% | 0.930 | 40,559 |
+
+Clusters fall 41.7% as families merge, and max prevalence rises 0.684 → 0.867
+(0.930 at high sensitivity), approaching one cluster per universal family. The
+merging is the mechanism, but it is also the hazard: at 30% identity paralogs and
+remote homologs can land in one cluster, and `_derive_protein_pairs` would then
+emit a **non-orthologous** pair. This sweep measures yield, **not** pair
+correctness — nothing here validates that the extra pairs are true orthologs.
+
+**Not yet decided.** 40% is the conservative option (2.84× for hyperthermophile at
+0.848 max prevalence); 30% maximises yield. Before adopting either, the added pairs
+need an orthology check — the natural one is reciprocal best hit on a sample of
+hyperthermophile pairs unique to the lower threshold, which also retires the
+`cs_prob` tiebreak stopgap. Recommend deciding after that check, and applying the
+lower threshold ONLY to whole-proteome classes.
