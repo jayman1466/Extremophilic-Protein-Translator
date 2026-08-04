@@ -1404,3 +1404,51 @@ thermophile's apparent growth: removing that cap accounts for 94.9% of the
 560 → 3,413 change, and the deep-sea MAGs only 3.0%.
 
 Table: `results/final_dataset_composition.csv`
+
+### Outgroup match rank by phenotype (locked tiers)
+
+![Genome pairs matched at each taxonomic rank, by phenotype](/Users/jaymin/.claude-science/orgs/a6bad67d-13d2-4ca5-bb85-8556ca2e897d/artifacts/proj_b583785f018b/54650e03-52ca-4b0c-9bb6-ffc1e34eb672/v4dc04111_matched_rank_by_phenotype.png)
+
+Measured on the 5,355 usable pairs from the selection above (`matched_rank`
+column; unusable rows are excluded, since a NULL rank is the absence of a match,
+not a rank level).
+
+| phenotype | n | genus | family | order | class | phylum | genus+family |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| psychrophile | 214 | **87.4%** | 9.8% | 2.3% | 0.5% | 0.0% | **97.2%** |
+| halophile | 2,459 | 14.4% | 38.7% | 22.9% | 13.7% | 10.3% | 53.1% |
+| alkaliphile | 565 | 11.9% | 33.8% | 31.3% | 19.1% | 3.9% | 45.7% |
+| acidophile | 766 | 15.3% | 29.5% | 21.8% | 22.1% | 11.4% | 44.8% |
+| thermophile | 1,117 | 2.1% | 25.4% | 24.1% | 24.1% | 24.3% | 27.6% |
+| hyperthermophile | 234 | 1.7% | 3.8% | 6.0% | 23.5% | **65.0%** | **5.6%** |
+
+**Phylogenetic control varies 17.5× across phenotypes** (97.2% vs 5.6%
+genus-or-family). This is the confound-severity ranking for the whole dataset,
+and it runs in the same direction as the emitted→usable drop: classes whose
+extremophily is clade-wide both lose more candidates AND match their survivors
+more distantly.
+
+- **Hyperthermophile is the worst case: 65% of its pairs are phylum-level
+  matches.** A phylum-level outgroup shares only the deepest split, so any
+  classifier trained on these pairs can reach high AUPRC by learning clade
+  identity rather than thermostability. Its 0.898 AUPRC in the production run
+  should be read with this in mind — the pair-AUC 0.924 is the more informative
+  number precisely because it is within-pair.
+- **Psychrophile is the best-controlled class in the dataset** at 87.4% genus.
+  Same cause as its 0% unusable rate: the measured-OGT rubric admits only
+  cultivated species, which sit in densely-sequenced lineages alongside
+  mesophilic congeners. An unintended benefit of a rubric chosen for a different
+  reason (GenomeSPOT's cold miscalibration).
+- **Thermophile's 2.1% genus** is the cost of high-only: the tier restricts it to
+  genomes where keyword and prediction agree, and those concentrate in
+  thermophilic clades with no mesophilic congener. High+medium would spread it
+  across more mesophile-adjacent lineages — a real argument against the lock that
+  the AUPRC evidence outweighs, but which should be stated.
+- pH classes sit in the middle (45%) because acidophily and alkaliphily are
+  scattered through otherwise-mesophilic lineages.
+
+**Consequence for evaluation:** a clade-held-out split is not optional for
+hyperthermophile and thermophile. Reporting per-phenotype AUPRC without it will
+overstate both, and the overstatement is largest exactly where n is smallest.
+
+Table: `results/matched_rank_by_phenotype.csv`

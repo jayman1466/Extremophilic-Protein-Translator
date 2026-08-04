@@ -1,0 +1,7 @@
+phenotype,n_genome_pairs,n_genus,n_family,n_order,n_class,n_phylum,pct_genus,pct_family,pct_order,pct_class,pct_phylum,pct_genus_family
+halophile,2459,355,951,563,336,254,14.44,38.67,22.9,13.66,10.33,53.11
+hyperthermophile,234,4,9,14,55,152,1.71,3.85,5.98,23.5,64.96,5.56
+psychrophile,214,187,21,5,1,0,87.38,9.81,2.34,0.47,0.0,97.2
+thermophile,1117,24,284,269,269,271,2.15,25.43,24.08,24.08,24.26,27.57
+acidophile,766,117,226,167,169,87,15.27,29.5,21.8,22.06,11.36,44.78
+alkaliphile,565,67,191,177,108,22,11.86,33.81,31.33,19.12,3.89,45.66
