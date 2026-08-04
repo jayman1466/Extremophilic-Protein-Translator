@@ -1472,10 +1472,15 @@ resolve** through the same `$ROOT/$DOM/${ACC}_protein.faa.gz` lookup the GTDB
 path uses (UNRESOLVED_COUNT 0); headers are bare `>{PROTID}` as the convention
 requires (e.g. `>10E_k119_382340_1`).
 
-Runtime note: 14.9 s/genome, not the ~1 s I projected from the GTDB-Tk timing
-run's Prodigal figure (1.74 s/genome). That figure was Prodigal alone; this loop
-also gzips contigs and the proteome to the VAST mount per genome. Use ~15
-s/genome for future custom-genome ingests.
+Runtime note: **8.87 s/genome** end-to-end (2,927 s / 330), not the ~1 s I
+projected from the GTDB-Tk timing run's Prodigal figure (1.74 s/genome). That
+figure was Prodigal alone; this loop also gzips contigs and the proteome to the
+VAST mount per genome. **Use ~9 s/genome for future custom-genome ingests.**
+
+I first recorded 14.9 s/genome, taken from a mid-run partial (45 genomes in 11.2
+min) while the job was still executing. The completed job ran 1.7x faster than
+that partial implied -- early genomes pay VAST metadata and page-cache warmup that
+amortises away. Do not size a job from its first few percent.
 
 ### SignalP on the 2,582 uncovered genomes — submitted
 
@@ -1483,7 +1488,14 @@ Requirement recomputed under the locked tiers: **9,286 genomes** (5,726
 extremophile + 3,560 outgroup, zero overlap) — down from 13,946 before the
 thermophile high-only lock. 6,641 already covered by the r232 production run plus
 completed chunks of the still-running `05b` fill array (1152569, 41/190 chunks
-done), leaving **2,582 new** (2,262 GTDB + 320 custom).
+done). **6,704 of the 9,286 were already covered, leaving 2,582 new** (2,262 GTDB
++ 320 custom); 9,286 - 6,704 = 2,582 reconciles.
+
+An earlier note in this session put the covered count at 6,641, which no longer
+reconciles (9,286 - 6,641 = 2,645). That figure was measured before the `05b`
+array advanced further; total coverage rose to 10,444 genomes, of which 6,704
+intersect this requirement. 6,704 is the number consistent with the 2,582 actually
+staged, confirmed by the 8 chunk logs summing to 2,582 genomes.
 
 Split 8 ways at CHUNK_SIZE=323, per the partition capacity measured immediately
 before submit (`sinfo -p gpu,gpu_h200,memory -o '%P %D %C %t'`): gpu
