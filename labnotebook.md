@@ -1740,3 +1740,63 @@ retrain: the coverage diff above is scoped to `req2.txt`, and the union already
 satisfies it with TRUE_GAP 0. The 4 timed-out chunks need resubmission only for the
 full-GTDB secretome goal, and should be split finer — 3 days was insufficient at
 their chunk size.
+
+### RBH orthology check — the yield gain is REAL, and cleanest where it matters (job 1164334)
+
+`13_rbh_orthology_check.sbatch`, 11:09 wall on `gpu`, 73/73 genome pairs scored.
+Ground truth: `mmseqs easy-rbh` (native reciprocal best hit) between each matched
+pair's two proteomes. A derived pair counts CORRECT when the two proteins are each
+other's reciprocal best hit.
+
+**Clustered at `--cov-mode 0`, the production setting** (`07_cluster_secreted.sh`),
+not the `--cov-mode 1` the probe and sweep used. That re-clustering mattered:
+bidirectional coverage is STRICTER, giving more clusters at every threshold
+(239,614 / 196,458 / 155,720 vs the sweep's 224,022 / 176,087 / 130,712) and a
+smaller merge from 50→30% (−35.0% vs −41.7%). So the sweep's 4.87× was an upper
+bound; in the production regime the hyperthermophile gain is **4.55×**.
+
+**Precision on ALL derived pairs:**
+
+| threshold | acido | alkali | halo | thermo | hyperthermo |
+|---|--:|--:|--:|--:|--:|
+| 50% | 97.32 | 97.93 | 97.68 | 96.55 | 96.48 |
+| 40% | 93.74 | 95.55 | 94.41 | 94.09 | 93.70 |
+| 30% | 87.51 | 90.80 | 89.02 | 88.57 | 88.97 |
+
+**Precision on pairs UNIQUE to each lower threshold — the actual decision:**
+
+| threshold | acido | alkali | halo | thermo | **hyperthermo** |
+|---|--:|--:|--:|--:|--:|
+| 40% | 84.41 | 86.46 | 85.48 | 88.89 | **91.99** |
+| 30% | 74.70 | 77.87 | 76.99 | 80.52 | **86.90** |
+
+**THE RESULT INVERTS MY EXPECTATION.** I predicted the large hyperthermophile gain
+would be spurious merging — big yield jump = paralogs co-clustering. It is the
+opposite: hyperthermophile has both the largest gain (4.55×) AND the highest
+added-pair precision at both thresholds (91.99% / 86.90% vs 74.70–88.89% for the
+others). Mechanistically consistent with the phylogenetic-distance explanation:
+its pairs are matched at class/phylum, so genuine orthologs simply fall below 50%
+identity and are recovered by lowering the threshold, whereas the closely-matched
+classes already captured their orthologs at 50% and mostly add marginal hits.
+
+**Expected true-pair yield** (pairs × precision, all five classes):
+50% → 22,120 true / 594 non-RBH; 40% → 29,581 / 1,770; 30% → 33,213 / 4,142.
+Every class gains more true pairs than false ones even at 30%.
+
+**Baseline representative choice validated as a side effect.** At 50% the derived
+pairs are 96.5–97.9% RBH-consistent, so the lexicographic/`cs_prob` representative
+rule is picking the right protein ~97% of the time. That retires the "is the
+tiebreak arbitrary?" worry with a number.
+
+**Caveat that bounds this whole result.** RBH is a strong orthology proxy, not
+ground truth: a non-RBH pair may still be homologous (RBH breaks on recent
+duplications and fragmented MAG genes), and RBH itself can pair out-paralogs. So
+"87% precision" means "87% agree with RBH", not "13% are wrong". The direction and
+the between-class ordering are robust; the absolute level is approximate.
+
+**DECISION: 40% for whole-proteome classes, 50% for secreted classes.** At 40%
+hyperthermophile gets 2.73× the pairs at 91.99% added-pair precision — a better
+precision than the other four classes achieve at 40% and comparable to their 50%
+baseline. 30% buys another 1.7× but drops added-pair precision to 86.90% and, more
+importantly, pushes max cluster prevalence toward one-cluster-per-family. 40% is
+the point where the sparse class gains most per unit of precision lost.
