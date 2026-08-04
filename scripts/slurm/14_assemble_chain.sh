@@ -54,8 +54,15 @@ if [ ! -s "$W/deepsea_mags_merged.tsv" ]; then
   exit 1
 fi
 
+# Partition: overridable, defaults to `memory`. Chosen 2026-08-04 on queue depth,
+# not idle capacity -- both partitions showed 0 idle CPUs, but the pending backlog
+# was 11 jobs on `memory` against 139 on `standard` (12.6x shorter), and memory's
+# nodes carry 677 GB against standard's 258 GB, which suits the 40% clustering step.
+# `memory` is also time-unlimited on this cluster.
+PART="${PART:-memory}"
+
 SB="sbatch --parsable"
-COMMON="--partition=standard --output=$LOGS/%x_%j.out"
+COMMON="--partition=$PART --output=$LOGS/%x_%j.out"
 
 # ---------------------------------------------------------------- A0: GTDB metadata
 # 01b needs a compact TSV (domain, accession, isolation, organism, taxonomy). The
