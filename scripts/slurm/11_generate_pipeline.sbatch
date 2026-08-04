@@ -18,6 +18,16 @@
 #   GEN_GIBBS     gibbs iters per design (default 24)
 #   GEN_MAX_MUT_FRAC  hard mutation budget, fraction of length (default 0.25)
 #   GEN_RMSD_CAP  hard full active-site CA-RMSD cap in A (default 2.0)
+#   GEN_MH_T0     initial Metropolis temperature (default 0.05; 0 = strict
+#                 hill-climbing, i.e. the pre-annealing behaviour)
+#   GEN_MH_T1     final Metropolis temperature (default 0.005)
+#   GEN_COUPLING  mask unit mode none|contact|span|both (default both, which is
+#                 what the production MLM adapter was TRAINED with -- changing it
+#                 reintroduces a train/inference masking mismatch)
+#   GEN_REFOLD_RECOVER        mask_rate recovery factor after sustained refold
+#                 success (default 1.25; 1.0 disables)
+#   GEN_REFOLD_RECOVER_AFTER  consecutive passing checkpoints before recovery
+#                 (default 2)
 #   GEN_CORE_RMSD_CAP  hard catalytic-core CA-RMSD cap in A (default 1.5)
 set -euo pipefail
 
@@ -36,6 +46,11 @@ RMSD_CAP=${GEN_RMSD_CAP:-2.0}            # hard full active-site CA-RMSD cap (A)
 CORE_RMSD_CAP=${GEN_CORE_RMSD_CAP:-1.5}  # hard catalytic-core CA-RMSD cap (A)
 REFOLD=${GEN_REFOLD:-1}                  # in-loop periodic ESMFold refold + rollback (1=on)
 REFOLD_EVERY=${GEN_REFOLD_EVERY:-4}     # refold every N Gibbs passes
+MH_T0=${GEN_MH_T0:-0.05}                 # Metropolis start temp (0 = hill-climbing)
+MH_T1=${GEN_MH_T1:-0.005}                # Metropolis end temp (geometric anneal)
+COUPLING=${GEN_COUPLING:-both}           # mask units; 'both' matches the trained adapter
+REFOLD_RECOVER=${GEN_REFOLD_RECOVER:-1.25}          # mask_rate recovery factor
+REFOLD_RECOVER_AFTER=${GEN_REFOLD_RECOVER_AFTER:-2} # passes before recovery
 STRUCT=$JOBDIR/structures
 mkdir -p "$STRUCT"
 cd "$JOBDIR"
@@ -112,6 +127,10 @@ for PH in $PHENOS; do
     --transfer-json "$JOBDIR/active_site_transfer.json" \
     --backbone-size 3B --n-designs "$NDES" --gibbs-iters "$GIBBS" \
     --max-mut-frac "$MAX_MUT_FRAC" $REFOLD_ARGS \
+    --mh-t0 "$MH_T0" --mh-t1 "$MH_T1" \
+    --coupling-mode "$COUPLING" \
+    --refold-recover "$REFOLD_RECOVER" \
+    --refold-recover-after "$REFOLD_RECOVER_AFTER" \
     --device cuda --workdir "$JOBDIR/_work_${PH}" --seed 1466
   CAND_LIST+=("$JOBDIR/candidates_${PH}.json")
 done

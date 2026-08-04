@@ -12,7 +12,8 @@ Chains, for ONE input enzyme + ONE phenotype:
                           Masking uses COUPLED units (contact pairs + spans) to
                           match the trained adapter, whose production run used
                           coupling_mode='both'; the WT ESM-2 contact map is
-                          computed ONCE per job (~1% wall overhead) since the
+                          computed ONCE per job (1 extra forward pass against 144
+                          at defaults, ~1.4% wall -- estimated, not benchmarked) since the
                           sequence is fixed and the RMSD gate keeps the fold, so
                           the coupling topology is invariant along a trajectory.
   Stage 5  scoring       per-phenotype cached head (directional signal) +
@@ -462,8 +463,10 @@ def main():
     # Cost is one 3B contact-head forward pass for the whole job, not per pass:
     # the WT sequence is fixed and substitutions do not move the backbone enough
     # to invalidate the coupling topology (the RMSD gate enforces exactly that).
-    # Marginal runtime is therefore ~1 extra forward pass against
-    # n_designs * gibbs_iters * (1 fill + 1 score) -- under 1% at defaults.
+    # Marginal runtime is therefore 1 extra forward pass against
+    # n_designs * gibbs_iters * (1 fill + 1 score) = 144 at defaults, i.e. ~1.4%
+    # of wall. NOTE: estimated from the forward-pass count, NOT benchmarked; the
+    # first real run should report the measured contact-pass seconds below.
     contact_pairs = None
     spans = None
     if args.coupling_mode in ("contact", "both"):
