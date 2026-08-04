@@ -1274,3 +1274,114 @@ inverse-frequency loss weighting as the approach.
 Psychrophile remains the only unmeasured class (131k-350k pairs; its protein count
 875,260 is firm since it derives from genome count, not pair yield). The ~90 s
 cluster probe on its 214 genome pairs would settle the pair range.
+
+## Final dataset composition — locked tiers (2026-08-04)
+
+Selection parameters, all explicit (the `max_total_per_class` default of 100 in
+`04_select_genomes.py` is a **pilot** value and is deliberately NOT used):
+
+```
+max_per_lineage      = 5      (rank: family)
+max_total_per_class  = none   (uncapped — see note below)
+max_per_sample       = 5      (sample_col: source_sample_id, caps deep-sea MAGs per metagenome)
+outgroup_match_rank  = genus, falling back to family/order/class
+reuse_outgroups      = True   (a mesophile may serve several phenotypes)
+seed                 = 1466
+```
+
+### Per-phenotype inclusion criteria
+
+| phenotype | protein scope | confidence tier | evidence route |
+|---|---|---|---|
+| halophile | secreted | high + medium | keyword + GenomeSPOT prediction |
+| hyperthermophile | whole proteome | high + medium | keyword + GenomeSPOT prediction |
+| psychrophile | whole proteome | high + medium | **measured OGT; GenomeSPOT excluded** |
+| thermophile | secreted | **high only** | keyword + GenomeSPOT prediction |
+| acidophile | secreted | high + medium | keyword + GenomeSPOT prediction |
+| alkaliphile | secreted | high + medium | keyword + GenomeSPOT prediction |
+
+**Two distinct rubrics are in play.** Quoted from source, not paraphrased:
+
+*GenomeSPOT rubric* (`eptrans.binning.combine_label`, all classes except psychrophile):
+
+| tier | rule |
+|---|---|
+| high | metadata keyword AND prediction agree on ≥1 class |
+| medium | prediction only |
+| low | metadata only, or metadata/prediction conflict |
+| none | no evidence |
+
+*Measured-OGT rubric* (`scripts/03b_merge_measured_ogt.py:classify`, psychrophile
+only — docstring opens "GenomeSPOT is never consulted"). Thresholds
+`STRICT_C=15.0`, `LENIENT_C=20.0`, `TOLERANT_C=25.0`, `TMIN_FREEZING_C=0.0`;
+`CONVENTIONAL_TEMPS={25,28,30,37}` are dropped from all four OGT sources as
+laboratory-convention artifacts:
+
+| tier | rule |
+|---|---|
+| high | OGT ≤15 °C with cold habitat OR ≥2 independent sources; or OGT ≤20 °C with cold habitat or Tmin ≤0 °C |
+| medium | OGT ≤15 °C single-source; OGT ≤20 °C uncorroborated; OGT <25 °C with cold habitat |
+| low | cold habitat only, no measurement |
+| none | OGT ≥25 °C — **overrides** cold-sounding metadata (61 r232 genomes) |
+
+Tmin never admits a genome alone; it only promotes medium→high. OGT pooled from
+four sources (TEMPURA, Madin, Toki, OGTFinder-optima).
+
+### Genome pairs and protein counts
+
+| phenotype | scope | tier | emitted | **usable** | proteins | share | protein pairs |
+|---|---|---|--:|--:|--:|--:|--:|
+| halophile | secreted | high+med | 2,935 | **2,459** | 1,134,464 | 27.7% | 83,286 |
+| hyperthermophile | whole | high+med | 291 | **234** | 957,060 | 23.4% | 10,108 |
+| psychrophile | whole | high+med | 214 | **214** | 875,260 | 21.4% | 131,396–350,104 |
+| thermophile | secreted | high only | 1,555 | **1,117** | 515,330 | 12.6% | 19,257 |
+| acidophile | secreted | high+med | 799 | **766** | 353,395 | 8.6% | 6,886 |
+| alkaliphile | secreted | high+med | 581 | **565** | 260,663 | 6.4% | 7,689 |
+| **TOTAL** | | | 6,375 | **5,355** | **4,096,172** | | **258,622–477,330** |
+
+**emitted vs usable:** `select_with_outgroups` emits a row per selected
+extremophile even when no taxonomy-matched outgroup exists at any rank. Only rows
+with a non-null `outgroup_acc` can form a pair. 16.0% of emitted rows are unusable
+overall; psychrophile alone is 0% (every one matched).
+
+**Provenance of each column.** Measured: emitted, usable, and every genome count —
+from the selection run above. Derived, not measured: proteins = usable × 2 genomes
+× 2,045 proteins/genome, × 11.28% for secreted scope (SignalP secreted fraction,
+1,985,508/17,603,649 over 7,268 genomes). Protein-pair rates by source —
+secreted classes use production end-to-end rates (halophile 33.87, thermophile
+17.24, alkaliphile 13.61, acidophile 8.99 pairs/gp); hyperthermophile uses the
+prevalence probe's **direct** whole-proteome measurement of 43.2 pairs/gp over 15
+genome pairs. Do NOT chain the secreted rate with a whole/secreted ratio — that
+double-counts cluster/cap/split losses and understated hyperthermophile 7.9×
+(5.5 vs 43.2 pairs/gp).
+
+**Psychrophile pairs are the one unmeasured cell**, bounded 131k–350k by assuming
+30–80% ortholog sharing across its 214 genome pairs. Its protein count (875,260)
+is firm, since it derives from genome count. A ~90 s mmseqs probe on those pairs
+would settle it; the range affects only the classifier's auxiliary margin term,
+not the MLM training set.
+
+### What the tier lock changed
+
+Thermophile high-only (vs high+medium) drops it 3,413 → 1,117 usable pairs (−67%)
+and from 30.5% → 12.6% of proteins, moving it from largest class to fourth.
+Halophile keeps high+medium and becomes largest at 27.7%. Max/min protein spread
+is 4.4×, down from 6.0×.
+
+Justification, from the production run's own record: thermophile there was
+**already high-only** (1,171 selected, 0 medium) and scored AUPRC 0.862 /
+pair-AUC 0.905 — and high-only now yields 1,117 usable pairs vs that run's 560,
+i.e. **1.99× more data behind a known-good result**. Halophile in that run was
+high+medium (421 high + 1,785 medium) at AUPRC 0.818 / pair-AUC 0.748; there is
+**no high-only halophile measurement anywhere**, and high-only now would give 498
+pairs vs the 1,472 that produced 0.818 (0.34×) with family breadth collapsing
+1,114 → 233. Caveat: the rubric has changed since that run (deep-sea keywords,
+measured-OGT psychrophiles, MAGs), so "high" then and now are not identical
+populations — the comparison is directionally sound, not exact.
+
+`max_total_per_class` uncapped is a deliberate change from the config default of
+100, recorded here because its silent use earlier obscured the source of
+thermophile's apparent growth: removing that cap accounts for 94.9% of the
+560 → 3,413 change, and the deep-sea MAGs only 3.0%.
+
+Table: `results/final_dataset_composition.csv`
