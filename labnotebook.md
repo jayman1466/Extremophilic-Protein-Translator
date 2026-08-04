@@ -2118,3 +2118,61 @@ exactly **199,923 carry `gtdb_representative == 't'`** — the known r232 count.
 table deliberately spans all genomes; selection filters. Confirmed no leakage: of the
 **10,092 distinct genomes appearing in the 6,568 pairs, 10,092 are representatives or
 MAGs and 0 are non-representative GTDB genomes.** 439 MAGs participate in pairs.
+
+### Whole-proteome scope was about to lose 90.6% of its genomes, silently
+
+Chasing the psychrophile confidence question surfaced a data-loss bug in
+`05_aggregate_signalp.py`. The FASTA emission loop iterated
+`df["genome"].unique()` — the genomes present in the **SignalP prediction
+table**. But whole-proteome scope wants every protein *regardless of secretion*, so
+SignalP coverage is irrelevant to it. A whole-scope genome with no predictions was
+never opened and contributed **zero** sequences.
+
+Measured on the real run: of the **7,320** whole-scope genomes (hyperthermophile +
+psychrophile), only **685** appear in the prediction table — 630 via the legacy
+secreted-only r232 table and 55 via fresh targeted chunks. **6,635 (90.6%) would
+have contributed nothing.**
+
+**The emptiness guard would not have fired.** It raises only when the whole FASTA is
+empty, and 685 genomes still produce a large file — so the 16 h clustering job would
+have run happily on a corpus missing nine tenths of its intended genomes, and the
+loss would have surfaced (if at all) as an unexplained shortfall in hyperthermophile
+and psychrophile pair counts at the very end.
+
+Fixed: the loop now walks `set(df["genome"]) | whole`. Added a log line reporting
+requested vs in-prediction-table vs actually-read counts, so the gap is visible
+rather than inferred. Regression test
+`tests/test_whole_scope_needs_no_signalp.py` builds a two-genome fixture where one
+genome has predictions and one has none, and asserts the un-predicted genome
+contributes all its proteins to the whole FASTA (5 sequences, not 2) while the
+secreted FASTA is unchanged at 1. **139 passed, 1 skipped.**
+
+Also verified while diagnosing: the legacy `secreted_proteins_r232.tsv` is
+**secreted-only** — 300k sampled rows contain SP 193,620 / LIPO 85,964 / TAT 9,809 /
+PILIN 7,866 / TATLIPO 2,740 and **zero OTHER** — across 7,268 genomes. So it cannot
+supply whole-proteome content for any genome; it only makes them *visible* to the
+loop.
+
+**Method note:** `comm -12` gave two contradictory answers for the same overlap (630,
+then 0) because the two inputs were sorted under different collations. Recomputing
+with Python set intersections gave the stable figures above. Prefer set logic over
+`comm` when the sort provenance of either file is uncertain.
+
+### Psychrophile confidence: high+medium confirmed for pairs
+
+Stage B selects psychrophile at `high,medium`, yielding **332 pairs = 12 high + 320
+medium**. Tier populations in the merged label table: high 12, medium 427, **low
+4,690** (3,191 of them selectable representatives/MAGs) — so `low` is a 7.3× larger
+pool than high+medium combined.
+
+Holding at high+medium for pair selection. The `low` tier for psychrophile means
+habitat-keyword-only cold evidence, measured at a **0.14–0.63%** hit rate across four
+independent populations (n = 1,452 / 639 / 443 / 1,417); admitting it as labelled
+contrast would inject ~99% label noise into the class that already has the weakest
+signal.
+
+The earlier asymmetric plan (`low` admitted for MLM only, weight 0.10) is *partly*
+satisfied by a different mechanism: the whole-scope accession list carries all
+4,690 low-tier psychrophiles, so they enter the clustering and MLM corpus without
+becoming labelled pairs — **conditional on the FASTA fix above**, without which they
+were not going to be in the corpus at all.

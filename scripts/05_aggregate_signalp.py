@@ -147,7 +147,18 @@ def main() -> None:
         fh_s = open(args.faa_secreted, "w") if args.faa_secreted else None
         fh_w = open(args.faa_whole, "w") if args.faa_whole else None
         n_s = n_w = missing = 0
-        for gen in sorted(g for g in df["genome"].dropna().unique()):
+        # Iterate the UNION of prediction-table genomes and whole-scope genomes.
+        #
+        # THE BUG THIS FIXES: the loop used to walk df["genome"] only. Whole-proteome
+        # scope does NOT require SignalP -- every protein is wanted regardless of
+        # secretion -- so a whole-scope genome with no SignalP row was never opened
+        # and contributed ZERO sequences, silently. Measured on the real run: of 7,320
+        # whole-scope genomes, only 685 appear in the prediction table (630 via the
+        # legacy secreted-only r232 table, 55 via fresh targeted chunks), so 6,635
+        # (90.6%) of the hyperthermophile+psychrophile whole-proteome corpus would
+        # have been missing -- and the emptiness guard would NOT have fired, because
+        # 685 genomes still yield a non-empty file.
+        for gen in sorted(set(df["genome"].dropna().unique()) | whole):
             hits = []
             for root in roots:
                 hits = list(root.glob(f"*/{gen}_protein.faa.gz")) or \
@@ -187,6 +198,11 @@ def main() -> None:
         if missing:
             print(f"[05agg] WARNING: {missing:,} genomes had no proteome file under "
                   f"{[str(r) for r in roots]}")
+        if whole:
+            n_ws_emitted = len(whole & set(df["genome"].dropna().unique()))
+            print(f"[05agg] whole-scope genomes requested {len(whole):,} | "
+                  f"in prediction table {n_ws_emitted:,} | "
+                  f"read from proteome regardless of SignalP {len(whole):,}")
         if n_s == 0 and args.faa_secreted:
             raise SystemExit("[05agg] secreted FASTA is EMPTY -- proteome roots wrong?")
         if args.faa_whole and whole and n_w == 0:
