@@ -1510,3 +1510,58 @@ CPUs despite its short queue, so the earlier plan to use it was redirected.
 No `--gres` requested: SignalP 6.0 fast mode is CPU-decode-bound (see the
 throughput benchmark section), so reserving a GPU would idle an accelerator for
 ~1.4×. `05b` left running alongside on `standard` as agreed.
+
+### Why protein pairs per genome pair don't track the ~300-core-gene expectation
+
+Question raised: a genome pair sharing ~300 core essential housekeeping genes
+should yield ≳300 protein pairs under whole-proteome scope. Measured against the
+73-pair prevalence probe, the premise mostly **holds** — the exception is the one
+class that matters:
+
+| phenotype | pairs/genome pair | genus+family match | vs ~300 expectation |
+|---|--:|--:|---|
+| halophile | 540.2 | 53.1% | 1.8× above |
+| alkaliphile | 440.4 | 45.7% | 1.5× above |
+| acidophile | 385.3 | 44.8% | 1.3× above |
+| thermophile | 334.3 | 27.6% | at expectation |
+| **hyperthermophile** | **43.2** | **5.6%** | **7× BELOW** |
+
+Four of five classes reach or exceed 300. So the funnel is not systematically
+lossy — **hyperthermophile specifically is**, and the cause is measurable:
+pairs/gp tracks phylogenetic closeness monotonically across all five classes,
+Spearman **rho = 1.000** (Pearson r = 0.973, p = 0.005, n = 5).
+
+The mechanism is the clustering step, not gene content. `_derive_protein_pairs`
+emits one pair per (cluster ∩ matched-genome-pair), so a core gene becomes a pair
+only if mmseqs places **both** orthologs in the **same** cluster at 50% identity /
+80% coverage. For a genus- or family-matched pair that nearly always happens; for
+a phylum-matched pair it usually does not, because 50% identity sits near the
+twilight zone for cross-phylum orthologs. Hyperthermophile is 65.0% phylum-matched
+versus ~30% genus+family for the others, so most of its shared core is present in
+both genomes yet split across separate sub-family clusters — the ortholog exists,
+the pair never forms.
+
+This is corroborated independently by the prevalence probe: at the production
+threshold, maximum cluster prevalence was 108/158 genomes (0.684) and **zero
+clusters spanned >70% of genomes**. There is no single pan-genome "EF-Tu cluster";
+universal families fragment along phylogeny at 50% identity. That measurement was
+originally made to size the redundancy cap, and it explains this too.
+
+**Consequence.** Hyperthermophile's low yield is not a bug to be fixed by raising
+a cap — it is the arithmetic of having no close mesophilic relatives, the same
+root cause as its 19.6% unusable rate and its 65% phylum matching. Three levers
+exist, in order of expected effect:
+
+1. **Lower the clustering identity threshold for whole-proteome classes**
+   (50% → 30–40%, or profile-based search) so cross-phylum orthologs co-cluster.
+   Directly targets the measured mechanism; costs specificity, and would need a
+   re-run of stage 07 for those classes only.
+2. **Accept it** and rely on the class's 234 genome pairs × 43.2 = ~10.1k pairs,
+   treating hyperthermophile as the small-n class it is.
+3. Raising `max_per_lineage` or loosening `outgroup_match_rank` does **not** help
+   — all 57 of its unusable rows have NULL matched_rank, i.e. no mesophile
+   relative exists at any rank.
+
+Not yet measured: whether a 30% threshold actually recovers cross-phylum core
+pairs at acceptable precision. A cheap test is re-clustering the probe's 15
+hyperthermophile genome pairs at 30/40/50% and reading pairs/gp at each.
