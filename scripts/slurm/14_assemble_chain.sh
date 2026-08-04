@@ -61,6 +61,15 @@ fi
 # `memory` is also time-unlimited on this cluster.
 PART="${PART:-memory}"
 
+# Early stages (A0/A/B/C) are CPU-only, modest-memory python steps. When every CPU
+# partition is fully allocated -- measured 2026-08-04: standard 3680/0/0, memory
+# 3008/0/0, high-memory 792/0/0, all zero idle -- the GPU partitions still had large
+# idle CPU counts (gpu 262 idle of 352, gpu_h200 186 of 224) because they are gated on
+# GPUs, not cores. Running the CPU-only stages there costs no GPU and starts hours
+# sooner. The clustering and assembly stages stay on $PART for the RAM.
+LIGHT_PART="${LIGHT_PART:-gpu}"
+LIGHT="--partition=$LIGHT_PART --output=$LOGS/%x_%j.out"
+
 SB="sbatch --parsable"
 COMMON="--partition=$PART --output=$LOGS/%x_%j.out"
 
@@ -69,7 +78,7 @@ COMMON="--partition=$PART --output=$LOGS/%x_%j.out"
 # stage-01 metadata parquet is no longer on disk, so rebuild the compact form
 # straight from the two GTDB metadata dumps.
 G=/groups/cress/projects/jaymin/IS1111/gtdb
-A0=$($SB $COMMON --job-name=asm_meta --cpus-per-task=4 --mem=32G --time=01:00:00 \
+A0=$($SB $LIGHT --job-name=asm_meta --cpus-per-task=4 --mem=32G --time=01:00:00 \
   --wrap "set -u; cd $W && $PY - <<'PYEOF'
 import csv, gzip, sys
 G='/groups/cress/projects/jaymin/IS1111/gtdb'
@@ -93,7 +102,7 @@ PYEOF
 echo "A0 gtdb meta    $A0"
 
 # ---------------------------------------------------------------- A: labels
-A=$($SB $COMMON --job-name=asm_labels --cpus-per-task=8 --mem=64G --time=02:00:00 \
+A=$($SB $LIGHT --job-name=asm_labels --cpus-per-task=8 --mem=64G --time=02:00:00 \
   --dependency=afterok:$A0 \
   --wrap "set -u; cd $REPO && export PYTHONPATH=$REPO/src && \
     $PY scripts/01b_flag_metadata.py \
@@ -119,7 +128,7 @@ echo "A labels        $A"
 # ---------------------------------------------------------------- B: genome pairs
 # Locked tiers (2026-08-04): thermophile HIGH ONLY, everything else high+medium.
 # max_total_per_class uncapped -- the config default of 100 is a pilot setting.
-B=$($SB $COMMON --job-name=asm_pairs --cpus-per-task=8 --mem=64G --time=02:00:00 \
+B=$($SB $LIGHT --job-name=asm_pairs --cpus-per-task=8 --mem=64G --time=02:00:00 \
   --dependency=afterok:$A \
   --wrap "set -u; cd $REPO && export PYTHONPATH=$REPO/src && \
     $PY scripts/04_select_genomes.py --labels $W/combined_labels.parquet \
@@ -137,7 +146,7 @@ B=$($SB $COMMON --job-name=asm_pairs --cpus-per-task=8 --mem=64G --time=02:00:00
 echo "B genome pairs  $B"
 
 # ---------------------------------------------------------------- C: secreted table
-C=$($SB $COMMON --job-name=asm_secreted --cpus-per-task=16 --mem=96G --time=04:00:00 \
+C=$($SB $LIGHT --job-name=asm_secreted --cpus-per-task=16 --mem=96G --time=04:00:00 \
   --dependency=afterok:$B \
   --wrap "set -u; cd $REPO && export PYTHONPATH=$REPO/src && \
     $PY -c \"

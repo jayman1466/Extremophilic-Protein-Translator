@@ -1995,3 +1995,27 @@ Resubmitted as `1164438` A0 → `1164439` A → `1164440` B → `1164441` C →
 **Practice change:** shell-portability bugs in `--wrap` bodies cannot be caught
 locally, because macOS `/bin/sh` is bash. Test wrap-body syntax with `dash -c`
 explicitly before submitting.
+
+**Unblocked by splitting the chain across partitions (2026-08-04).** After the dash
+fix, `1164438` still would not start: `Reason=Resources`, SLURM estimating a 23:21
+start (~1.5 h out). The request was not the problem — A0 asks 4 CPUs / 32 G against
+nodes offering 64+ cores / 677 G.
+
+**Every CPU partition was 100% allocated**, measured simultaneously:
+standard 3680/0/0/3680, memory 3008/0/0/3008, high-memory 792/0/0/792,
+min_1500g 1240/0/0, min_3t 792/0/0, min_8t 344/0/0 — zero idle cores anywhere.
+But the **GPU partitions had large idle CPU counts**: `gpu` 262 idle of 352,
+`gpu_h200` 186 of 224, because they gate on GPUs rather than cores.
+
+So the chain now splits: the four CPU-only python stages (A0/A/B/C) go to
+`LIGHT_PART` (default `gpu`, no GPU requested), while the two clustering jobs and
+the assembly stay on `PART` (default `memory`) for the RAM. Both are variables.
+
+Resubmitted `1164445`–`1164451`. **A0 COMPLETED in 22 s** — versus a 1.5 h queue
+estimate on `memory`. Stage A started immediately after.
+
+**A0 output validated rather than assumed:** `gtdb_meta.tsv` has 901,341 rows, which
+looked wrong against 199,923 species representatives. Counting the
+`gtdb_representative` column resolves it — **exactly 199,923 rows carry `t`**,
+matching the known r232 representative count, because the GTDB metadata dumps cover
+all genomes and 01b filters to reps itself.
