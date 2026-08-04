@@ -1329,20 +1329,39 @@ four sources (TEMPURA, Madin, Toki, OGTFinder-optima).
 
 ### Genome pairs and protein counts
 
-| phenotype | scope | tier | emitted | **usable** | proteins | share | protein pairs |
+| phenotype | scope | tier | emitted | **usable** (drop) | proteins | share | protein pairs |
 |---|---|---|--:|--:|--:|--:|--:|
-| halophile | secreted | high+med | 2,935 | **2,459** | 1,134,464 | 27.7% | 83,286 |
-| hyperthermophile | whole | high+med | 291 | **234** | 957,060 | 23.4% | 10,108 |
-| psychrophile | whole | high+med | 214 | **214** | 875,260 | 21.4% | 131,396–350,104 |
-| thermophile | secreted | high only | 1,555 | **1,117** | 515,330 | 12.6% | 19,257 |
-| acidophile | secreted | high+med | 799 | **766** | 353,395 | 8.6% | 6,886 |
-| alkaliphile | secreted | high+med | 581 | **565** | 260,663 | 6.4% | 7,689 |
-| **TOTAL** | | | 6,375 | **5,355** | **4,096,172** | | **258,622–477,330** |
+| halophile | secreted | high+med | 2,935 | **2,459** (−476, 16.2%) | 1,134,464 | 27.7% | 83,286 |
+| hyperthermophile | whole | high+med | 291 | **234** (−57, 19.6%) | 957,060 | 23.4% | 10,108 |
+| psychrophile | whole | high+med | 214 | **214** (−0, 0.0%) | 875,260 | 21.4% | 131,396–350,104 |
+| thermophile | secreted | high only | 1,555 | **1,117** (−438, 28.2%) | 515,330 | 12.6% | 19,257 |
+| acidophile | secreted | high+med | 799 | **766** (−33, 4.1%) | 353,395 | 8.6% | 6,886 |
+| alkaliphile | secreted | high+med | 581 | **565** (−16, 2.8%) | 260,663 | 6.4% | 7,689 |
+| **TOTAL** | | | 6,375 | **5,355** (−1,020, 16.0%) | **4,096,172** | | **258,622–477,330** |
 
-**emitted vs usable:** `select_with_outgroups` emits a row per selected
-extremophile even when no taxonomy-matched outgroup exists at any rank. Only rows
-with a non-null `outgroup_acc` can form a pair. 16.0% of emitted rows are unusable
-overall; psychrophile alone is 0% (every one matched).
+**emitted vs usable (the parenthesised drop).** `select_with_outgroups` emits a
+row per selected extremophile even when no mesophile outgroup can be found. Only
+rows with a non-null `outgroup_acc` form a pair; the parenthetical gives the
+count and percentage lost. Verified rather than assumed: all 1,020 dropped rows
+have `matched_rank` NULL, i.e. no confident mesophile existed in the same genus,
+family, order, class **or phylum** — these are not near-misses, and no loosening
+of the match rank recovers them. Raising `max_per_lineage` would not help either;
+the constraint is the absence of a mesophile relative, not a per-family quota.
+
+The rate varies 10× by class and the ordering is informative:
+
+| phenotype | drop | why |
+|---|--:|---|
+| thermophile | 28.2% | worst; whole clades (e.g. Thermotogota, Aquificota) are thermophilic throughout, so no mesophile sister exists at any rank |
+| hyperthermophile | 19.6% | same mechanism, more extreme per genome but fewer genomes |
+| halophile | 16.2% | largest absolute loss (476) simply from being the largest class |
+| acidophile | 4.1% | acidophily is scattered across otherwise-mesophilic lineages |
+| alkaliphile | 2.8% | same |
+| **psychrophile** | **0.0%** | every one of the 214 matched — the measured-OGT route admits only cultivated species, which sit in well-sampled lineages with mesophilic relatives |
+
+Psychrophile's clean 0% is a side effect of its rubric, not evidence it is
+better-behaved: requiring a measured optimum restricts it to cultivated organisms,
+and those are exactly the taxa with sequenced mesophilic neighbours.
 
 **Provenance of each column.** Measured: emitted, usable, and every genome count —
 from the selection run above. Derived, not measured: proteins = usable × 2 genomes
