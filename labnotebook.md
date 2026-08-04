@@ -1906,3 +1906,28 @@ true blocker in the same minute.
 
 `deepsea_mags_merged.tsv` staged to `$W` (gzip + base64, 66 chunks; md5
 `549575c1ee49e12e409ae93684adb681` verified on arrival, 4,085 lines, 20 columns).
+
+**Chain submitted (2026-08-04).** `1164413` A0 gtdb metadata → `1164414` A labels →
+`1164415` B genome pairs → `1164416` C secreted + FASTAs → {`1164417` D cluster 50%,
+`1164418` E cluster 40%} → `1164419` F assemble. All `afterok`-linked.
+
+The login-node preflight fetched all four OGT sources on submit (tempura 1,464,617 B;
+madin 46,362,149 B; toki 453,138 B; ogtfinder 7,360,680 B), confirming that keeping
+03a out of the batch jobs was necessary — compute nodes have no egress.
+
+Two further defects caught at actual submit time, which no amount of reading would
+have found:
+
+1. **`PY: unbound variable`.** `set -u` aborted the script before submitting
+   anything: the preflight calls `$PY` but the definition sat further down beside
+   `SB`. Moved above the preflight.
+2. **Login node lost DNS to github.com** mid-session (`Could not resolve host`), so
+   `git pull` silently left the cluster one commit behind — still carrying the
+   broken ordering. Installed the corrected script by direct transfer instead
+   (md5 `b38c00099726019c64efb21c8ebcf817` verified on arrival, `bash -n` clean).
+   Worth remembering: on this host `git pull` is not a reliable way to ship a fix.
+
+Queue state at submit: 9 RUNNING / 3 PENDING from unrelated work (deeploc arrays,
+operon jobs, the long-running SignalP fill `1152569`). MaxJobsPerUser=10 caps
+concurrent *running* jobs, not submissions (MaxSubmitJobsPerUser=200), so the chain
+pends rather than being rejected.
