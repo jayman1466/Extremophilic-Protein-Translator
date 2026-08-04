@@ -1207,3 +1207,70 @@ combined gpu_h200 job all require biotite. The login node wedged on every SSH
 call for several hours (5+ force-cleared executions, two of them delegation
 dispatches that spawned zero children after 20+ min). Resume from the coverage
 diff; the accession list is already computed.
+
+### CORRECTION (same day): two errors in the class-balance analysis above
+
+**1. Hyperthermophile pair count was 7.9x too low.** I reported 1,275 pairs from
+234 genome pairs (5.4 pairs/gp). The user flagged it as implausible and was right.
+I computed it by CHAINING the end-to-end secreted rate (0.97) with the probe's
+whole/secreted ratio (5.62) = 5.5 pairs/gp. That chaining is invalid: 0.97 is an
+end-to-end PRODUCTION rate that already absorbed cluster/cap/split losses, and
+5.62 is a ratio measured INSIDE the probe, so multiplying double-counts the
+losses. The probe measured whole-proteome pairs DIRECTLY:
+
+| class | probe pairs | probe gp | pairs/gp DIRECT | chained (wrong) |
+|---|--:|--:|--:|--:|
+| halophile | 9,184 | 17 | 540.2 | 422.0 |
+| alkaliphile | 5,725 | 13 | 440.4 | 277.2 |
+| acidophile | 5,009 | 13 | 385.3 | 233.8 |
+| thermophile | 5,014 | 15 | 334.3 | 206.9 |
+| hyperthermophile | 648 | 15 | **43.2** | **5.5** |
+
+Hyperthermophile has the smallest secreted rate, so the distortion was largest
+there — which is why it surfaced in that class and not the others. Corrected
+hyperthermophile: 234 gp x 43.2 = **10,108 pairs**, not 1,275. At ~2,045 proteins
+per proteome that is 2.1% of proteins forming usable ortholog pairs — low but
+plausible given 52.7% of its pairs are phylum-level matches.
+
+I had ALREADY identified this exact inconsistency earlier in the session ("the
+probe measured 43.2 directly but chaining gives 5.5") and then used the chained
+value anyway.
+
+**2. I measured the wrong quantity for imbalance.** Read from
+scripts/08_train_backbone.py and src/eptrans/modeling/data.py:
+
+- MLM: consumes `--labeled` + `--fasta` and has NO `--pairs` argument.
+  `build_mlm_dataset` iterates PROTEINS; each item is one masked sequence.
+- classifier: `--labeled` drives weighted BCE over individual PROTEINS;
+  `--pairs` adds an AUXILIARY margin term max(0, d - (s_ext - s_out)).
+  `neg_per_pos=3.0` caps negatives at 3x positives.
+
+So PROTEINS are the training units. Protein pairs serve two narrower roles: the
+auxiliary margin loss, and the leakage-control grouping for splits. Sizing the
+training set or judging class imbalance on pairs was the wrong denominator.
+
+Corrected composition (proteins = usable_gp x 2 genomes x 2,045 proteins,
+x 11.28% for secreted scope):
+
+| phenotype | scope | usable gp | proteins | protein share | pairs |
+|---|---|--:|--:|--:|--:|
+| thermophile | secreted | 3,413 | 1,574,594 | 30.5% | 58,840 |
+| halophile | secreted | 2,459 | 1,134,464 | 22.0% | 83,286 |
+| hyperthermophile | whole | 234 | 957,060 | 18.6% | 10,108 |
+| psychrophile | whole | 214 | 875,260 | 17.0% | 131k-350k |
+| acidophile | secreted | 766 | 353,395 | 6.9% | 6,886 |
+| alkaliphile | secreted | 565 | 260,663 | 5.1% | 7,689 |
+
+**TOTAL 5,155,436 proteins.** This REVERSES the "imbalance runs opposite to
+expectation" claim above: on proteins, thermophile IS the largest class at 30.5%,
+as the user originally assumed. The max/min protein ratio is 6.0x, versus the
+19.1x I computed on pairs.
+
+The downsampling recommendation is UNCHANGED but its reasoning is replaced: not
+"thermophile isn't the biggest" (it is), but "the spread is only 6x, which
+inverse-frequency weighting handles comfortably". User has confirmed
+inverse-frequency loss weighting as the approach.
+
+Psychrophile remains the only unmeasured class (131k-350k pairs; its protein count
+875,260 is firm since it derives from genome count, not pair yield). The ~90 s
+cluster probe on its 214 genome pairs would settle the pair range.
