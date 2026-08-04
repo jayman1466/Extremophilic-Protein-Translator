@@ -186,6 +186,55 @@ def _coassign_matched_pairs(
     return labeled[group_col].astype(str).map(lambda g: find(g))
 
 
+def merge_cluster_maps(maps: dict, members: "pd.Index | list") -> "pd.Series":
+    """Union-find merge of several cluster maps into one leakage-safe grouping.
+
+    Returns member -> merged_group_id, where two proteins share a merged group iff
+    they are co-clustered in AT LEAST ONE input map (i.e. the transitive closure
+    over the union of all co-clustering relations).
+
+    WHY THIS IS REQUIRED rather than just using the coarsest map: clustering at a
+    lower identity is NOT guaranteed to be a coarsening of clustering at a higher
+    one. Measured on the real 158-genome probe proteome (323,178 proteins,
+    --cov-mode 0): of 34,752 multi-member 50%-identity clusters, 1,421 (4.09%) are
+    SPLIT across two or more 40%-identity clusters. mmseqs cascaded clustering
+    picks different representatives at different thresholds, so the partitions
+    cross rather than nest.
+
+    Consequence: if the split were grouped on the 40% map alone, those 1,421
+    clusters would have members landing in different folds while still being
+    50%-identical to each other -- exactly the train/test leakage the
+    cluster-level split exists to prevent. Merging both maps makes the grouping
+    at least as coarse as every map it was built from, so no co-clustering
+    relation in ANY map can straddle a fold boundary.
+    """
+    parent = {m: m for m in members}
+
+    def find(x):
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:      # path compression
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for series in maps.values():
+        first_of_cluster = {}
+        for mem, cl in series.items():
+            if mem not in parent:
+                continue
+            if cl in first_of_cluster:
+                union(first_of_cluster[cl], mem)
+            else:
+                first_of_cluster[cl] = mem
+    return pd.Series({m: find(m) for m in parent}, dtype=object)
+
+
 def _derive_protein_pairs(
     labeled: pd.DataFrame,
     group_col: str,
@@ -197,6 +246,7 @@ def _derive_protein_pairs(
     scope_by_class: dict | None = None,
     default_scope: str = "secreted",
     secreted_col: str = "is_secreted",
+    cluster_col_by_scope: dict | None = None,
 ) -> "pd.DataFrame":
     """Derive protein-level ortholog pairs = (cluster INTERSECT matched-genome-pair).
 
@@ -327,12 +377,20 @@ def _derive_protein_pairs(
             f"pairs for a secreted-scope class.")
 
     # One representative map per SCOPE, built once and reused across classes.
+    #
+    # cluster_col_by_scope lets each scope cluster at its OWN identity threshold
+    # (measured decision 2026-08-04: whole_proteome classes at 40%, secreted at
+    # 50%). Absent it, every scope shares `group_col` and behaviour is unchanged.
+    ccol = dict(cluster_col_by_scope or {})
     best_by_scope = {}
     for sc in scopes_needed:
         sub = lab
         if sc == "secreted":
             sub = lab[lab[secreted_col].fillna(False).astype(bool)]
-        best_by_scope[sc] = sub.groupby(["_bare", group_col])["tagged_id"].first()
+        gc = ccol.get(sc, group_col)
+        if gc not in sub.columns:
+            raise ValueError(f"cluster column {gc!r} for scope {sc!r} not in the labeled table")
+        best_by_scope[sc] = sub.groupby(["_bare", gc])["tagged_id"].first()
 
     def _scope_of(cls):
         return scope_by_class.get(cls, default_scope) if scope_active else "_asis"
@@ -353,9 +411,9 @@ def _derive_protein_pairs(
         for cl in (e_clusters & m_clusters):
             rows.append({"class": cls, "cluster": cl, "ext_acc": e, "outgroup_acc": m,
                          "ext_id": best.loc[(e, cl)], "outgroup_id": best.loc[(m, cl)],
-                         "scope": sc})
+                         "scope": sc, "cluster_col": ccol.get(sc, group_col)})
     out = pd.DataFrame(rows, columns=["class", "cluster", "ext_acc", "outgroup_acc",
-                                      "ext_id", "outgroup_id", "scope"])
+                                      "ext_id", "outgroup_id", "scope", "cluster_col"])
 
     k = max_pairs_per_cluster_class
     if k is not None and len(out):
@@ -387,6 +445,8 @@ def assemble_dataset(
     scope_by_class: dict | None = None,
     default_scope: str = "secreted",
     secreted_col: str = "is_secreted",
+    cluster_maps: dict | None = None,
+    cluster_col_by_scope: dict | None = None,
 ) -> SplitResult:
     """Full assembly: label + leakage-aware split.
 
@@ -407,7 +467,32 @@ def assemble_dataset(
     labeled["tagged_id"] = (labeled[genome_col].astype(str) + "~"
                             + labeled[protein_id_col].astype(str))
 
-    if cluster_map is not None and len(cluster_map):
+    # ---- MULTI-THRESHOLD CLUSTERING ----
+    # cluster_maps = {name: DataFrame[member, cluster]} attaches one column per
+    # named map (e.g. 'id50', 'id40'), so pair derivation can use a different
+    # threshold per scope. The SPLIT is grouped on the union-find merge of every
+    # map (see merge_cluster_maps): the partitions cross rather than nest, so
+    # grouping on any single map would leak.
+    if cluster_maps:
+        series = {}
+        for name, cm in cluster_maps.items():
+            if cm is None or not len(cm):
+                continue
+            d = dict(zip(cm["member"].astype(str), cm["cluster"].astype(str)))
+            col = f"cluster_{name}"
+            labeled[col] = [
+                d.get(t) or d.get(str(p)) or t
+                for t, p in zip(labeled["tagged_id"], labeled[protein_id_col])
+            ]
+            series[name] = pd.Series(
+                dict(zip(labeled["tagged_id"], labeled[col])), dtype=object)
+        if not series:
+            raise ValueError("cluster_maps was given but every map was empty")
+        merged = merge_cluster_maps(series, list(labeled["tagged_id"]))
+        labeled["group"] = labeled["tagged_id"].map(merged)
+        group_col = "group"
+        group_kind = "sequence_cluster_merged(" + "+".join(sorted(series)) + ")"
+    elif cluster_map is not None and len(cluster_map):
         cmap = dict(zip(cluster_map["member"].astype(str),
                         cluster_map["cluster"].astype(str)))
         # try tagged id first, then bare protein id
@@ -440,7 +525,8 @@ def assemble_dataset(
                 labeled, group_col, genome_col, pairs,
                 max_pairs_per_cluster_class=max_pairs_per_cluster_class, seed=seed,
                 tiebreak=tiebreak, scope_by_class=scope_by_class,
-                default_scope=default_scope, secreted_col=secreted_col)
+                default_scope=default_scope, secreted_col=secreted_col,
+                cluster_col_by_scope=cluster_col_by_scope)
 
     out = stratified_group_split(labeled, group_col=split_group_col, label_col="label",
                                  splits=splits, seed=seed)

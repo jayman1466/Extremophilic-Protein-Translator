@@ -256,6 +256,17 @@ dataset:
   #
   # SignalP retains 11.28% of proteins (1,985,508 / 17,603,649 in r232), so
   # whole-proteome scope is an ~8.9x increase in candidate sequence.
+  # Clustering identity per scope, measured 2026-08-04 (job 1164334, RBH check).
+  # whole_proteome classes cluster at 40%: hyperthermophile gains 2.73x the pairs
+  # at 91.99% added-pair RBH precision -- HIGHER precision than any other class
+  # achieves at 40%, because its pairs are class/phylum-matched so genuine
+  # orthologs fall below 50% identity. secreted classes stay at 50% (97.3-97.9%
+  # RBH-consistent; they already capture their orthologs there and lowering the
+  # threshold would only add marginal hits at 84-86% precision).
+  # 30% was rejected: another 1.7x but added-pair precision drops to 74.7-86.9%.
+  cluster_identity_by_scope:
+    secreted:        0.5
+    whole_proteome:  0.4
   protein_scope:
     default: secreted
     by_phenotype:
