@@ -19,9 +19,12 @@
 #
 # No --gres is requested: SignalP 6.0 in `fast` mode was measured at 12.75 seq/s
 # on an H200 vs 8.86 seq/s on 16 CPU cores, i.e. only ~1.4x, so a GPU
-# reservation would idle an accelerator for a marginal gain. (Throughput source:
-# SignalP 6.0 fast-mode benchmark, 10k proteins, Jul 2026 -- H200 12.75 seq/s at
-# bsize 32, A5000/gpu 9.60 at bsize 64, CPU standard 16-thread 8.86.)
+# reservation would idle an accelerator for a marginal gain. Throughput source:
+# labnotebook.md, section "SignalP throughput benchmark (measured)" -- SignalP 6.0
+# fast mode over 10,000 proteins, H200 12.75 seq/s at bsize 32, A5000/gpu 9.60 at
+# bsize 64, CPU standard 16-thread 8.86 (figure: results/signalp_gpu_benchmark.png).
+# Fast mode is CPU-decode-bound, not GPU-bound: the transformer sees only short
+# N-terminal windows, so the GPU idles while CRF decoding sets the pace.
 #
 # These partitions were chosen for free CPU capacity, from a POINT-IN-TIME
 # snapshot taken 2026-08-04 via
