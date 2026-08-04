@@ -34,6 +34,12 @@ LOGS=$S/logs/assemble
 OGT_DIR=$S/data/ogt
 mkdir -p "$W" "$LOGS" "$OGT_DIR"
 
+# Absolute interpreter: `conda` is NOT on the non-login PATH on biotite and bare
+# `python` does not exist there either (only /usr/bin/python3, which lacks pandas).
+# Verified by smoke test: this interpreter has pandas 3.0.3 / pyarrow 25.0.0 / matplotlib 3.11.1 (four stages need mpl).
+PY=/home/jayminp/miniconda3/envs/eptrans_ml/bin/python
+
+
 # ---- preflight, run on the LOGIN node before any job is submitted ----
 # The OGT sources are fetched over the network, and compute nodes have NO egress
 # (login node does). 03a is therefore run here rather than inside the chain.
@@ -47,11 +53,6 @@ if [ ! -s "$W/deepsea_mags_merged.tsv" ]; then
   echo "  ingested MAGs through (--id-map $S/mag_ingest/map.tsv)."
   exit 1
 fi
-
-# Absolute interpreter: `conda` is NOT on the non-login PATH on biotite and bare
-# `python` does not exist there either (only /usr/bin/python3, which lacks pandas).
-# Verified by smoke test: this interpreter has pandas 3.0.3 / pyarrow 25.0.0.
-PY=/home/jayminp/miniconda3/envs/eptrans_ml/bin/python
 
 SB="sbatch --parsable"
 COMMON="--partition=standard --output=$LOGS/%x_%j.out"
