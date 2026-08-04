@@ -102,11 +102,33 @@ def _is_mesophile(row: pd.Series, th: dict) -> bool:
             and s <= m["salinity_max_opt"])
 
 
-def build_mag_rows(merged: pd.DataFrame, th: dict) -> pd.DataFrame:
-    """Turn the merged MAG table into label-table rows."""
+def build_mag_rows(merged: pd.DataFrame, th: dict,
+                   id_map: dict | None = None) -> pd.DataFrame:
+    """Turn the merged MAG table into label-table rows.
+
+    id_map: {original_mag_id -> assigned CU_CUST_xxx.1 accession} from the ingest
+    (mag_ingest/map.tsv). REQUIRED whenever the MAGs have been ingested, because
+    the accession the proteins are keyed by is NOT derivable from mag_id.
+
+    THE BUG THIS EXISTS TO PREVENT. The original code wrote
+    `accession = "CU_" + mag_id`, giving e.g. `CU_10A(CNS0876618)_bin.16`. But the
+    ingest assigns sequential accessions, so the proteome file, the FASTA headers
+    and every SignalP prediction use `CU_CUST_000000001.1`. Those two accession
+    spaces share NO key, and assign_labels joins on bare_accession equality --
+    so every MAG protein would silently fail to get a label and be dropped from
+    the dataset with no error raised. 1,445 of 4,084 mag_id values (35.4%) also
+    contain parentheses, which is what made the renaming necessary in the first
+    place (GTDB-Tk's own genome-ID validator rejects them).
+    """
     out = pd.DataFrame(index=merged.index)
-    # Accession: CU_ + sanitised mag_id, so downstream prefix stripping works.
-    out["accession"] = MAG_PREFIX + merged["mag_id"].astype(str)
+    mid = merged["mag_id"].astype(str)
+    if id_map:
+        mapped = mid.map(id_map)
+        out["accession"] = mapped.where(mapped.notna(), MAG_PREFIX + mid)
+        out["has_proteome"] = mapped.notna()
+    else:
+        out["accession"] = MAG_PREFIX + mid
+        out["has_proteome"] = False
     out["mag_id"] = merged["mag_id"]
     out["source_dataset"] = "deepsea_dsgc_2026"
     out["source_sample_id"] = merged["sample_id"]       # drives max_per_sample
@@ -147,6 +169,16 @@ def main() -> None:
     ap.add_argument("--mags", required=True, help="merged deep-sea MAG TSV (taxonomy + GenomeSPOT)")
     ap.add_argument("--out", default=None, help="output parquet")
     ap.add_argument("--stats", default=None, help="optional JSON stats path")
+    ap.add_argument("--id-map", default=None,
+                    help="mag_ingest/map.tsv (original_mag_id<TAB>assigned CU_CUST accession). "
+                         "REQUIRED once the MAGs are ingested: the accession the proteins "
+                         "are keyed by is not derivable from mag_id, and without it every "
+                         "MAG protein silently fails the label join.")
+    ap.add_argument("--require-proteome", action="store_true",
+                    help="keep only MAGs present in --id-map, i.e. those with an "
+                         "actual proteome on disk. Without it, un-ingested MAGs are "
+                         "retained as label-only rows (usable for counting, never "
+                         "selectable as a training genome).")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -166,7 +198,32 @@ def main() -> None:
         if before != len(labels):
             print(f"[03c] dropped {before - len(labels):,} previously appended MAG rows")
 
-    mag_rows = build_mag_rows(mags, th)
+    id_map = None
+    if args.id_map:
+        m = pd.read_csv(args.id_map, sep="\t", header=None,
+                        names=["orig", "assigned"], dtype=str)
+        if m["orig"].duplicated().any() or m["assigned"].duplicated().any():
+            raise SystemExit(f"[03c] --id-map is not injective: "
+                             f"{int(m['orig'].duplicated().sum())} duplicate originals, "
+                             f"{int(m['assigned'].duplicated().sum())} duplicate assigned")
+        id_map = dict(zip(m["orig"], m["assigned"]))
+        print(f"[03c] id map: {len(id_map):,} ingested MAGs "
+              f"(e.g. {m['orig'].iloc[0]} -> {m['assigned'].iloc[0]})")
+    else:
+        print("[03c] WARNING: no --id-map. Accessions will be built from mag_id, which "
+              "does NOT match the ingested proteome accessions; MAG proteins will not "
+              "join to labels.")
+
+    mag_rows = build_mag_rows(mags, th, id_map=id_map)
+    n_prot = int(mag_rows["has_proteome"].sum())
+    print(f"[03c] MAG rows {len(mag_rows):,}; with proteome on disk {n_prot:,}; "
+          f"label-only {len(mag_rows) - n_prot:,}")
+    if args.require_proteome:
+        mag_rows = mag_rows[mag_rows["has_proteome"]].copy()
+        print(f"[03c] --require-proteome: kept {len(mag_rows):,}")
+    if id_map and n_prot == 0:
+        raise SystemExit("[03c] id map supplied but matched ZERO mag_id values -- "
+                         "the map's first column must be the ORIGINAL mag_id")
 
     # GTDB genomes are their own sample: leave the column blank, never a shared token.
     for col in ["source_dataset", "source_sample_id", "mag_id",
