@@ -47,3 +47,22 @@ def test_scope_none_is_noop():
         confident_mesophile=lab.is_mesophile),
         scope_by_class=None, seed=1)
     assert r.stats["n_proteins"]==len(lab)
+
+
+def test_mlm_subsample_extremophile_only():
+    import importlib.util, pathlib
+    p = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "09_subsample_mlm.py"
+    spec = importlib.util.spec_from_file_location("s09", p)
+    s09 = importlib.util.module_from_spec(spec); spec.loader.exec_module(s09)
+    lab = pd.DataFrame([
+        dict(tagged_id=f"g{i}~p", label=("mesophile" if i % 2 else "halophile"),
+             is_mesophile=bool(i % 2), label_confidence="high",
+             split="train", group=f"c{i}")
+        for i in range(20)])
+    # default: extremophiles only
+    sub = s09.subsample(lab, n_train=100, n_val=0, seed=1)
+    assert (~sub["is_mesophile"]).all(), "mesophiles leaked into MLM set"
+    assert len(sub) == 10
+    # opt-in: keep mesophiles
+    sub2 = s09.subsample(lab, n_train=100, n_val=0, seed=1, extremophile_only=False)
+    assert sub2["is_mesophile"].any() and len(sub2) == 20
