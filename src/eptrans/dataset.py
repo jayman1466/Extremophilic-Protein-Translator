@@ -115,9 +115,40 @@ def stratified_group_split(
     order = ["train", "val", "test"]
     fracs = [splits.get(s, 0.0) for s in order]
 
-    # majority label per group
-    grp_label = (df.groupby(group_col)[label_col]
-                 .agg(lambda s: s.value_counts().index[0]))
+    # majority label per group -- VECTORIZED.
+    # The previous form, df.groupby(group_col)[label_col].agg(lambda s:
+    # s.value_counts().index[0]), calls a Python lambda + builds a value_counts
+    # Series ONCE PER GROUP. At ~1.9M merged groups (id40 U id50 over 119.68M
+    # proteins) that is ~1.9M pure-Python calls and was the multi-hour cost of
+    # stage F -- invisible at the hundreds-of-groups test scale (measured: 170s ->
+    # 13s, ~13x, on a 5M-row/1.76M-group synthetic). This computes the majority
+    # label with C-level passes: count (group,label) cells, then take the top-count
+    # label per group, tie-broken by earliest first appearance to mirror
+    # value_counts()'s stable order.
+    # NOTE: this is NOT byte-identical to the old lambda form. Two arbitrary
+    # implementation artifacts in the old code make an exact match neither
+    # achievable nor desirable: (a) value_counts()'s tie order depends on per-group
+    # row order, and (b) the downstream rng.shuffle consumes groups in grp_label's
+    # index order, which the old default-sorted groupby fixed to group-id order.
+    # The new split is correct (whole groups, stratified by majority label) and
+    # reproducible (seeded); it is a DIFFERENT valid split, not the old one. Since
+    # we are retraining from scratch, reproducing the old arbitrary split is not a
+    # requirement -- but the change is flagged here so no reader assumes equivalence.
+    counts = (df.groupby([group_col, label_col], sort=False).size()
+              .rename("_n").reset_index())
+    # first-appearance position of each (group,label), to reproduce value_counts()'s
+    # stable tie order: on equal counts, value_counts().index[0] returns the label
+    # whose first occurrence in the group comes earliest. A global label-asc rule
+    # does NOT match this (verified: it drifts ~2k/5M rows on tie-heavy data), so we
+    # tie-break on earliest first appearance instead.
+    firstpos = (df.reset_index(drop=True).reset_index()
+                .groupby([group_col, label_col], sort=False)["index"].min()
+                .rename("_fp").reset_index())
+    counts = counts.merge(firstpos, on=[group_col, label_col], how="left")
+    counts = counts.sort_values(["_n", "_fp"], ascending=[False, True],
+                                kind="mergesort")
+    grp_label = (counts.drop_duplicates(group_col, keep="first")
+                 .set_index(group_col)[label_col])
     rng = np.random.default_rng(seed)
 
     group_split: dict = {}
@@ -208,31 +239,62 @@ def merge_cluster_maps(maps: dict, members: "pd.Index | list") -> "pd.Series":
     at least as coarse as every map it was built from, so no co-clustering
     relation in ANY map can straddle a fold boundary.
     """
-    parent = {m: m for m in members}
+    # VECTORIZED connected-components (was: Python union-find). The old form did
+    # ~3 full Python passes over all members -- parent-dict init, per-member
+    # union across each map, and a final {m: find(m) for m in parent} -- which is
+    # O(N) pure-Python REGARDLESS of graph sparsity. On the 119.68M-member real
+    # dataset that measured at ~25-36 min (job 1164845 synthetic 25.7 min; real
+    # job 1164873 still in merge at 27 min when cancelled). connected_components
+    # computes the identical partition (two members share a group iff connected
+    # via a shared cluster in >=1 map) with a C-level graph traversal.
+    #
+    # Construction: one bipartite graph over member-nodes [0..M) and, per map,
+    # cluster-nodes appended after the member block. An edge (member, its-cluster)
+    # per row means all members of a cluster land in one component; unioning across
+    # maps is automatic because the same member node participates in every map's
+    # edges. Component id of each member node is its merged group.
+    import numpy as _np
+    from scipy.sparse import coo_matrix as _coo
+    from scipy.sparse.csgraph import connected_components as _cc
 
-    def find(x):
-        root = x
-        while parent[root] != root:
-            root = parent[root]
-        while parent[x] != root:      # path compression
-            parent[x], x = root, parent[x]
-        return root
+    mem_idx = pd.Index(members)
+    M = len(mem_idx)
 
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
+    rows = []
+    cols = []
+    next_node = M  # cluster nodes are numbered after the M member nodes
     for series in maps.values():
-        first_of_cluster = {}
-        for mem, cl in series.items():
-            if mem not in parent:
-                continue
-            if cl in first_of_cluster:
-                union(first_of_cluster[cl], mem)
-            else:
-                first_of_cluster[cl] = mem
-    return pd.Series({m: find(m) for m in parent}, dtype=object)
+        # member -> node id via a C-level hashed lookup (-1 for members not in the
+        # index). This replaces a Python dict build + per-member generator, which
+        # were O(N) Python and the real residual cost after the union-find removal.
+        mnode = mem_idx.get_indexer(series.index)
+        keep = mnode >= 0
+        mnode = mnode[keep]
+        cl = series.to_numpy()[keep]
+        if len(cl) == 0:
+            continue
+        # dense-code this map's cluster labels to contiguous node ids. pd.factorize
+        # is a HASH-based encode (C-level, no sort); np.unique(return_inverse) here
+        # sorted the string array O(N log N) and measured at ~37s/map on 20M rows
+        # -- the dominant merge cost -- versus a few seconds for factorize.
+        cl_codes, _ = pd.factorize(cl, sort=False)
+        cl_codes = _np.asarray(cl_codes, dtype=_np.int64)
+        cnode = cl_codes + next_node
+        next_node += int(cl_codes.max()) + 1 if len(cl_codes) else 0
+        rows.append(mnode.astype(_np.int64))
+        cols.append(cnode)
+
+    n_nodes = next_node
+    if rows:
+        r = _np.concatenate(rows)
+        c = _np.concatenate(cols)
+        data = _np.ones(len(r), dtype=_np.int8)
+        g = _coo((data, (r, c)), shape=(n_nodes, n_nodes))
+        _, labels = _cc(g, directed=False, return_labels=True)
+        mem_labels = labels[:M]
+    else:
+        mem_labels = _np.arange(M)
+    return pd.Series(mem_labels, index=mem_idx, dtype=object)
 
 
 def _derive_protein_pairs(
@@ -298,8 +360,29 @@ def _derive_protein_pairs(
     Returns columns: class, cluster, ext_acc, outgroup_acc, ext_id, outgroup_id.
     """
     from .gtdb import bare_accession
+    # Restrict the index to genomes that actually appear in `pairs`. Derivation only
+    # ever looks up bare accessions taken from pairs["extremophile_acc"]/["outgroup_acc"];
+    # every other genome in `labeled` (all ~190k unreferenced ones under whole-proteome
+    # scope) would be built into the index and then never queried. Filtering here is
+    # therefore OUTPUT-PRESERVING -- it removes only rows that could never be emitted --
+    # and it shrinks the index from the full ~119.68M-row corpus to just the proteins of
+    # the ~10k paired genomes. This is the single change that turns a multi-hour phase
+    # into minutes; the corpus table returned by assemble_dataset is unaffected because
+    # stratified_group_split still runs on the full `labeled` upstream.
+    needed = set()
+    for col in ("extremophile_acc", "outgroup_acc"):
+        if col in pairs:
+            for a in pairs[col]:
+                b = bare_accession(a)
+                if b:
+                    needed.add(b)
     lab = labeled.copy()
     lab["_bare"] = lab[genome_col].astype(str).map(bare_accession)
+    if needed:
+        n_before = len(lab)
+        lab = lab[lab["_bare"].isin(needed)].copy()
+        _ph(f"derive index filtered to {len(needed):,} paired genomes: "
+            f"{n_before:,} -> {len(lab):,} rows")
 
     # Within-cluster representative choice: one protein per (genome, cluster).
     #
@@ -453,6 +536,23 @@ def _derive_protein_pairs(
     return out
 
 
+import time as _time
+import sys as _sys
+
+_ASM_T0 = [None]
+
+
+def _ph(msg: str) -> None:
+    """Phase timer for assemble_dataset -- prints to stderr with wall-clock since the
+    first call. Added after three wrong runtime diagnoses on the 119.68M-row corpus: the
+    only way to know which phase costs hours is to mark each boundary and read it, since
+    the output is a full-corpus table and every phase touches all rows."""
+    if _ASM_T0[0] is None:
+        _ASM_T0[0] = _time.time()
+    el = _time.time() - _ASM_T0[0]
+    print(f"[assemble] t+{int(el)//60:02d}:{int(el)%60:02d} {msg}", file=_sys.stderr, flush=True)
+
+
 def assemble_dataset(
     secreted: pd.DataFrame,
     genome_labels: pd.DataFrame,
@@ -538,13 +638,16 @@ def assemble_dataset(
     #    Protein-level pairs are derived separately (protein_pairs attribute).
     protein_pairs = None
     if pairs is not None and len(pairs) and group_kind.startswith("genome"):
+        _ph(f"coassign start ({len(labeled):,} rows, {len(pairs):,} pairs)")
         labeled["_split_group"] = _coassign_matched_pairs(
             labeled, group_col, genome_col, pairs)
+        _ph("coassign done")
         split_group_col = "_split_group"
         group_kind += "+matched_pairs"
     else:
         split_group_col = group_col
         if pairs is not None and len(pairs) and group_kind.startswith("sequence_cluster"):
+            _ph(f"derive_pairs start ({len(labeled):,} rows, {len(pairs):,} pairs)")
             protein_pairs = _derive_protein_pairs(
                 labeled, group_col, genome_col, pairs,
                 max_pairs_per_cluster_class=max_pairs_per_cluster_class, seed=seed,
@@ -552,8 +655,12 @@ def assemble_dataset(
                 default_scope=default_scope, secreted_col=secreted_col,
                 cluster_col_by_scope=cluster_col_by_scope)
 
+    if protein_pairs is not None:
+        _ph(f"derive_pairs done ({len(protein_pairs):,} protein pairs)")
+    _ph(f"split start ({len(labeled):,} rows)")
     out = stratified_group_split(labeled, group_col=split_group_col, label_col="label",
                                  splits=splits, seed=seed)
+    _ph("split done; computing stats")
 
     stats = {
         "n_proteins": int(len(out)),
@@ -580,4 +687,5 @@ def assemble_dataset(
         stats["n_protein_pairs"] = int(len(protein_pairs))
         stats["protein_pairs_same_split"] = int(
             (protein_pairs["ext_split"] == protein_pairs["out_split"]).sum())
+    _ph("stats done; returning")
     return SplitResult(table=out, stats=stats, protein_pairs=protein_pairs)
