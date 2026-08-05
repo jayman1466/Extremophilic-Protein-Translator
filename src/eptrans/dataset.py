@@ -553,6 +553,82 @@ def _ph(msg: str) -> None:
     print(f"[assemble] t+{int(el)//60:02d}:{int(el)%60:02d} {msg}", file=_sys.stderr, flush=True)
 
 
+def _apply_corpus_scope(
+    labeled: pd.DataFrame,
+    pairs: "pd.DataFrame | None",
+    scope_by_class: dict,
+    default_scope: str,
+    secreted_col: str,
+    genome_col: str,
+    protein_id_col: str,
+    label_col: str = "label",
+    is_meso_col: str = "is_mesophile",
+) -> "tuple[pd.DataFrame, dict]":
+    """Restrict the training CORPUS to each genome's scope-relevant proteins.
+
+    Biological grounding: pH and salinity are properties of the EXTRACELLULAR
+    medium, so for {halophile, acidophile, alkaliphile} (and thermophile, held at
+    secreted by config) the adaptive signal is in the secretome; a cytoplasmic
+    protein of an acidophile sits at ~neutral internal pH and carries no
+    acid-adaptation signal, so labelling it 'acidophile' teaches noise. Temperature
+    acts proteome-wide, so {hyperthermophile, psychrophile} keep the whole proteome.
+
+    Rule (single-label corpus; `label` is the class, or 'mesophile' for negatives):
+      * extremophile of a WHOLE-scope class   -> keep all its proteins
+      * extremophile of a SECRETED-scope class -> keep only is_secreted proteins
+      * mesophile (negative/outgroup) -> UNION of the scopes it serves:
+          keep all proteins IF it is an outgroup in >=1 whole-scope-class pair,
+          else keep only its is_secreted proteins.
+
+    Returns (filtered_labeled, scope_stats). Removal-only: never fabricates a
+    protein, so a whole-proteome that is simply absent from the input stays absent.
+    """
+    from .gtdb import bare_accession
+    whole_classes = {c for c, s in scope_by_class.items() if s == "whole_proteome"}
+    if default_scope == "whole_proteome":
+        # any labelled class not explicitly mapped defaults to whole
+        present = set(labeled[label_col].astype(str).unique()) - {"mesophile"}
+        whole_classes |= (present - set(scope_by_class))
+
+    # mesophile genomes that serve a whole-scope OUTGROUP role (from the genome
+    # pairs table). bare_accession normalises GB_/RS_/CU_ prefixes on both sides.
+    whole_meso: set = set()
+    if pairs is not None and len(pairs) and "class" in getattr(pairs, "columns", []):
+        w = pairs[pairs["class"].isin(whole_classes)]
+        for a in w["outgroup_acc"].dropna().astype(str):
+            b = bare_accession(a)
+            if b:
+                whole_meso.add(b)
+
+    sec = labeled[secreted_col].fillna(False).astype(bool)
+    if is_meso_col in labeled.columns:
+        is_meso = labeled[is_meso_col].fillna(False).astype(bool)
+    else:
+        is_meso = labeled[label_col].astype(str).eq("mesophile")
+    lab = labeled[label_col].astype(str)
+    # vectorised bare accession: strip the same prefixes bare_accession() strips
+    bare = labeled[genome_col].astype(str).str.replace(r"^(GB_|RS_|CU_)", "", regex=True)
+
+    in_whole_class = lab.isin(whole_classes)
+    in_whole_meso = bare.isin(whole_meso)
+    keep = (
+        ((~is_meso) & in_whole_class)                      # ext whole  -> all
+        | ((~is_meso) & (~in_whole_class) & sec)           # ext secreted -> secreted
+        | (is_meso & in_whole_meso)                        # meso serving whole -> all
+        | (is_meso & (~in_whole_meso) & sec)               # meso else -> secreted
+    )
+    n_before = len(labeled)
+    out = labeled[keep].copy()
+    stats = {
+        "scope_n_before": int(n_before),
+        "scope_n_after": int(len(out)),
+        "scope_dropped": int(n_before - len(out)),
+        "scope_whole_classes": sorted(whole_classes),
+        "scope_whole_mesophile_genomes": int(len(whole_meso)),
+    }
+    return out, stats
+
+
 def assemble_dataset(
     secreted: pd.DataFrame,
     genome_labels: pd.DataFrame,
@@ -590,6 +666,23 @@ def assemble_dataset(
     # tagged id used for cluster lookup + as the dataset key
     labeled["tagged_id"] = (labeled[genome_col].astype(str) + "~"
                             + labeled[protein_id_col].astype(str))
+
+    # ---- PER-CLASS PROTEIN SCOPE, APPLIED AT CORPUS CONSTRUCTION ----
+    # Restrict the corpus to each genome's scope-relevant proteins BEFORE
+    # clustering/splitting so the MLM adapter and the classifier both train only on
+    # the biologically relevant fraction (secretome for pH/salt classes, whole
+    # proteome for temperature classes). scope_by_class=None keeps the historical
+    # contract (input taken as-is). See _apply_corpus_scope for the rule.
+    _scope_stats = None
+    if scope_by_class:
+        labeled, _scope_stats = _apply_corpus_scope(
+            labeled, pairs, dict(scope_by_class), default_scope, secreted_col,
+            genome_col, protein_id_col)
+        _ph(f"corpus scope: {_scope_stats['scope_n_before']:,} -> "
+            f"{_scope_stats['scope_n_after']:,} "
+            f"(dropped {_scope_stats['scope_dropped']:,}; "
+            f"whole={_scope_stats['scope_whole_classes']}, "
+            f"whole_meso_genomes={_scope_stats['scope_whole_mesophile_genomes']:,})")
 
     # ---- MULTI-THRESHOLD CLUSTERING ----
     # cluster_maps = {name: DataFrame[member, cluster]} attaches one column per
@@ -687,5 +780,42 @@ def assemble_dataset(
         stats["n_protein_pairs"] = int(len(protein_pairs))
         stats["protein_pairs_same_split"] = int(
             (protein_pairs["ext_split"] == protein_pairs["out_split"]).sum())
+    if _scope_stats is not None:
+        stats.update(_scope_stats)
+
+    # ---- EXECUTABLE SCOPE/LEAKAGE INVARIANTS (anti-regression guard) ----
+    # These ASSERT the agreed corpus contract on the assembled table so a future
+    # refactor that silently unwinds scope (as happened once) breaks the run
+    # instead of shipping a wrong corpus. assemble raises AssertionError -> F exits
+    # nonzero. Only the scope invariants are gated on scope being active; the
+    # leakage/pair invariants always hold.
+    if _scope_stats is not None:
+        whole = set(_scope_stats["scope_whole_classes"])
+        lab = out["label"].astype(str)
+        sec = out[secreted_col].fillna(False).astype(bool) if secreted_col in out.columns else None
+        if sec is not None:
+            # INV-SCOPE-A: no non-secreted protein carries a secreted-scope class label
+            sec_class_rows = (~lab.isin(whole)) & lab.ne("mesophile")
+            bad_a = int((sec_class_rows & (~sec)).sum())
+            assert bad_a == 0, (
+                f"INV-SCOPE-A violated: {bad_a:,} non-secreted proteins carry a "
+                f"secreted-scope class label (scope filter did not apply to corpus)")
+            stats["inv_scope_a_bad"] = bad_a
+            # INV-SCOPE-B: whole-scope classes retain non-secreted proteins
+            if whole:
+                whole_nonsec = int(((lab.isin(whole)) & (~sec)).sum())
+                assert whole_nonsec > 0, (
+                    "INV-SCOPE-B violated: whole-scope classes have zero non-secreted "
+                    "proteins (they were incorrectly filtered to the secretome)")
+                stats["inv_scope_b_whole_nonsecreted"] = whole_nonsec
+    # INV-LEAKAGE / INV-PAIR (always enforced)
+    assert stats.get("max_splits_per_group", 0) <= 1, (
+        f"INV-LEAKAGE violated: a split-group spans "
+        f"{stats.get('max_splits_per_group')} splits")
+    if "n_protein_pairs" in stats:
+        assert stats["protein_pairs_same_split"] == stats["n_protein_pairs"], (
+            f"INV-PAIR violated: {stats['n_protein_pairs'] - stats['protein_pairs_same_split']:,} "
+            f"of {stats['n_protein_pairs']:,} protein pairs straddle splits")
+
     _ph("stats done; returning")
     return SplitResult(table=out, stats=stats, protein_pairs=protein_pairs)
