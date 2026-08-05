@@ -51,6 +51,11 @@ def main() -> None:
     ap.add_argument("--max-total-per-class", type=int, default=100)
     ap.add_argument("--classes", default=None,
                     help="comma-separated class list (default: all 6)")
+    ap.add_argument("--require-col", default=None,
+                    help="boolean labels column a genome must satisfy to be "
+                         "selectable (e.g. has_proteome). Nulls count as usable; "
+                         "only an explicit False excludes. Prevents selecting "
+                         "genomes that contribute zero proteins.")
     ap.add_argument("--confidence", default=None,
                     help="confidence tiers to keep. Global: 'high,medium'. Per-class: "
                          "'default=high,medium;thermophile=high' (semicolon-separated, "
@@ -84,7 +89,7 @@ def main() -> None:
     res = select_with_outgroups(
         labels, classes=classes, max_per_lineage=args.max_per_lineage,
         lineage_rank=args.lineage_rank, max_total_per_class=args.max_total_per_class,
-        confidence_levels=conf, reuse_outgroups=args.reuse_outgroups, seed=args.seed,
+        confidence_levels=conf, reuse_outgroups=args.reuse_outgroups, seed=args.seed, require_col=args.require_col,
     )
 
     pref = Path(args.out_prefix)

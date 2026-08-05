@@ -2176,3 +2176,64 @@ satisfied by a different mechanism: the whole-scope accession list carries all
 4,690 low-tier psychrophiles, so they enter the clustering and MLM corpus without
 becoming labelled pairs — **conditional on the FASTA fix above**, without which they
 were not going to be in the corpus at all.
+
+### Stage C completed — the whole-scope fix worked, and exposed a second defect
+
+Stage C (`1164488`) COMPLETED in **50:24**. Both clustering jobs also finished:
+D 50% in **08:46**, E 40% in **21:28**. F is running.
+
+**The whole-scope fix is confirmed on production data:**
+
+```
+[05agg] proteins 119,678,568 | secreted 17,888,982 (14.95%) | genomes 51,786
+[05agg] whole-scope genomes: 7,320
+[05agg] wrote secreted FASTA 2,057,964 seqs | whole FASTA 10,874,729 seqs
+[05agg] whole-scope requested 7,320 | in prediction table 2,403 | read regardless 7,320
+```
+
+Only **2,403 of 7,320** whole-scope genomes appear in the prediction table, so the
+old loop would have emitted roughly a third of the whole-proteome corpus. The whole
+FASTA holds **10.87 M sequences** against the secretome's 2.06 M — a **5.28×**
+corpus for the two whole-proteome classes.
+
+**Second defect, found in the same log line: `WARNING: 3,465 genomes had no proteome
+file`.** All 3,465 are whole-scope genomes, and all are non-representatives with
+`has_proteome == False` (1,628 MAGs, 1,837 GTDB). Zero representatives were lost, so
+the bulk of that warning is an *expected* absence — 3,855 of 7,320 whole-scope
+genomes made it into the FASTA.
+
+But **10 of those missing genomes appear in the actual pair table**, which is not
+benign: a pair whose genome has no sequences derives **zero protein pairs**, silently.
+All 10 are MAGs with `has_proteome == False`. Damage by class:
+
+| class | affected pairs | of which high-confidence |
+|---|--:|--:|
+| psychrophile | 7 | **2** |
+| hyperthermophile | 3 | 0 |
+| halophile | 1 | 0 |
+
+**2 of the only 12 high-confidence psychrophile pairs — 17% of the scarcest tier in
+the dataset — were void.**
+
+Fixed at the source: `select_with_outgroups` gains `require_col`, applied to
+extremophiles *and* outgroups before any diversity capping, so the caps spend their
+budget on usable genomes and pick replacements. Exposed as `--require-col` on stage
+04 and wired into both stage-B calls as `--require-col has_proteome`.
+
+**Null semantics matter here and nearly caused a much worse bug.** `has_proteome` is
+written only by the custom MAG ingest: all **901,341** GTDB rows carry `None`, and
+only the 4,084 MAG rows carry True/False (330 True / 3,754 False). A naive
+`fillna(False)` gate would have dropped **the entire GTDB catalogue**. The gate
+therefore treats null as usable — `col.isna() | col.fillna(False)` — and only an
+explicit False excludes. Verified: True→keep, False→drop, None→keep.
+
+**Measured on the real labels, psychrophile high+medium:** the gate removes all 10
+bad genomes (0 occurrences) and yields **330 pairs against the previous 332** — so 7
+void pairs were replaced by usable substitutes and only 2 net pairs were lost. The
+gate costs almost nothing and recovers 8 pairs that would have silently contributed
+nothing.
+
+**Separate gap noticed, not yet fixed:** stage B does not pass `--max-per-sample`,
+which stage 04 does not expose either, so the per-sample cap decided earlier is
+currently inactive in this chain. Worth closing before the deep-sea MAGs dominate any
+single class.

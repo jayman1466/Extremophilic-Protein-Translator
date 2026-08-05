@@ -163,6 +163,7 @@ def select_with_outgroups(
     reuse_outgroups: bool = False,
     max_per_sample: int | None = None,
     sample_col: str = "source_sample_id",
+    require_col: str | None = None,
     seed: int = 1466,
 ) -> SelectionResult:
     """Full phylo-controlled selection: diverse extremophiles + matched outgroups.
@@ -174,6 +175,18 @@ def select_with_outgroups(
             (see ``select_extremophiles``). Applies to the extremophile draw only;
             mesophile outgroups are matched individually by taxonomy, so a sample
             cannot dominate them the same way. ``None`` disables it.
+        require_col: name of a boolean column that a genome must satisfy to be
+            selectable at all, applied to BOTH extremophiles and outgroups.
+
+            WHY THIS EXISTS: pass ``"has_proteome"``. A genome with no proteome
+            file on disk contributes no protein sequences, so any pair built on it
+            derives ZERO protein pairs -- silently, since nothing downstream errors
+            on an absent FASTA entry. Measured on the 2026-08-04 run: 10 selected
+            MAGs had ``has_proteome == False``, voiding 10 genome pairs including
+            **2 of the only 12 high-confidence psychrophile pairs (17% of that
+            tier)**. Filtering here rather than downstream means the diversity caps
+            and outgroup matching spend their budget on usable genomes and pick
+            replacements, instead of the pairs evaporating after assembly.
     """
     cfg = load_config()
     classes = classes or ["thermophile", "hyperthermophile", "psychrophile",
@@ -183,6 +196,25 @@ def select_with_outgroups(
     missing = [r for r in GTDB_RANKS if r not in labels.columns]
     if missing:
         raise ValueError(f"labels missing taxonomy columns {missing}; run expand_taxonomy first")
+
+    # Drop unusable genomes BEFORE any selection, so caps and matching spend their
+    # budget on genomes that can actually contribute proteins (see require_col).
+    if require_col:
+        if require_col not in labels.columns:
+            raise ValueError(f"require_col={require_col!r} not in labels columns")
+        # NULL means "not annotated by this ingest", NOT "absent". Only the custom
+        # MAG ingest writes has_proteome; all 901,341 GTDB rows carry None, and every
+        # GTDB representative does have a proteome. Treating null as False would drop
+        # the entire GTDB catalogue -- so null is retained and only an explicit
+        # False excludes.
+        col = labels[require_col]
+        keep = col.isna() | col.fillna(False).astype(bool)
+        n_drop = int((~keep).sum())
+        if n_drop:
+            print(f"[selection] require_col={require_col}: dropping {n_drop:,} of "
+                  f"{len(labels):,} genomes explicitly flagged as having no proteome "
+                  f"(nulls retained as unannotated)")
+        labels = labels[keep].copy()
 
     mesophile_pool = labels[labels[mesophile_col].fillna(False)].copy()
 

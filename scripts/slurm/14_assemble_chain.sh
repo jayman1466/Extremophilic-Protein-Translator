@@ -146,12 +146,12 @@ B=$($SB $LIGHT --job-name=asm_pairs --cpus-per-task=8 --mem=64G --time=02:00:00 
   --dependency=afterok:$A \
   --wrap "set -u; cd $REPO && export PYTHONPATH=$REPO/src && \
     $PY scripts/04_select_genomes.py --labels $W/combined_labels.parquet \
-      --classes thermophile --confidence high \
+      --classes thermophile --confidence high --require-col has_proteome \
       --max-total-per-class 1000000000 --reuse-outgroups \
       --out-prefix $W/sel_thermophile && \
     for CLS in halophile acidophile alkaliphile hyperthermophile psychrophile; do \
       $PY scripts/04_select_genomes.py --labels $W/combined_labels.parquet \
-        --classes \$CLS --confidence high,medium \
+        --classes \$CLS --confidence high,medium --require-col has_proteome \
         --max-total-per-class 1000000000 --reuse-outgroups \
         --out-prefix $W/sel_\$CLS || exit 1; done && \
     head -1 $W/sel_thermophile.pairs.tsv > $W/all_pairs.tsv && \
