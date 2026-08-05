@@ -2887,3 +2887,41 @@ The chain has now been deployed (`17a40f74`, syntax checked). The `dataset.py` d
 stays until the incumbent finishes: `repo/` must keep the module its running job started
 with, while `repo_v2/` carries the optimisation. Anyone running the check mid-experiment
 should expect that one line and no others.
+
+### Code defect behind the RSS unit error: a hardcoded number in an f-string
+
+The unit error corrected in `9eb8066` had a specific cause worth recording, because the
+cell that reported it **contradicted itself** and I did not say so.
+
+That cell converted the trace correctly for the table (`kb/1048576`) but the trailing
+note interpolated a **literal string** for the peak:
+
+```python
+print(f"NOTE incumbent RSS FELL from 295.5->{inc['rss_kb']/1048576:.0f} GiB ...")
+#                                    ^^^^^ hardcoded, never converted
+```
+
+So the same `print` mixed a correctly-converted current value with a hand-typed peak that
+was `295504624/1e6` — the decimal-million shortcut — labelled GiB. Its output read
+`295.5->224 GiB` while the prose alongside it said 281.8 GiB. Both cannot be right.
+
+Recomputed with every figure derived from the raw KB, no literals:
+
+| t (min) | rss (KB) | GiB |
+|--:|--:|--:|
+| 17.1 | 134,742,960 | 128.5 |
+| 45.9 | 221,024,256 | 210.8 |
+| 95.0 | 280,902,656 | 267.9 |
+| 96.2 | 283,988,992 | 270.8 |
+| 97.5 | 287,049,728 | 273.8 |
+| 104.0 | 295,504,624 | **281.8 (peak)** |
+| 148.6 | 234,667,572 | 223.8 |
+
+`295504624/1024^2 = 281.8`; `/1e6 = 295.5`, a **4.9% inflation**. Released since peak:
+**58.0 GiB**. The reported conclusion (281.8) was the correct one and no tracked file ever
+contained 295.5 — verified by grep across md/py/sh — so nothing durable needs changing.
+
+The lesson is narrower than "unit confusion": **do not hand-type a number into an
+f-string that the same cell already has in a variable.** A literal cannot be checked
+against the data it claims to describe, and it silently survives the correction of every
+computed value around it.
