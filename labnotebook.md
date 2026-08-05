@@ -2783,3 +2783,58 @@ Two habits this argues for:
   from one stderr line, and it mutates durable history.
 * **Any `--amend` invalidates the hash.** Re-read `git log -1 --format=%h` after
   amending; never carry the pre-amend SHA forward.
+
+### Run-1 model artifacts archived to `*_old` before the retrain
+
+**They were on a collision course.** All four training/inference stages write to fixed
+paths with **no run identifier**:
+
+| stage | output path |
+|---|---|
+| 08 MLM | `$PERSIST/models/mlm_adapt` |
+| 08 classifier | `$PERSIST/models/clf_${PHENO}` |
+| 09 embed | `$PERSIST/embeddings/secretome_r232` |
+| 10 cached probe | `$PERSIST/models/cached_probes` |
+
+So re-running stage 08 would have overwritten the run-1 adapter in place -- **~10.7 h of
+H200 time**, with the embedding cache (~3 h) invalidated behind it.
+
+**Also settles an open question from earlier in the session.** I had only been able to
+establish at *directory* level that the cached heads persisted rather than landing in
+swept scratch, and explicitly declined to assert the files were intact. They are:
+**all five `head_best.pt`, 5,249,120 B each.**
+
+Inventory: `mlm_adapter_best/adapter_model.safetensors` 94,413,200 B; five
+`clf_*/clf_ckpt.pt` at ~299,214,922 B each; five cached-probe heads; eight embedding
+shards totalling 9.6 G. **69 files, 12,249,122,328 bytes.**
+
+**Moved, not copied.** `mv` within one filesystem is a rename -- instant and no extra
+space. Verified after the move: same 69 files, same 12,249,122,328 bytes,
+`adapter_model.safetensors` md5 `0771ed96a8a32744e19daeac2ab27c79` and
+`clf_thermophile_cached/head_best.pt` md5 `8fcfad0aabd0dd6d0aede8416ba7e329`, both
+unchanged. Checked first that no running job reads these paths (stage F touches only
+`assemble/`).
+
+An earlier `cp -al` hardlink snapshot (`models_run1_r232_20260711`) was removed once
+`stat` confirmed it shared inodes with `*_old` -- link count 2 before removal, 1 after,
+byte total and checksum unchanged. It was a second name for the same data, not a second
+copy.
+
+`ARCHIVE_README.md` written into both directories recording the inventory, the checksums,
+the provenance (trained 2026-07-11/12 on the **secreted-only** dataset, before the MAG
+ingest, per-phenotype scope, measured-OGT rubric, `has_proteome` gate, `--max-per-sample`,
+and the low-tier exclusions), and the restore command.
+
+Two things the README makes explicit:
+* **Run-1 weights are not comparable head-to-head with the retrain.** Label definitions,
+  genome set and protein scope all changed. They are a fallback and a reference for the
+  reported run-1 numbers (thermophile AUPRC 0.862 on 1,495 val pairs, pair-level AUC
+  0.905), not a baseline.
+* The **MLM->classifier key-remap trap** still applies to this adapter: stage 08 trains
+  `EsmForMaskedLM`, the classifier is a bare `EsmModel`, and `peft.load_adapter` silently
+  drops mismatched keys. Anything loading it must go through
+  `load_mlm_adapter_into_classifier` (288 tensors, 0 unmatched) or it reads zeros.
+
+**Worth fixing properly:** the fixed output paths are the underlying defect. Stage 08/09/10
+should take a run tag (or refuse to start when the target exists and no `--overwrite` is
+given), so the next retrain cannot depend on someone remembering to archive first.
