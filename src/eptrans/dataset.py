@@ -808,6 +808,26 @@ def assemble_dataset(
                     "INV-SCOPE-B violated: whole-scope classes have zero non-secreted "
                     "proteins (they were incorrectly filtered to the secretome)")
                 stats["inv_scope_b_whole_nonsecreted"] = whole_nonsec
+            # INV-SCOPE-C: mesophile = UNION of served scopes. A mesophile keeps
+            # non-secreted proteins ONLY if it outgroups >=1 whole-scope-class pair;
+            # a mesophile that serves only secreted-scope classes must be secretome-
+            # only. Recompute the whole-outgroup genome set from the pairs table (the
+            # same source _apply_corpus_scope used) and assert no non-secreted
+            # mesophile protein comes from a genome outside it.
+            is_meso_out = (out["is_mesophile"].fillna(False).astype(bool)
+                           if "is_mesophile" in out.columns else lab.eq("mesophile"))
+            whole_meso_acc: set = set()
+            if pairs is not None and len(pairs) and "class" in getattr(pairs, "columns", []):
+                from .gtdb import bare_accession as _ba
+                _w = pairs[pairs["class"].isin(whole)]
+                whole_meso_acc = {_ba(a) for a in _w["outgroup_acc"].dropna().astype(str) if _ba(a)}
+            bare_out = out[genome_col].astype(str).str.replace(r"^(GB_|RS_|CU_)", "", regex=True)
+            bad_c = int((is_meso_out & (~sec) & (~bare_out.isin(whole_meso_acc))).sum())
+            assert bad_c == 0, (
+                f"INV-SCOPE-C violated: {bad_c:,} non-secreted mesophile proteins come "
+                f"from genomes that outgroup NO whole-scope class (mesophile scope is "
+                f"not the union of the scopes it serves)")
+            stats["inv_scope_c_bad"] = bad_c
     # INV-LEAKAGE / INV-PAIR (always enforced)
     assert stats.get("max_splits_per_group", 0) <= 1, (
         f"INV-LEAKAGE violated: a split-group spans "
