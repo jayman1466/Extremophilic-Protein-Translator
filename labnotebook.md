@@ -2838,3 +2838,52 @@ Two things the README makes explicit:
 **Worth fixing properly:** the fixed output paths are the underlying defect. Stage 08/09/10
 should take a run tag (or refuse to start when the target exists and no `--overwrite` is
 given), so the next retrain cannot depend on someone remembering to archive first.
+
+### F_v2 has no progress output — the markers were never deployed
+
+Asked whether stage F_v2 reports progress. It does not, and the reason is mine: the
+`_phase()` markers committed in `c0167e3` existed **only in the local tree**. On the
+cluster both `repo/` and `repo_v2/` had `_phase(` count **0**. So v2 ran under `python -u`
+(which was deployed, via the chain) against a script with nothing to emit until its first
+`print` at line 102 — which sits *after* the 36 GB read. Blind for the same reason as the
+incumbent, by a different route.
+
+**Second partial-deployment failure this session**, after the stale `04_select_genomes.py`
+that killed stage B. Same shape: edited locally, transferred some files, assumed the rest.
+
+**A measurement error inside the diagnosis, worth recording.** My first
+`srun ... pgrep -f 06_assemble_dataset | head -1` returned **the wrong process** — both F
+jobs run on the same node, and `head -1` picked the older one, so v2's "progress" was
+actually the incumbent's. Fixed by mapping PID to job through
+`/proc/<pid>/cgroup`:
+
+| job | pid | elapsed | CPU | RSS |
+|---|--:|--:|--:|--:|
+| 1164635 incumbent | 2196564 | 148.6 min | 02:28:35 | 223.8 GiB |
+| **1164779 v2** | 2277830 | **16.3 min** | 00:15:57 | **80.9 GiB** |
+
+At **matched wall clock** (v2 at 16.3 min vs the incumbent's own 16.5-min sample) v2 holds
+**80.9 GiB against 128.5 GiB — 1.59x less memory**. Not yet a time claim: neither had
+reached the phase where the lookup fix dominates.
+
+Incidental: the incumbent's RSS **fell** from its 281.8 GiB peak (t=104 min) to 223.8 GiB
+(t=148.6 min), so it released the input table and is into derivation — the phase the
+optimisation targets.
+
+**Deployed the marker version to both trees** (md5 `defde8fbe20063184597b709f368adda`,
+4 markers, compiles). No effect on the running jobs, which imported their module at start.
+
+**Added `scripts/check_deployed.sh`** so this cannot recur silently: it md5s the 13
+scripts and modules the chain invokes against the cluster copy and exits non-zero on any
+mismatch. Run before every submission. On its first run it immediately found two real
+divergences:
+
+| file | local | remote | cause |
+|---|---|---|---|
+| `14_assemble_chain.sh` | `17a40f74` | `7a2392de` | the `-u` change (`c0167e3`) not deployed |
+| `src/eptrans/dataset.py` | `4baa0cb0` | `3fd4b118` | **intentional** — `repo/` holds the unoptimised module the incumbent is running |
+
+The chain has now been deployed (`17a40f74`, syntax checked). The `dataset.py` divergence
+stays until the incumbent finishes: `repo/` must keep the module its running job started
+with, while `repo_v2/` carries the optimisation. Anyone running the check mid-experiment
+should expect that one line and no others.
