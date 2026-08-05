@@ -2266,3 +2266,104 @@ no downstream weight or decision moves; the `low` = 0.10 anchor and the
 exclude-psychrophile-low conclusion both stand. Corrected here because a denominator
 that quietly absorbs un-evaluated genomes is the kind of error that compounds when
 someone later recomputes a rate from it.
+
+### Restage decision: psychrophile_low out of whole scope, --max-per-sample 5, cap null
+
+Stage F (`1164491`) cancelled at **01:06:49** — no output written. The read probe
+measured **12.6 MB/s** on the 36 GB `secreted_all.tsv` (119.7 M rows, ~18 GB RAM,
+7 columns), i.e. **~48 min of pure parsing** before any work begins, which matches an
+hour of silence. F was superseded regardless: its cluster maps were built from a FASTA
+that was **50.8% clusters existing only because of psychrophile_low**.
+
+**Decision 1 — exclude psychrophile_low from the whole-proteome corpus.** Measured
+basis:
+
+| bucket | genomes | seqs | pct of whole FASTA |
+|---|--:|--:|--:|
+| psychrophile_low | 1,835 | 6,262,304 | **57.6%** |
+| hyperthermophile_low | 490 | 1,326,324 | 12.2% |
+| mesophile_outgroup | 542 | 1,251,496 | 11.5% |
+| psychrophile_medium | 424 | 1,116,579 | 10.3% |
+| hyperthermophile_medium | 454 | 720,492 | 6.6% |
+| hyperthermophile_high | 100 | 156,285 | 1.4% |
+| psychrophile_high | 10 | 41,249 | 0.4% |
+
+**It costs zero protein pairs.** Of the whole-proteome map's 3,348,165 clusters,
+**1,702,137 (50.8%) contain no non-low member** — and a cluster with no outgroup member
+can never form a matched pair. **82.1% of those are singletons** (mean size 1.52). A
+further **58.8%** of psy_low sequences sit in clusters shared with retained genomes,
+so they were redundant anyway. What is actually lost is MLM pretraining diversity, and
+that is a bet against four independent populations showing no habitat-only cold signal
+(0.14-0.63%, n=1452/639/443/1416).
+
+hyperthermophile **keeps** low: the cold-end calibration failure does not apply to it,
+and at 293 genome pairs it is the class most starved of data.
+
+Implementation detail that matters: pair members are added to the scope list
+**unconditionally**, after the tier filter. Stage B already confidence-gated them, and
+dropping one here would void a matched pair — the exact failure the `has_proteome`
+gate was written to prevent.
+
+**Decision 2 — `--max-per-sample 5`, flat, not scaled by class size.** `source_sample_id`
+is populated only by the MAG ingest, so the cap bites on MAG-derived genomes only:
+
+| class | selected | with sample id | samples | max/sample | removed at 5 |
+|---|--:|--:|--:|--:|--:|
+| thermophile | 1,630 | 331 | 79 | **22** | **107** |
+| halophile | 2,934 | 34 | 32 | 2 | 0 |
+| acidophile | 798 | 19 | 14 | 3 | 0 |
+| hyperthermophile | 293 | 15 | 5 | 7 | 2 |
+| psychrophile | 332 | 4 | 4 | 1 | 0 |
+| alkaliphile | 581 | 1 | 1 | 1 | 0 |
+
+**Class size does not predict sample concentration** — halophile is the largest class
+and has almost none; thermophile is mid-sized and carries all of it. Scaling the cap
+by class size would give the loosest cap to the class that needs it least. Flat 5.
+Cost noted honestly: thermophile loses 107 of 331 MAG-derived genomes (32%).
+
+`--max-per-sample` was already implemented in `select_extremophiles` (with correct
+null handling — GTDB isolates are never bucketed together) but **was never exposed on
+stage 04**, so it has been inactive in every run to date. Now exposed and forwarded.
+
+**Decision 3 — `max_pairs_per_cluster_class` stays `null`.** The proposed
+k = 0.25 x genome_pairs is a **measured no-op**: on the real 90,984-pair table it
+removes **0 pairs (0.000%)** for every class.
+
+| class | max cell | 0.25 x gp | verdict |
+|---|--:|--:|---|
+| halophile | 157 | 733 | no-op |
+| thermophile | 39 | 407 | no-op |
+| alkaliphile | 39 | 145 | no-op |
+| acidophile | 21 | 199 | no-op |
+| hyperthermophile | **3** | 73 | no-op |
+
+Cell-size distribution: **mean 1.63, median 1, q99 = 10, q99.9 = 34, max 157**. The
+largest cell in the dataset is smaller than the smallest proposed k.
+
+**This corrects my own earlier reasoning.** I rejected k=50 because it was a no-op for
+hyperthermophile and proposed scaling k by genome-pair count instead — without ever
+measuring the cell sizes the cap acts on. **Hyperthermophile's max cell is 3.** No cap
+above 3 can affect it under any parameterization. The prevalence spectrum had already
+implied this (max f = 0.684, zero clusters above 0.70): universal families fragment
+along phylogeny at these identity thresholds, so the pathological cells the cap was
+designed for do not exist. The mechanism stays implemented and tested; switching it on
+later is one config line.
+
+**RBH check (job 1164334) completed**, settling the identity-threshold specificity
+cost that was open:
+
+| threshold | hyperthermophile pairs/gp | precision |
+|---|--:|--:|
+| 50% | 51.1 | 96.48% |
+| 40% | 139.6 | 93.70% |
+| 30% | 232.7 | 88.97% |
+
+40% buys hyperthermophile **2.73x the pairs for 2.8 points of precision**; 30% costs a
+further 7.5 points for 1.7x. Supports the 40% threshold already used for
+whole-proteome classes.
+
+**Cluster-map naming is misleading and cost me a wrong measurement.** `clu50_cluster.tsv`
+holds the **secretome** map (2,057,964 members) and `clu40_cluster.tsv` the
+**whole-proteome** map (10,874,729). The suffixes are identity thresholds, not scopes.
+My first novelty measurement walked clu50 and reported psy_low as 0.5% of clusters;
+against the correct map it is 50.8%. Same code, wrong file, answer off by 100x.

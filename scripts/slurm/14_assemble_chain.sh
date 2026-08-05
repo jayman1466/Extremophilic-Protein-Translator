@@ -147,12 +147,12 @@ B=$($SB $LIGHT --job-name=asm_pairs --cpus-per-task=8 --mem=64G --time=02:00:00 
   --wrap "set -u; cd $REPO && export PYTHONPATH=$REPO/src && \
     $PY scripts/04_select_genomes.py --labels $W/combined_labels.parquet \
       --classes thermophile --confidence high --require-col has_proteome \
-      --max-total-per-class 1000000000 --reuse-outgroups \
+      --max-total-per-class 1000000000 --max-per-sample 5 --reuse-outgroups \
       --out-prefix $W/sel_thermophile && \
     for CLS in halophile acidophile alkaliphile hyperthermophile psychrophile; do \
       $PY scripts/04_select_genomes.py --labels $W/combined_labels.parquet \
         --classes \$CLS --confidence high,medium --require-col has_proteome \
-        --max-total-per-class 1000000000 --reuse-outgroups \
+        --max-total-per-class 1000000000 --max-per-sample 5 --reuse-outgroups \
         --out-prefix $W/sel_\$CLS || exit 1; done && \
     head -1 $W/sel_thermophile.pairs.tsv > $W/all_pairs.tsv && \
     for f in $W/sel_*.pairs.tsv; do tail -n +2 \$f >> $W/all_pairs.tsv; done && \
@@ -178,16 +178,44 @@ whole=[k for k,v in by_ph.items() if v=='whole_proteome']
 if not whole:
     sys.exit('FATAL: no class is whole_proteome scope; stage E would get an empty FASTA')
 pr=pd.read_parquet('$W/combined_labels.parquet')
+# Confidence tiers admitted to the whole-proteome MLM corpus, per class.
+#
+# WHY psychrophile EXCLUDES low (decided 2026-08-05, measured):
+#   * habitat-keyword-only cold evidence has a 0.14-0.63%% hit rate across four
+#     independent populations (n=1452/639/443/1416), so low-tier psychrophile is
+#     ~99%% label noise -- the weakest-signal class carrying the worst evidence.
+#   * it dominated the corpus: 4,690 genomes / 6,262,304 seqs = 57.6%% of the
+#     10.87M-seq whole FASTA.
+#   * dropping it costs ZERO protein pairs: 1,702,137 of its clusters contain no
+#     non-low member, and a cluster with no outgroup member can never form a
+#     matched pair. 82.1%% of those clusters are singletons (mean size 1.52).
+#   * 58.8%% of its sequences were redundant anyway (in clusters shared with
+#     retained genomes).
+# hyperthermophile keeps low: its cold-end evidence problem does not apply, and
+# it is the class most starved of data (293 genome pairs).
+WHOLE_CONF={'psychrophile':('high','medium'),'hyperthermophile':('high','medium','low')}
 m=pd.Series(False,index=pr.index)
+conf=pr['final_confidence'].astype(str) if 'final_confidence' in pr.columns else None
 for cl in whole:
     c='final_'+cl
-    if c in pr.columns: m |= pr[c].fillna(False).astype(bool)
+    if c not in pr.columns: continue
+    cm=pr[c].fillna(False).astype(bool)
+    tiers=WHOLE_CONF.get(cl)
+    if tiers is not None and conf is not None:
+        cm &= conf.isin(tiers)
+    m |= cm
+    print('WHOLE_SCOPE_TIER',cl,tiers or 'all',int(cm.sum()))
 # outgroups of whole-scope classes need full proteomes too
 p=pd.read_csv('$W/all_pairs.tsv',sep='\\t')
 acc=set(pr.loc[m,'accession'].astype(str))
 if 'class' in p.columns:
+    # Pair members are added UNCONDITIONALLY: stage B already applied the
+    # confidence gate when selecting them, and omitting one here would silently
+    # void a matched pair (the exact failure the has_proteome gate fixed).
     sel=p[p['class'].isin(whole)]
+    n_before=len(acc)
     acc|=set(sel['extremophile_acc'].astype(str))|set(sel['outgroup_acc'].dropna().astype(str))
+    print('WHOLE_SCOPE_PAIR_MEMBERS_ADDED',len(acc)-n_before)
 open('$W/whole_scope_accessions.txt','w').write('\\n'.join(sorted(a for a in acc if a and a!='nan'))+'\\n')
 print('WHOLE_SCOPE_GENOMES',len(acc),'classes',whole)
 \" && \

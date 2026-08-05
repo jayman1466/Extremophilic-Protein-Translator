@@ -51,6 +51,13 @@ def main() -> None:
     ap.add_argument("--max-total-per-class", type=int, default=100)
     ap.add_argument("--classes", default=None,
                     help="comma-separated class list (default: all 6)")
+    ap.add_argument("--max-per-sample", type=int, default=None,
+                    help="cap genomes drawn from any one environmental sample "
+                         "(source_sample_id). Only the MAG ingest populates that "
+                         "column, so this bites on MAG-derived genomes only; GTDB "
+                         "isolates have no sample id and are never capped. "
+                         "Measured 2026-08-05: at 5, removes 107 thermophile and 2 "
+                         "hyperthermophile genomes and touches no other class.")
     ap.add_argument("--require-col", default=None,
                     help="boolean labels column a genome must satisfy to be "
                          "selectable (e.g. has_proteome). Nulls count as usable; "
@@ -90,6 +97,7 @@ def main() -> None:
         labels, classes=classes, max_per_lineage=args.max_per_lineage,
         lineage_rank=args.lineage_rank, max_total_per_class=args.max_total_per_class,
         confidence_levels=conf, reuse_outgroups=args.reuse_outgroups, seed=args.seed, require_col=args.require_col,
+        max_per_sample=args.max_per_sample,
     )
 
     pref = Path(args.out_prefix)
