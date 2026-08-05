@@ -390,12 +390,26 @@ def _derive_protein_pairs(
         gc = ccol.get(sc, group_col)
         if gc not in sub.columns:
             raise ValueError(f"cluster column {gc!r} for scope {sc!r} not in the labeled table")
-        best_by_scope[sc] = sub.groupby(["_bare", gc])["tagged_id"].first()
+        # PERF: the loop below does 2 partial and 2 scalar lookups per emitted pair.
+        # A (_bare, cluster) MultiIndex Series from groupby().first() is NOT lexsorted,
+        # so each .loc degrades to a scan. Measured on a 4M-entry index: partial .loc
+        # 3.61 ms, scalar .loc 420 us; sort_index() alone gives 8.6x on the scalar path,
+        # and a plain dict-of-dicts gives ~9,000x on partials for a ~6 s one-time build.
+        # At ~1.2M whole-proteome pairs the .loc form costs ~17 min per million pairs and
+        # scales with output size, which is what made run 1164635 take hours.
+        _g = sub.groupby(["_bare", gc])["tagged_id"].first()
+        _d: dict[str, dict] = {}
+        for (_b, _cl), _tid in zip(_g.index, _g.values):
+            _d.setdefault(_b, {})[_cl] = _tid
+        best_by_scope[sc] = _d
 
     def _scope_of(cls):
         return scope_by_class.get(cls, default_scope) if scope_active else "_asis"
 
-    rows = []
+    # PERF: parallel per-column lists rather than one dict per row (measured 2.24x
+    # faster and 4.7x less peak memory at 1.2M rows). Secondary to the lookup fix above.
+    c_cls: list = []; c_clu: list = []; c_e: list = []; c_m: list = []
+    c_eid: list = []; c_mid: list = []; c_sc: list = []; c_col: list = []
     for cls, e_raw, m_raw in zip(pairs.get("class", [None] * len(pairs)),
                                  pairs["extremophile_acc"], pairs["outgroup_acc"]):
         e, m = bare_accession(e_raw), bare_accession(m_raw)
@@ -403,17 +417,27 @@ def _derive_protein_pairs(
             continue
         sc = _scope_of(cls)
         best = best_by_scope[sc]
-        try:
-            e_clusters = set(best.loc[e].index)
-            m_clusters = set(best.loc[m].index)
-        except KeyError:
+        e_map = best.get(e)
+        m_map = best.get(m)
+        if not e_map or not m_map:
             continue
-        for cl in (e_clusters & m_clusters):
-            rows.append({"class": cls, "cluster": cl, "ext_acc": e, "outgroup_acc": m,
-                         "ext_id": best.loc[(e, cl)], "outgroup_id": best.loc[(m, cl)],
-                         "scope": sc, "cluster_col": ccol.get(sc, group_col)})
-    out = pd.DataFrame(rows, columns=["class", "cluster", "ext_acc", "outgroup_acc",
-                                      "ext_id", "outgroup_id", "scope", "cluster_col"])
+        # iterate the smaller map and probe the larger: O(min) instead of building
+        # both key sets and intersecting them
+        if len(e_map) > len(m_map):
+            small, large = m_map, e_map
+        else:
+            small, large = e_map, m_map
+        col = ccol.get(sc, group_col)
+        for cl in small:
+            if cl in large:
+                c_cls.append(cls); c_clu.append(cl); c_e.append(e); c_m.append(m)
+                c_eid.append(e_map[cl]); c_mid.append(m_map[cl])
+                c_sc.append(sc); c_col.append(col)
+    out = pd.DataFrame({"class": c_cls, "cluster": c_clu, "ext_acc": c_e,
+                        "outgroup_acc": c_m, "ext_id": c_eid, "outgroup_id": c_mid,
+                        "scope": c_sc, "cluster_col": c_col},
+                       columns=["class", "cluster", "ext_acc", "outgroup_acc",
+                                "ext_id", "outgroup_id", "scope", "cluster_col"])
 
     k = max_pairs_per_cluster_class
     if k is not None and len(out):

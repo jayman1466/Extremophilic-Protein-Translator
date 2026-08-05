@@ -2711,3 +2711,48 @@ writing `*_v2` paths cannot corrupt the incumbent.
 Recurring failure mode, third instance this session: attributing cost to the code I had
 just read instead of the code I had measured (the 8-min dry run's quadratic dict rebuild,
 then this). Profile first.
+
+### Optimised pair derivation, validated byte-identical, running as a parallel F
+
+Applied both measured fixes to `_derive_protein_pairs`:
+
+1. **Dict-of-dicts replaces the MultiIndex Series.** `groupby(["_bare", gc]).first()`
+   returns a Series whose index is not lexsorted, so every `.loc` degrades to a scan.
+   Replaced with `{bare: {cluster: tagged_id}}`, built once. Measured on a 4 M-entry
+   index: partial `.loc` **3.61 ms -> 0.4 us (~9,000x)**, and `sort_index()` alone would
+   have given 8.6x on the scalar path.
+2. **Parallel per-column lists replace one dict per row** (2.24x, 4.7x less peak
+   accumulator memory) and the cluster intersection now iterates the smaller map and
+   probes the larger, `O(min)` instead of building two key sets.
+
+**Equivalence verified, not assumed** (job 1164778). Reference implementation = the
+original `.loc` code verbatim, run against a synthetic table with paralogs, an unmatched
+pair, an absent genome, and both scopes active:
+
+```
+old rows 179 | new rows 179
+IDENTICAL: True
+time old 0.20s | new 0.09s | speedup 2.2x
+cap k=2 rows 179 | deterministic True
+```
+
+Byte-identical output on all 8 columns after sorting, cap path intact and reproducible.
+139 passed / 1 skipped. (The 2.2x here is the accumulator effect only -- this table is
+too small for the lookup fix to show, since its cost scales with pairs emitted.)
+
+**Running as a parallel job, safely isolated.** Verified before submitting that stage F
+writes only `--out` and `--fig`; all five inputs are read-only and concurrent readers are
+safe.
+
+| | incumbent 1164635 | optimised 1164779 |
+|---|---|---|
+| tree | `repo/` (dataset.py md5 `3fd4b118`) | `repo_v2/` (md5 `4baa0cb0`) |
+| out | `labeled_dataset.parquet` | `labeled_dataset_v2.parquet` |
+| fig | `dataset_splits.png` | `dataset_splits_v2.png` |
+| marker | `.F_done` | `.F_v2_done` |
+| mem | 256G | 400G |
+
+Separate source trees, so editing the module could not disturb the 2 h+ incumbent --
+confirmed `repo/src/eptrans/dataset.py` still hashes to `3fd4b118` after staging v2.
+Whichever finishes first wins; the other is insurance. Incumbent was at **02:12:17** when
+v2 was submitted.
