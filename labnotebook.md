@@ -1192,7 +1192,7 @@ Post-training check: per-class AUPRC on a balanced validation slice.
 | low | 0.10 | yes | **no** |
 
 `low` = 0.10 is anchored on the measured 0.14-0.63% precision of habitat-only
-cold evidence across four populations (n=1452/639/443/1417). A calibrated weight
+cold evidence across four populations (n=1452/639/443/1416). A calibrated weight
 would be ~0.005, indistinguishable from exclusion; 0.10 keeps the sequence
 visible to the MLM for embedding structure without letting it drive the loss. It
 is a deliberate floor, not a likelihood ratio.
@@ -2167,7 +2167,7 @@ pool than high+medium combined.
 
 Holding at high+medium for pair selection. The `low` tier for psychrophile means
 habitat-keyword-only cold evidence, measured at a **0.14–0.63%** hit rate across four
-independent populations (n = 1,452 / 639 / 443 / 1,417); admitting it as labelled
+independent populations (n = 1,452 / 639 / 443 / 1,416); admitting it as labelled
 contrast would inject ~99% label noise into the class that already has the weakest
 signal.
 
@@ -2245,3 +2245,24 @@ against both accession columns of the full pair table.
 which stage 04 does not expose either, so the per-sample cap decided earlier is
 currently inactive in this chain. Worth closing before the deep-sea MAGs dominate any
 single class.
+
+
+### Correction: the deep-sea hit-rate denominator is 1,416, not 1,417
+
+Both figures are real and they are not interchangeable:
+
+- **1,417** = deep-sea MAGs flagged psychrophile by habitat keywords.
+- **1,416** = those of them that actually carry a GenomeSPOT prediction, and therefore
+  the correct denominator for the 0.14% habitat-only hit rate.
+
+The gap is the **two MAGs (of 4,084) that produced no GenomeSPOT prediction** — a
+known loose end recorded earlier and never examined. Using 1,417 as the denominator
+silently assumes those two were evaluated and failed, when in fact they were never
+evaluated at all.
+
+The four-population range is therefore **n = 1,452 / 639 / 443 / 1,416** at
+0.41% / 0.63% / 0.45% / 0.14%. Percentages and the 0.14-0.63% range are unchanged, so
+no downstream weight or decision moves; the `low` = 0.10 anchor and the
+exclude-psychrophile-low conclusion both stand. Corrected here because a denominator
+that quietly absorbs un-evaluated genomes is the kind of error that compounds when
+someone later recomputes a rate from it.
