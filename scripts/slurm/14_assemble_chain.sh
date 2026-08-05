@@ -90,6 +90,33 @@ LIGHT="--partition=$LIGHT_PART --output=$LOGS/%x_%j.out"
 # idle CPUs and 121 GB free. All three tiers therefore point at gpu_h200: it is the
 # only partition with capacity, it carries 2 TB, and these stages request no GPU.
 # Override per-run with PART=/LIGHT_PART=/HEAVY_PART= if capacity shifts.
+# ---------------------------------------------------------------- resume support
+# START_AT lets a rerun skip stages whose outputs already exist, so a failure in a
+# late stage does not cost the earlier hours again. Added after stage B died on an
+# unrecognized --max-per-sample (the cluster's 04_select_genomes.py was stale) with
+# A0 (00:00:25) and A (00:07:19) already COMPLETED and their outputs on disk.
+#
+# Usage:  START_AT=B bash scripts/slurm/14_assemble_chain.sh
+# Valid:  A0 (default, full chain) | A | B | C | D | F
+#
+# A skipped stage contributes no job id, so dependents must not reference it. dep()
+# emits a --dependency flag only when its argument is a real job id; skipping the
+# first submitted stage therefore yields an unconstrained job that starts at once.
+START_AT="${START_AT:-A0}"
+_ORDER="A0 A B C D F"
+skip() {  # skip $1?  true when $1 comes strictly before START_AT
+  local want="$1" seen_start=0
+  for st in $_ORDER; do
+    [ "$st" = "$START_AT" ] && seen_start=1
+    [ "$st" = "$want" ] && { [ $seen_start -eq 1 ] && return 1 || return 0; }
+  done
+  return 1
+}
+dep() { [ -n "$1" ] && printf -- '--dependency=afterok:%s' "$1"; }
+if [ "$START_AT" != "A0" ]; then
+  echo "RESUME: START_AT=$START_AT -- earlier stages skipped, their outputs reused"
+fi
+
 SB="sbatch --parsable"
 COMMON="--partition=$PART --output=$LOGS/%x_%j.out"
 
@@ -98,6 +125,7 @@ COMMON="--partition=$PART --output=$LOGS/%x_%j.out"
 # stage-01 metadata parquet is no longer on disk, so rebuild the compact form
 # straight from the two GTDB metadata dumps.
 G=/groups/cress/projects/jaymin/IS1111/gtdb
+if skip A0; then A0=""; echo "A0 gtdb meta    SKIPPED (reusing $W/gtdb_meta.tsv)"; else
 A0=$($SB $LIGHT --job-name=asm_meta --cpus-per-task=4 --mem=32G --time=01:00:00 \
   --wrap "set -u; cd $W && $PY - <<'PYEOF'
 import csv, gzip, sys
@@ -122,8 +150,10 @@ PYEOF
 echo "A0 gtdb meta    $A0"
 
 # ---------------------------------------------------------------- A: labels
+fi
+if skip A; then A=""; echo "A labels        SKIPPED (reusing $W/combined_labels.parquet)"; else
 A=$($SB $LIGHT --job-name=asm_labels --cpus-per-task=8 --mem=64G --time=02:00:00 \
-  --dependency=afterok:$A0 \
+  $(dep "$A0") \
   --wrap "set -u; cd $REPO && export PYTHONPATH=$REPO/src && \
     $PY scripts/01b_flag_metadata.py \
       --tsv $W/gtdb_meta.tsv --out $W/metadata_flags.parquet \
@@ -148,8 +178,10 @@ echo "A labels        $A"
 # ---------------------------------------------------------------- B: genome pairs
 # Locked tiers (2026-08-04): thermophile HIGH ONLY, everything else high+medium.
 # max_total_per_class uncapped -- the config default of 100 is a pilot setting.
+fi
+if skip B; then B=""; echo "B genome pairs  SKIPPED"; else
 B=$($SB $LIGHT --job-name=asm_pairs --cpus-per-task=8 --mem=64G --time=02:00:00 \
-  --dependency=afterok:$A \
+  $(dep "$A") \
   --wrap "set -u; cd $REPO && export PYTHONPATH=$REPO/src && \
     $PY scripts/04_select_genomes.py --labels $W/combined_labels.parquet \
       --classes thermophile --confidence high --require-col has_proteome \
@@ -165,9 +197,11 @@ B=$($SB $LIGHT --job-name=asm_pairs --cpus-per-task=8 --mem=64G --time=02:00:00 
     wc -l < $W/all_pairs.tsv && touch $W/.B_done")
 echo "B genome pairs  $B"
 
+fi
+
 # ---------------------------------------------------------------- C: secreted table
 C=$($SB $LIGHT --job-name=asm_secreted --cpus-per-task=16 --mem=96G --time=04:00:00 \
-  --dependency=afterok:$B \
+  $(dep "$B") \
   --wrap "set -u; cd $REPO && export PYTHONPATH=$REPO/src && \
     $PY -c \"
 import pandas as pd, yaml, sys

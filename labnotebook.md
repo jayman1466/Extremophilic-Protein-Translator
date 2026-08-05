@@ -2482,3 +2482,62 @@ quadratic line in my own diagnostic —
 905k-entry dict on each of 5,129 iterations (~4.6e9 ops). Hoisted, the same script runs
 in **2-3 s**. I attributed the delay to data volume before reading my own code; the
 inputs are 85 MB and 514 KB.
+
+### DependencyNeverSatisfied: stage B died on a stale cluster copy of 04_select_genomes.py
+
+`1164616` (B) failed in **1 second, exit 2**:
+
+```
+04_select_genomes.py: error: unrecognized arguments: --max-per-sample 5
+```
+
+`1164617` (C) then reported `DependencyNeverSatisfied` and D/E/F sat on `(Dependency)`.
+The dependency error was the symptom; the cause was **an argument error one stage up**.
+
+**Root cause: partial deployment.** I added `--max-per-sample` to
+`scripts/04_select_genomes.py` locally, then transferred `selection.py` and
+`14_assemble_chain.sh` to the cluster — but never re-transferred stage 04 itself. The
+chain passed a flag the cluster's copy of the script did not have. Both the library
+function and the caller were correct; the intermediate CLI was two commits behind.
+
+**Fix + audit.** Installed 04 (md5 `e47cc178803aa476e6158fc048a36b22`, verified
+`--help` registers the flag), then checksummed **every script and module the chain
+invokes** against local:
+
+| status | file |
+|---|---|
+| ok | 01b_flag_metadata, 03_combine_bins, 03a_fetch_ogt, 03b_merge_ogt, 03c_merge_mags |
+| ok | 04_select_genomes, 05_aggregate_signalp, 06_assemble_dataset |
+| ok | selection.py, dataset.py, binning.py, gtdb.py |
+
+**0 stale, 0 missing** after the fix. This check should run before every chain
+submission — it costs one command and catches exactly this class of failure.
+
+**Added `START_AT` resume support**, because A0 (00:00:25) and A (00:07:19) had both
+COMPLETED with outputs on disk and reruns were about to repeat them:
+
+```
+START_AT=B bash scripts/slurm/14_assemble_chain.sh
+```
+
+Valid values `A0` (default, full chain) `| A | B | C | D | F`. A skipped stage yields no
+job id, so dependents route through a `dep()` helper that emits
+`--dependency=afterok:<id>` only for a non-empty id — the first submitted stage
+therefore starts unconstrained rather than depending on a blank. Skip logic tested for
+all six start points before use, and `dep()` verified to emit the flag for `12345` and
+nothing for `""`.
+
+**Resubmitted `START_AT=B`: `1164631` -> `1164632` -> {`1164633`, `1164634`} ->
+`1164635`.** A0/A correctly skipped and their outputs reused.
+
+**Both fixes confirmed live in B's log:**
+
+```
+[selection] require_col=has_proteome: dropping 3,754 of 905,425 genomes explicitly
+flagged as having no proteome (nulls retained as unannotated)
+[04] extremophiles: 1,555 | outgroups: 1,112 | pairs matched: 1,112 (unmatched 443)
+```
+
+The null-retention clause is the load-bearing part: 901,341 GTDB rows have
+`has_proteome = None`, and a naive gate would have dropped every one of them. Only
+**3,754 explicitly-False** genomes are excluded.
