@@ -2438,6 +2438,21 @@ Low-tier survivors are exactly the pair members it must keep: **psy_low 4 of 4,6
 hyp_low 1 of 1,069**. Those 5 are retained deliberately; dropping a pair member would
 void a matched pair, which is the failure the `has_proteome` gate was written to stop.
 
+**Two different pair counts are in play — reconciled here (job 1164623) because they
+appear side by side and look contradictory:**
+
+| set | definition | psy_low | hyp_low |
+|---|---|--:|--:|
+| A | member of **any** selected pair (all 6 classes) | 21 of 4,690 | **4** of 1,069 |
+| B | member of a **whole-scope-class** pair (hyperthermophile/psychrophile only) | 4 of 4,690 | **1** of 1,069 |
+
+Set A is the pair-yield argument for dropping the tier; set B is what survives the
+whole-scope class filter. The gap has a clean explanation: of the 4 hyp_low genomes in
+any pair, **3 serve thermophile pairs and 1 a psychrophile pair — none is in a
+hyperthermophile pair**, so the whole-scope filter (which only unions pairs whose class
+is hyperthermophile or psychrophile) keeps just the 1. Both numbers are correct; quoting
+either without its definition reads as contradicting the other.
+
 Expect the whole-proteome FASTA to fall from 10,874,729 sequences to roughly 2-3 M, so
 stage E's 40% clustering (21:28 last run at 10.9 M) and stage F both get materially
 cheaper.

@@ -201,7 +201,9 @@ pr=pd.read_parquet('$W/combined_labels.parquet')
 # 1164610). Its low tier does NOT have psychrophile's evidence problem -- the hot end
 # of GenomeSPOT works (vs TEMPURA: thermophile >=50C recall 79.9%%/precision 95.5%%,
 # hyperthermophile >=80C recall 69.8%%/precision 92.3%%) -- but it has the same
-# zero-pair structure: only 4 of its 1,069 genomes appear in any selected pair, and
+# zero-pair structure: only 4 of its 1,069 genomes appear in ANY selected pair (and of
+# those 4, three serve *thermophile* pairs and one a *psychrophile* pair -- NONE is in a
+# hyperthermophile pair, so just 1 is retained by the whole-scope class filter below), and
 # 394,463 of its clusters (11.8%% of all) hold no non-low member, 88.8%% of those
 # singletons. Keeping it bought 469,512 sequences of MLM corpus and zero pairs, so it
 # was dropped for a smaller, faster, cleaner corpus.
