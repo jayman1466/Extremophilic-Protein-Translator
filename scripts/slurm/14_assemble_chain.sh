@@ -197,9 +197,15 @@ pr=pd.read_parquet('$W/combined_labels.parquet')
 #     matched pair. 82.1%% of those clusters are singletons (mean size 1.52).
 #   * 58.8%% of its sequences were redundant anyway (in clusters shared with
 #     retained genomes).
-# hyperthermophile keeps low: its cold-end evidence problem does not apply, and
-# it is the class most starved of data (293 genome pairs).
-WHOLE_CONF={'psychrophile':('high','medium'),'hyperthermophile':('high','medium','low')}
+# hyperthermophile ALSO excludes low (decided 2026-08-05 after measurement, job
+# 1164610). Its low tier does NOT have psychrophile's evidence problem -- the hot end
+# of GenomeSPOT works (vs TEMPURA: thermophile >=50C recall 79.9%%/precision 95.5%%,
+# hyperthermophile >=80C recall 69.8%%/precision 92.3%%) -- but it has the same
+# zero-pair structure: only 4 of its 1,069 genomes appear in any selected pair, and
+# 394,463 of its clusters (11.8%% of all) hold no non-low member, 88.8%% of those
+# singletons. Keeping it bought 469,512 sequences of MLM corpus and zero pairs, so it
+# was dropped for a smaller, faster, cleaner corpus.
+WHOLE_CONF={'psychrophile':('high','medium'),'hyperthermophile':('high','medium')}
 m=pd.Series(False,index=pr.index)
 conf=pr['final_confidence'].astype(str) if 'final_confidence' in pr.columns else None
 for cl in whole:

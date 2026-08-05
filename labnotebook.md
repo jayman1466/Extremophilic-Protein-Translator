@@ -2415,3 +2415,55 @@ That makes keeping hyperthermophile_low defensible as *unlabelled* MLM data in a
 psychrophile_low is not — but the honest framing is that it is a **1.4x corpus
 addition for the most data-starved class (293 genome pairs)**, contributing **zero
 pairs**, not a pair-yield decision. Flagged for the user rather than silently retained.
+
+### Chain resubmitted: 1164614 -> 1164620, all on gpu_h200
+
+Dropped `hyperthermophile_low` too, on the measurement that it contributes **4 of 1,069
+genomes** to any selected pair — the same zero-pair structure as psychrophile_low, just
+smaller (394,463 pair-incapable clusters, 11.8% of all, 88.8% singletons). Keeping it
+would have bought 469,512 sequences of MLM corpus and no pairs. `WHOLE_CONF` is now
+`{'psychrophile':('high','medium'),'hyperthermophile':('high','medium')}`.
+
+**Whole-scope shrinks 7,320 -> 1,566 genomes (−78.6%):**
+
+| | genomes |
+|---|--:|
+| hyperthermophile (high+medium) | 578 |
+| psychrophile (high+medium) | 439 |
+| pair members added unconditionally | 549 |
+| **total** | **1,566** |
+
+Dry-run verified (job 1164613, 2 s): `in NEW not OLD = 0` — the filter only removes.
+Low-tier survivors are exactly the pair members it must keep: **psy_low 4 of 4,690,
+hyp_low 1 of 1,069**. Those 5 are retained deliberately; dropping a pair member would
+void a matched pair, which is the failure the `has_proteome` gate was written to stop.
+
+Expect the whole-proteome FASTA to fall from 10,874,729 sequences to roughly 2-3 M, so
+stage E's 40% clustering (21:28 last run at 10.9 M) and stage F both get materially
+cheaper.
+
+**Chain state at submit:** `1164614` A0 -> `1164615` A -> `1164616` B ->
+`1164617` C -> {`1164618` D 50%, `1164619` E 40%} -> `1164620` F. All seven on
+`gpu_h200`; A0 went RUNNING immediately, where the previous dry run had sat PENDING
+(Priority) for 10+ minutes on `standard`.
+
+Fixes carried in this submission:
+1. whole-scope FASTA no longer requires SignalP coverage (`f5afb40`)
+2. `has_proteome` gate on selection, null-safe (`3a93f01`, `a22da94`)
+3. `--max-per-sample 5` now actually reaching stage 04 (`22ebdb4`)
+4. psychrophile_low + hyperthermophile_low out of whole scope
+5. `max_pairs_per_cluster_class` left `null` — measured 0.000% effect
+6. all stages on `gpu_h200` (`39db2d5`)
+
+**Two operational lessons worth keeping.** (a) Scripts for compute nodes must live on
+shared storage: the first gpu submission died with `can't open file '/tmp/sct.py'`
+because `/tmp` is node-local. (b) Use `python -u` in sbatch wraps, or stdout buffers
+until exit and a running job looks hung — this is what made an 8-minute dry run appear
+to produce nothing.
+
+**And a self-inflicted one:** that 8-minute dry run was 8 minutes because of a
+quadratic line in my own diagnostic —
+`{g for g in psy if dict(zip(d['a'], d['final_confidence'])).get(g)=='low'}` rebuilt a
+905k-entry dict on each of 5,129 iterations (~4.6e9 ops). Hoisted, the same script runs
+in **2-3 s**. I attributed the delay to data volume before reading my own code; the
+inputs are 85 MB and 514 KB.
