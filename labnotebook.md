@@ -2278,15 +2278,25 @@ that was **50.8% clusters existing only because of psychrophile_low**.
 **Decision 1 — exclude psychrophile_low from the whole-proteome corpus.** Measured
 basis:
 
-| bucket | genomes | seqs | pct of whole FASTA |
-|---|--:|--:|--:|
-| psychrophile_low | 1,835 | 6,262,304 | **57.6%** |
-| hyperthermophile_low | 490 | 1,326,324 | 12.2% |
-| mesophile_outgroup | 542 | 1,251,496 | 11.5% |
-| psychrophile_medium | 424 | 1,116,579 | 10.3% |
-| hyperthermophile_medium | 454 | 720,492 | 6.6% |
-| hyperthermophile_high | 100 | 156,285 | 1.4% |
-| psychrophile_high | 10 | 41,249 | 0.4% |
+Two genome counts are in play and they are NOT interchangeable — the column below is
+**FASTA-present genomes** (those that contributed sequences), not label-table genomes:
+
+| bucket | genomes IN FASTA | genomes in LABEL TABLE | seqs | pct of whole FASTA |
+|---|--:|--:|--:|--:|
+| psychrophile_low | 1,835 | **4,690** | 6,262,304 | **57.6%** |
+| hyperthermophile_low | 490 | 1,069 | 1,326,324 | 12.2% |
+| mesophile_outgroup | 542 | — | 1,251,496 | 11.5% |
+| psychrophile_medium | 424 | 427 | 1,116,579 | 10.3% |
+| hyperthermophile_medium | 454 | 478 | 720,492 | 6.6% |
+| hyperthermophile_high | 100 | 100 | 156,285 | 1.4% |
+| psychrophile_high | 10 | 12 | 41,249 | 0.4% |
+
+The gap between the two columns is genomes with **no proteome on disk**
+(`has_proteome == False`) — 3,465 of the 7,320 requested whole-scope genomes, which is
+also why the FASTA-present total is 3,855. Verified directly (job 1164609): label table
+psy_low = 4,690 / hyp_low = 1,069; FASTA-present psy_low = 1,835 / hyp_low = 490, with
+6,262,304 and 1,326,324 sequences respectively. Quoting 1,835 without the qualifier
+reads as a claim about how many low-tier psychrophiles exist, which is wrong by 2.55x.
 
 **It costs zero protein pairs.** Of the whole-proteome map's 3,348,165 clusters,
 **1,702,137 (50.8%) contain no non-low member** — and a cluster with no outgroup member
@@ -2367,3 +2377,41 @@ holds the **secretome** map (2,057,964 members) and `clu40_cluster.tsv` the
 **whole-proteome** map (10,874,729). The suffixes are identity thresholds, not scopes.
 My first novelty measurement walked clu50 and reported psy_low as 0.5% of clusters;
 against the correct map it is 50.8%. Same code, wrong file, answer off by 100x.
+
+### hyperthermophile_low has the same zero-pair structure — the user was right
+
+Asked whether keeping `low` for hyperthermophile avoids the problem that removed it for
+psychrophile. **It does not.** Measured (job 1164610):
+
+| | psychrophile_low | hyperthermophile_low |
+|---|--:|--:|
+| genomes (label table) | 4,690 | 1,069 |
+| **in selected pairs** | **21** | **4** |
+| clusters touched | 1,998,322 | 568,194 |
+| only-this-set (no pair possible) | 1,702,137 (50.8%) | **394,463 (11.8%)** |
+| of which singletons | 82.1% | **88.8%** |
+| shared (pair possible) | 208,394 | 85,940 |
+| seqs in only-clusters | 2,581,283 | 469,512 |
+
+**4 of 1,069 hyperthermophile_low genomes appear in any selected pair.** Structurally
+identical to psychrophile_low: the overwhelming majority reach clusters that contain no
+non-low member, and a cluster with no outgroup member can never yield a matched pair.
+88.8% of those clusters are singletons — a higher singleton fraction than
+psychrophile_low's 82.1%.
+
+So the justification for keeping it was never about pairs, and I should not have implied
+it was. It buys **MLM pretraining corpus only**: 469,512 sequences in 394,463
+pair-incapable clusters.
+
+**Where the two classes genuinely differ is evidence quality, not pair contribution.**
+psychrophile `low` rests on habitat keywords measured at **0.14-0.63%** precision
+(n=1452/639/443/1416) — the cold end where GenomeSPOT is miscalibrated. hyperthermophile
+`low` sits at the hot end, where the same predictor works: against TEMPURA, thermophile
+(>=50 C) recall 79.9% / precision 95.5% and hyperthermophile (>=80 C) recall 69.8% /
+precision 92.3%. Its low tier is metadata-only-or-conflicting, not
+measured-to-be-wrong.
+
+That makes keeping hyperthermophile_low defensible as *unlabelled* MLM data in a way
+psychrophile_low is not — but the honest framing is that it is a **1.4x corpus
+addition for the most data-starved class (293 genome pairs)**, contributing **zero
+pairs**, not a pair-yield decision. Flagged for the user rather than silently retained.

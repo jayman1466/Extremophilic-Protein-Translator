@@ -59,7 +59,7 @@ fi
 # was 11 jobs on `memory` against 139 on `standard` (12.6x shorter), and memory's
 # nodes carry 677 GB against standard's 258 GB, which suits the 40% clustering step.
 # `memory` is also time-unlimited on this cluster.
-PART="${PART:-memory}"
+PART="${PART:-gpu_h200}"
 
 # Early stages (A0/A/B/C) are CPU-only, modest-memory python steps. When every CPU
 # partition is fully allocated -- measured 2026-08-04: standard 3680/0/0, memory
@@ -67,7 +67,7 @@ PART="${PART:-memory}"
 # idle CPU counts (gpu 262 idle of 352, gpu_h200 186 of 224) because they are gated on
 # GPUs, not cores. Running the CPU-only stages there costs no GPU and starts hours
 # sooner. The clustering and assembly stages stay on $PART for the RAM.
-LIGHT_PART="${LIGHT_PART:-gpu}"
+LIGHT_PART="${LIGHT_PART:-gpu_h200}"
 
 # HEAVY stages: gpu_h200's single node carries 2,063,701 MB (2 TB) with 186 of 224
 # CPUs idle, which comfortably exceeds the largest request here (320 G / 48 CPU) and
@@ -84,6 +84,12 @@ HEAVY_PART="${HEAVY_PART:-gpu_h200}"
 HEAVY="--partition=$HEAVY_PART --output=$LOGS/%x_%j.out"
 LIGHT="--partition=$LIGHT_PART --output=$LOGS/%x_%j.out"
 
+# ROUTED TO gpu_h200 (2026-08-05, user directive). Measured at submit time: standard
+# 53/0/0/53, memory 39/0/0/39, high-memory 3/0/0/3 and every min_* partition were
+# 100%% allocated with ZERO idle nodes, while gpu_h200's node-224-2t-8gpu-1 held 196
+# idle CPUs and 121 GB free. All three tiers therefore point at gpu_h200: it is the
+# only partition with capacity, it carries 2 TB, and these stages request no GPU.
+# Override per-run with PART=/LIGHT_PART=/HEAVY_PART= if capacity shifts.
 SB="sbatch --parsable"
 COMMON="--partition=$PART --output=$LOGS/%x_%j.out"
 
