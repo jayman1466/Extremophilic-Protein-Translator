@@ -37,7 +37,12 @@ mkdir -p "$W" "$LOGS" "$OGT_DIR"
 # Absolute interpreter: `conda` is NOT on the non-login PATH on biotite and bare
 # `python` does not exist there either (only /usr/bin/python3, which lacks pandas).
 # Verified by smoke test: this interpreter has pandas 3.0.3 / pyarrow 25.0.0 / matplotlib 3.11.1 (four stages need mpl).
-PY=/home/jayminp/miniconda3/envs/eptrans_ml/bin/python
+# -u is load-bearing, not cosmetic: without it every stage's progress prints sit in
+# python's block-buffered stdout until the process exits, so a running job's log is
+# EMPTY and indistinguishable from a hang. Stage F (1164635) ran 58+ min with a
+# zero-byte log for this reason -- phase had to be inferred from RSS and CPU time via
+# `srun --overlap` instead of just read. Applies to every $PY call in this chain.
+PY="/home/jayminp/miniconda3/envs/eptrans_ml/bin/python -u"
 
 
 # ---- preflight, run on the LOGIN node before any job is submitted ----

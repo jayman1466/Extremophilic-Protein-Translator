@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time as _time
 from pathlib import Path
 
 import matplotlib
@@ -33,6 +34,22 @@ import pandas as pd
 
 from eptrans.config import load_config
 from eptrans.dataset import assemble_dataset
+
+_T0 = _time.time()
+
+
+def _phase(msg: str) -> None:
+    """Timestamped phase marker.
+
+    This stage has three costs that are invisible without markers -- the 36 GB
+    secreted-table read (~48 min measured at 12.6 MB/s), the cluster-map union-find
+    merge, and pair derivation + splitting. Run 1164635 spent 58+ min indistinguishable
+    from a hang because none of them announced itself. Wall-clock since process start is
+    printed so a log tail alone locates the phase.
+    """
+    el = _time.time() - _T0
+    print(f"[06] t+{int(el)//60:02d}:{int(el)%60:02d} {msg}", flush=True)
+
 
 
 def main() -> None:
@@ -142,6 +159,7 @@ def main() -> None:
                 cluster_col_by_scope[scope] = f"cluster_{nm}"
             print(f"[06] scope -> cluster column: {cluster_col_by_scope}")
 
+    _phase("inputs loaded; starting assemble_dataset (pair derivation + splits)")
     res = assemble_dataset(
         secreted, labels, cluster_map=cluster_map, pairs=pairs,
         cluster_maps=cluster_maps, cluster_col_by_scope=cluster_col_by_scope,
@@ -158,7 +176,9 @@ def main() -> None:
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+    _phase(f"assemble_dataset done: {len(res.table):,} rows; writing parquet")
     res.table.to_parquet(out, index=False)
+    _phase("parquet written")
     res.table.to_csv(out.with_suffix(".tsv"), sep="\t", index=False)
     json.dump(res.stats, open(out.with_suffix(".stats.json"), "w"), indent=2, default=str)
 

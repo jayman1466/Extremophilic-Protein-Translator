@@ -2621,3 +2621,34 @@ risk on this node; quoting FreeMem made it look like one.
 
 Stage F's sbatch wrap does not use `python -u`, so its log stays empty until exit; a
 silent F is expected, not a hang. Verified progress by process inspection instead.
+
+### Observability fix: unbuffered stages + phase markers in 06
+
+Stage F (`1164635`) ran **58+ minutes with a zero-byte log**, so I had to infer its phase
+from RSS growth and CPU time via `srun --overlap` rather than read it. Two causes, both
+fixed for future runs (neither affects the run in flight):
+
+1. **`PY` is now `... /python -u`.** A single variable feeds every `$PY` call in the
+   chain, so one edit makes all stages unbuffered. Without `-u`, python block-buffers
+   stdout when it is a file, so progress prints accumulate until process exit and a
+   running job is indistinguishable from a hung one.
+2. **Phase markers in `06_assemble_dataset.py`.** `_phase()` prints
+   `[06] t+MM:SS <msg>` with wall-clock since process start, at the three boundaries that
+   carry the cost: inputs loaded, `assemble_dataset` done (with row count), parquet
+   written. A log tail alone now locates the phase.
+
+Stage 06's three costs, for reference: the 36 GB `secreted_all.tsv` read (~48 min
+measured at 12.6 MB/s), the cluster-map union-find merge (258 MB + 163 MB -> 195,237
+groups), and pair derivation + leakage-aware splitting. Only the first was ever
+measurable from outside.
+
+Verified: marker format renders as `[06] t+03:07 ...`, `bash -n` clean, 139 passed /
+1 skipped.
+
+**F's trace, for the record.** RSS 128.5 GiB at 17 min -> **210.8 GiB peak at 46 min**
+-> 204.7 and falling at 47 min; CPU time tracked elapsed exactly (57:48 / 57:47) so it
+was compute-bound throughout, never swapping. The peak at ~46 min coincides with the
+predicted end of the 36 GB read. The previous attempt was cancelled at 1:06:49 having
+written nothing, which bounds the post-read phase from below (>20 min) but not above --
+`to_parquet` is a single terminal write, so an absent output file says nothing about
+progress within the phase.
