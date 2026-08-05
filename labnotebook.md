@@ -2227,11 +2227,19 @@ only the 4,084 MAG rows carry True/False (330 True / 3,754 False). A naive
 therefore treats null as usable — `col.isna() | col.fillna(False)` — and only an
 explicit False excludes. Verified: True→keep, False→drop, None→keep.
 
-**Measured on the real labels, psychrophile high+medium:** the gate removes all 10
-bad genomes (0 occurrences) and yields **330 pairs against the previous 332** — so 7
-void pairs were replaced by usable substitutes and only 2 net pairs were lost. The
-gate costs almost nothing and recovers 8 pairs that would have silently contributed
-nothing.
+**Measured on the real labels, psychrophile high+medium:** the gate removes all ten
+bad genomes — checked **individually, one grep per genome, all ten returning 0**, not
+extrapolated from a spot check — and yields **330 pairs against the previous 332**, so
+7 void psychrophile pairs were replaced by usable substitutes and only 2 net pairs
+were lost.
+
+**Correction to the pair count.** I first reported "10 affected pairs" by reading the
+count of affected *genomes* and by querying only the two whole-proteome classes. The
+correct figure over all classes is **11 pairs from 10 distinct genomes** — one genome
+appears in two pairs — broken down psychrophile 7 (2 high, 5 medium),
+hyperthermophile 3 (medium), halophile 1 (medium). The halophile pair was missed
+entirely by the class-restricted query. Verified by intersecting the bad-genome set
+against both accession columns of the full pair table.
 
 **Separate gap noticed, not yet fixed:** stage B does not pass `--max-per-sample`,
 which stage 04 does not expose either, so the per-sample cap decided earlier is

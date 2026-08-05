@@ -181,12 +181,19 @@ def select_with_outgroups(
             WHY THIS EXISTS: pass ``"has_proteome"``. A genome with no proteome
             file on disk contributes no protein sequences, so any pair built on it
             derives ZERO protein pairs -- silently, since nothing downstream errors
-            on an absent FASTA entry. Measured on the 2026-08-04 run: 10 selected
-            MAGs had ``has_proteome == False``, voiding 10 genome pairs including
-            **2 of the only 12 high-confidence psychrophile pairs (17% of that
-            tier)**. Filtering here rather than downstream means the diversity caps
-            and outgroup matching spend their budget on usable genomes and pick
-            replacements, instead of the pairs evaporating after assembly.
+            on an absent FASTA entry. Measured on the 2026-08-04 run: **10 selected
+            MAGs** had ``has_proteome == False``, voiding **11 genome pairs** (one
+            genome appears in two pairs) -- psychrophile 7, hyperthermophile 3,
+            halophile 1 -- including **2 of the only 12 high-confidence psychrophile
+            pairs (17% of that tier)**. Filtering here rather than downstream means
+            the diversity caps and outgroup matching spend their budget on usable
+            genomes and pick replacements, instead of the pairs evaporating after
+            assembly.
+
+            NOTE ON NULLS: only the custom MAG ingest writes ``has_proteome``; all
+            901,341 GTDB rows carry None. A ``fillna(False)`` gate would drop the
+            entire GTDB catalogue, so null is retained as usable and only an
+            explicit False excludes.
     """
     cfg = load_config()
     classes = classes or ["thermophile", "hyperthermophile", "psychrophile",
