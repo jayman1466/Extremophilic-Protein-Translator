@@ -2652,3 +2652,62 @@ predicted end of the 36 GB read. The previous attempt was cancelled at 1:06:49 h
 written nothing, which bounds the post-read phase from below (>20 min) but not above --
 `to_parquet` is a single terminal write, so an absent output file says nothing about
 progress within the phase.
+
+### Stage F RSS trace — correct units, and where the cost actually is
+
+`ps -o rss` reports **kilobytes**, so GiB = KB / 1024^2. I twice divided by 1e6 and
+labelled the result GiB, inflating every figure by 4.9%. Corrected trace for
+`1164635`:
+
+| t (min) | rss (KB) | GiB |
+|--:|--:|--:|
+| 17.1 | 134,742,960 | 128.5 |
+| 45.9 | 221,024,256 | 210.8 |
+| 95.0 | 280,902,656 | 267.9 |
+| 96.2 | 283,988,992 | 270.8 |
+| 97.5 | 287,049,728 | 273.8 |
+| 104.0 | 295,504,624 | **281.8** |
+
+Per-interval growth over the last four samples: **2.45, 2.25, 1.24 GiB/min** (mean
+1.98, and decelerating). Projections from the mean rate: **551 GiB at 4 h**, 789 GiB at
+the 6 h wall. My earlier "~700 GiB by 4 h" did not follow from my own stated rate --
+2.3 GiB/min from 281.8 GiB gives ~595 GiB, not 700. Conclusion unchanged: on a 2 TB node
+with MemAvailable ~1,421 GiB there is no memory risk.
+
+**The cost is MultiIndex `.loc`, not dict accumulation.** I blamed the per-pair dict
+append in `_derive_protein_pairs` and proposed a parallel-lists rewrite. Benchmarked at
+realistic scale (1.2 M pairs, job 1164764) that hypothesis fails:
+
+| accumulation | build + frame | peak accumulator |
+|---|--:|--:|
+| dicts (current) | 5.9 s | 0.31 GiB |
+| parallel lists | 2.6 s | 0.06 GiB |
+| speedup | **2.24x** | 4.7x |
+
+5.9 s and 0.31 GiB for the full projected output cannot explain hours of runtime or
+hundreds of GiB. The real term (job 1164765, 4 M-entry index):
+
+| operation | unsorted | sorted | dict-of-dicts |
+|---|--:|--:|--:|
+| partial `best.loc[e]` | 3.61 ms | 0.94 ms | **0.4 us** |
+| scalar `best.loc[(e,cl)]` | 420 us | 49.2 us | — |
+
+`best` comes from `groupby([...]).first()` and is **not lexsorted**
+(`is_monotonic_increasing = False`), so each lookup degrades to a scan. The loop does 2
+partial lookups per genome pair and **2 scalar lookups per emitted pair**: ~1.2 M pairs
+x 2 x 420 us = **~17 min per million pairs**, which is the dominant cost and scales with
+output size.
+
+Measured fixes: **`sort_index()` -> 8.6x** on the scalar path (one line);
+**dict-of-dicts -> ~9,000x** on partials for a 6 s one-time build. The parallel-lists
+change is worth doing but is the 2.2x, not the fix.
+
+**Parallel-F safety, checked before proposing it:** stage F's only writes are
+`--out $W/labeled_dataset.parquet` and `--fig $W/dataset_splits.png`. All five inputs
+(`secreted_all.tsv`, `combined_labels.parquet`, `all_pairs.tsv`, `clu50_cluster.tsv`,
+`clu40_cluster.tsv`) are read-only and concurrent readers are safe, so an optimised F
+writing `*_v2` paths cannot corrupt the incumbent.
+
+Recurring failure mode, third instance this session: attributing cost to the code I had
+just read instead of the code I had measured (the 8-min dry run's quadratic dict rebuild,
+then this). Profile first.
