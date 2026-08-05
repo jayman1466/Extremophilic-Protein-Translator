@@ -82,9 +82,17 @@ def main():
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--lam", type=float, default=1.0, help="pair margin loss weight")
     ap.add_argument("--margin", type=float, default=1.0)
+    ap.add_argument("--no-rubric-weights", dest="rubric_weights", action="store_false",
+                    help="disable rubric-rank confidence sample weighting (default: on)")
+    ap.set_defaults(rubric_weights=True)
     ap.add_argument("--pair-batch-size", type=int, default=256,
                     help="matched-pair sub-batch per step for the active margin term")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--emb-device", default="auto",
+                    help="where the embedding matrix lives: auto|cpu|cuda. "
+                         "'auto' keeps it on GPU only if it fits in 70%% of free "
+                         "VRAM, else CPU RAM with per-batch transfer (the ~18M x "
+                         "2560 scoped corpus is ~185 GB fp32, so 'auto' picks cpu).")
     ap.add_argument("--seed", type=int, default=1466)
     ap.add_argument("--out-root", required=True)
     args = ap.parse_args()
@@ -93,14 +101,32 @@ def main():
     import torch.nn as nn
     from sklearn.metrics import average_precision_score, roc_auc_score
     from eptrans.modeling.data import attach_sequences, phenotype_binary_labels
-    from eptrans.modeling.losses import classifier_loss
+    from eptrans.modeling.losses import classifier_loss, confidence_to_weight
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
     X, ids = _load_cache(args.cache_dir)
     id2row = {t: i for i, t in enumerate(ids)}
-    Xt = torch.tensor(X, device=args.device)
+
+    # Embedding-matrix placement. The scope-corrected corpus is ~18M x 2560, which
+    # is ~185 GB fp32 / ~92 GB fp16 -- far past any single-GPU VRAM. Hold the matrix
+    # in CPU RAM (the H200 node has ~2 TB) and move only the per-step indexed batch
+    # to the GPU. --emb-device auto keeps it on-GPU only when it comfortably fits.
+    emb_dev = args.emb_device
+    if emb_dev == "auto":
+        need_gb = X.shape[0] * X.shape[1] * 4 / 1e9  # fp32 tensor on device
+        fits = False
+        if args.device.startswith("cuda") and torch.cuda.is_available():
+            free_b, _ = torch.cuda.mem_get_info()
+            fits = need_gb < 0.7 * (free_b / 1e9)
+        emb_dev = args.device if fits else "cpu"
+        print(f"[10] emb matrix {need_gb:.0f} GB fp32 -> emb_device={emb_dev}", flush=True)
+    Xt = torch.tensor(X, device=emb_dev)
+
+    def gather(rows):
+        # rows live on emb_dev; move the gathered batch to the compute device
+        return Xt[rows].to(args.device, non_blocking=True) if emb_dev != args.device else Xt[rows]
 
     df = attach_sequences(pd.read_parquet(args.labeled), args.fasta)
     df = df[df["tagged_id"].astype(str).isin(id2row)].reset_index(drop=True)
@@ -108,7 +134,7 @@ def main():
     pairs = pd.read_csv(args.pairs, sep="\t", dtype=str)
 
     def rows_for(tagged_ids):
-        return torch.tensor([id2row[t] for t in tagged_ids], device=args.device)
+        return torch.tensor([id2row[t] for t in tagged_ids], device=emb_dev)
 
     Path(args.out_root).mkdir(parents=True, exist_ok=True)
     summary = {}
@@ -120,9 +146,23 @@ def main():
         tr = sub[sub["split"] == "train"]
         va = sub[sub["split"] == "val"]
         tr_rows = rows_for(tr["tagged_id"].astype(str).tolist())
-        tr_y = torch.tensor(tr["_y"].values, dtype=torch.float, device=args.device)
+        tr_y = torch.tensor(tr["_y"].values, dtype=torch.float, device=emb_dev)
         va_rows = rows_for(va["tagged_id"].astype(str).tolist())
         va_y = va["_y"].values.astype(float)
+
+        # RUBRIC-RANK sample weights w_i (design §12): a genome's confidence tier
+        # (high/medium/low, or 'none' for a confident mesophile negative) maps to a
+        # per-protein weight via CONFIDENCE_WEIGHTS {high 1.0, medium 0.5, none 1.0,
+        # low 0.25}. This down-weights low-confidence positives (e.g. psychrophile_low
+        # cold calls) so a weak label contributes a quarter of a high-confidence one,
+        # rather than being dropped or counted equally. Applied on TOP of pos_weight
+        # (which handles class imbalance). --no-rubric-weights reverts to uniform w_i.
+        if args.rubric_weights:
+            tr_w = torch.tensor(
+                tr["label_confidence"].map(confidence_to_weight).astype(float).values,
+                dtype=torch.float, device=emb_dev)
+        else:
+            tr_w = None
 
         # matched pairs (val split), ids -> cached rows
         pp = pairs[pairs["class"] == pheno] if "class" in pairs.columns else pairs.iloc[0:0]
@@ -131,8 +171,10 @@ def main():
         tpp = pp[(pp["ext_id"].map(split_of) == "train") & (pp["outgroup_id"].map(split_of) == "train")]
         n_pos = int((tr_y == 1).sum())
         pw = float((tr_y == 0).sum()) / max(n_pos, 1)
+        wdesc = "rubric" if args.rubric_weights else "uniform"
         print(f"[10] {pheno}: train {len(tr):,} (pos {n_pos:,}) / val {len(va):,} "
-              f"| train pairs {len(tpp):,} / val pairs {len(vpp):,} | pos_weight {pw:.1f}",
+              f"| train pairs {len(tpp):,} / val pairs {len(vpp):,} | pos_weight {pw:.1f} "
+              f"| lam {args.lam} | w_i {wdesc}",
               flush=True)
         if n_pos == 0:
             print(f"[10] {pheno}: no positives, skipping"); continue
@@ -160,21 +202,24 @@ def main():
         pair_bs = args.pair_batch_size
         for ep in range(args.epochs):
             head.train()
-            perm = torch.randperm(n_tr, device=args.device)
-            pair_perm = torch.randperm(n_tp, device=args.device) if n_tp else None
+            perm = torch.randperm(n_tr, device=emb_dev)
+            pair_perm = torch.randperm(n_tp, device=emb_dev) if n_tp else None
             pp_cur = 0
             tot = 0.0
             for i in range(0, n_tr, args.batch_size):
                 idx = perm[i:i + args.batch_size]
-                s = head(Xt[tr_rows[idx]]).squeeze(-1)
+                s = head(gather(tr_rows[idx])).squeeze(-1)
                 pe = po = None
                 if n_tp:
                     if pp_cur + pair_bs > n_tp:          # cycle when exhausted
-                        pair_perm = torch.randperm(n_tp, device=args.device); pp_cur = 0
+                        pair_perm = torch.randperm(n_tp, device=emb_dev); pp_cur = 0
                     pidx = pair_perm[pp_cur:pp_cur + pair_bs]; pp_cur += pair_bs
-                    pe = head(Xt[tr_ext[pidx]]).squeeze(-1)
-                    po = head(Xt[tr_out[pidx]]).squeeze(-1)
-                loss, _ = classifier_loss(s, tr_y[idx], pos_weight=pw_t,
+                    pe = head(gather(tr_ext[pidx])).squeeze(-1)
+                    po = head(gather(tr_out[pidx])).squeeze(-1)
+                yb = tr_y[idx].to(args.device)
+                wb = tr_w[idx].to(args.device) if tr_w is not None else None
+                loss, _ = classifier_loss(s, yb, pos_weight=pw_t,
+                                          sample_weight=wb,
                                           pair_ext=pe, pair_out=po,
                                           lam=args.lam, margin=args.margin)
                 opt.zero_grad(); loss.backward(); opt.step()
@@ -183,13 +228,13 @@ def main():
 
             head.eval()
             with torch.no_grad():
-                vs = head(Xt[va_rows]).squeeze(-1)
+                vs = head(gather(va_rows)).squeeze(-1)
                 au = (float(average_precision_score(va_y, torch.sigmoid(vs).cpu().numpy()))
                       if len(set(va_y.tolist())) > 1 else float("nan"))
                 pa = pau = float("nan")
                 if ext_rows is not None and len(ext_rows) > 0:
-                    se = head(Xt[ext_rows]).squeeze(-1).cpu().numpy()
-                    so = head(Xt[out_rows]).squeeze(-1).cpu().numpy()
+                    se = head(gather(ext_rows)).squeeze(-1).cpu().numpy()
+                    so = head(gather(out_rows)).squeeze(-1).cpu().numpy()
                     wins = np.mean((se > so) + 0.5 * (se == so))
                     pa = float(wins)
                     yy = [1] * len(se) + [0] * len(so)
@@ -204,7 +249,11 @@ def main():
                 torch.save(head.state_dict(), str(odir / "head_best.pt"))
                 summary[pheno] = {"epoch": ep, "val_auprc": au,
                                   "val_pair_acc": pa, "val_pair_auc": pau,
-                                  "n_val_pairs": int(len(vpp))}
+                                  "n_val_pairs": int(len(vpp)),
+                                  "lam": args.lam, "margin": args.margin,
+                                  "rubric_weights": bool(args.rubric_weights),
+                                  "n_train": int(len(tr)), "n_train_pos": n_pos,
+                                  "pos_weight": pw, "n_train_pairs": n_tp}
             json.dump(hist, open(odir / "history.json", "w"), indent=2)
         json.dump(summary.get(pheno, {}), open(odir / "metrics.json", "w"), indent=2)
 
