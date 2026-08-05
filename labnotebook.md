@@ -2583,13 +2583,38 @@ My earlier estimate of ~18 GB for 119.7 M rows x 7 columns was low by ~7x -- pan
 object-dtype string columns carry far more per-cell overhead than the on-disk bytes
 suggest.
 
+**Peak is higher still: 210.8 GiB at 46 min** (later sample), so the footprint is
+~12x my estimate, not 7x. The RSS trace also locates the phase boundary:
+
+| t (min) | RSS (GiB) |
+|--:|--:|
+| 17.1 | 128.5 |
+| 45.9 | **210.8** (peak) |
+| 47.4 | 204.7 (-4.1 GiB/min) |
+
+RSS peaking at ~46 min and then declining marks the end of the 36 GB read -- which lands
+exactly where the probe predicted (36.2 GB / 12.6 MB/s = 48 min) -- and the start of the
+compute phase, where intermediates are released.
+
 Consequences worth keeping:
-* On `standard` (258 GB nominal, shared) F would very likely OOM. It fits comfortably
-  only on `memory` (677 GB) or `gpu_h200` (2 TB).
+* On `standard` (258 GB nominal, shared, and NOT reserved -- see below) a 211 GiB peak is
+  at or over the line. F is safe only on `memory` (677 GB) or `gpu_h200` (2 TB).
 * biotite runs `SelectTypeParameters=CR_CPU`, so `--mem` does **not** reserve RAM and
-  does not gate scheduling -- a co-scheduled job on the same node could still push F
-  into OOM. Preferring the 2 TB node is a real safety margin, not a queue-time
-  optimisation.
+  does not gate scheduling. On a shared node that is a real hazard; on this 2 TB node it
+  is not.
+
+**Do not read `FreeMem` as headroom -- I did, and it overstates the risk.** On
+`node-224-2t-8gpu-1` while F held 211 GiB:
+
+```
+RealMemory 2,063,701 MB (2 TB) | AllocMem 0 (CR_CPU) | FreeMem 129,353 MB
+MemAvailable 1,499 GiB | Cached 1,337 GiB
+```
+
+`FreeMem` excludes 1,337 GiB of **page cache**, which is reclaimable on demand and is
+largely the 36 GB table and cluster maps F had just streamed. The figure that matters is
+`MemAvailable = 1,499 GiB`. F's 211 GiB peak against ~1.5 TB available is not an OOM
+risk on this node; quoting FreeMem made it look like one.
 * F re-reads the full 36 GB `secreted_all.tsv` (12.6 MB/s measured => ~48 min of
   parsing before work begins). The secretome table did **not** shrink -- only the
   whole-proteome FASTA did -- so this cost is unchanged by the scope reduction.
