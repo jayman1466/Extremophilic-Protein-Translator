@@ -2925,3 +2925,41 @@ The lesson is narrower than "unit confusion": **do not hand-type a number into a
 f-string that the same cell already has in a variable.** A literal cannot be checked
 against the data it claims to describe, and it silently survives the correction of every
 computed value around it.
+
+### Fixed the underlying defect: run tags + clobber guards on stages 08/09/10
+
+Archiving run 1 by hand was a workaround. The defect was that all three stages wrote to
+**fixed paths with no run identifier**, so a retrain overwrote the previous run in place
+— putting ~10.7 h of H200 MLM training, and the ~3 h embedding cache behind it, one
+accidental resubmission away from destruction.
+
+Two mechanisms added to `08_train_backbone.sbatch`, `09_embed_secretome.sbatch` and
+`10_train_cached_probe.sbatch`:
+
+* **`RUN_TAG`** — empty by default, so historical paths (`models/`, `embeddings/`) are
+  preserved and existing tooling keeps working. `RUN_TAG=run2` redirects to
+  `models_run2/` + `embeddings_run2/`.
+* **`refuse_clobber`** — a non-empty target with `OVERWRITE != 1` is a **hard stop before
+  any GPU time is spent**, printing the three ways forward (set a RUN_TAG, archive, or set
+  OVERWRITE=1).
+
+**Verified by extracting the guard from the real script and exercising all five paths:**
+
+| case | result |
+|---|---|
+| empty target | proceeds (rc=0) |
+| existing artifacts, no OVERWRITE | **refuses, rc=1, before GPU work** |
+| `RUN_TAG=run2` with run1 present | proceeds into the parallel tree |
+| `OVERWRITE=1` | proceeds with a warning |
+| classifier mode | guards `clf_$PHENO`, not the adapter |
+
+Placement matters more than syntax here: the guard fires *before* the python invocation,
+so a mistake costs one second rather than one wasted allocation.
+
+One bug found and fixed by that test: the error text printed `$d` literally because it sat
+in an escaped double-quoted string. It now emits a copy-pasteable command with the real
+path — `mv '/…/models/mlm_adapt' '/…/models/mlm_adapt_old'`.
+
+Not yet deployed to the cluster: stage F holds `repo/`, and `check_deployed.sh` will flag
+these three as STALE until the training stages are next staged. That is the check working
+as intended.
