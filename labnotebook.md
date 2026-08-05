@@ -2541,3 +2541,58 @@ flagged as having no proteome (nulls retained as unannotated)
 The null-retention clause is the load-bearing part: 901,341 GTDB rows have
 `has_proteome = None`, and a naive gate would have dropped every one of them. Only
 **3,754 explicitly-False** genomes are excluded.
+
+### Chain B->F on gpu_h200: stage timings, and stage F needs 128 GiB
+
+Resumed run `START_AT=B`, all on `gpu_h200`:
+
+| job | stage | state | elapsed |
+|---|---|---|--:|
+| 1164631 | B genome pairs | COMPLETED | 00:01:29 |
+| 1164632 | C secreted table | COMPLETED | 00:43:25 |
+| 1164633 | D cluster 50% | COMPLETED | 00:09:17 |
+| 1164634 | E cluster 40% | COMPLETED | 00:05:51 |
+| 1164635 | F assemble | RUNNING | — |
+
+**The scope reduction landed as designed.** C reports:
+
+```
+WHOLE_SCOPE_TIER hyperthermophile ('high','medium') 578
+WHOLE_SCOPE_TIER psychrophile     ('high','medium') 439
+WHOLE_SCOPE_PAIR_MEMBERS_ADDED                      547
+WHOLE_SCOPE_GENOMES 1564
+[05agg] wrote secreted FASTA 2,057,964 seqs | whole FASTA 3,293,163 seqs
+```
+
+Whole FASTA **10,874,729 -> 3,293,163 sequences (-69.7%)**, from 7,320 -> 1,564
+whole-scope genomes. Stage E's 40% clustering fell to **05:51** (it was 21:28 at 10.9 M
+sequences), and D 50% to 09:17. Note the 1,564 vs the dry run's 1,566: B reran with the
+gate and produced a marginally different pair set, so 547 pair members were unioned
+rather than 549. Consistent, not contradictory.
+
+**29 genomes had no proteome file** — diagnosed (job 1164652) rather than assumed:
+all 29 are `CU_` MAGs, all `has_proteome == False`, all non-representative, and
+**0 are pair members**. So the `has_proteome` gate is doing exactly its job: void
+genomes reach the corpus FASTA loop but never a matched pair. These 29 are absences by
+construction, not losses.
+
+**Stage F's real memory footprint is 128 GiB, not the ~18 GB I estimated.** Measured
+live via `srun --overlap` at 17 min: RSS **134,742,960 kB = 128.5 GiB**, CPU time
+00:17:23 against 17:22 elapsed (100% utilisation, so it is streaming, not thrashing).
+My earlier estimate of ~18 GB for 119.7 M rows x 7 columns was low by ~7x -- pandas
+object-dtype string columns carry far more per-cell overhead than the on-disk bytes
+suggest.
+
+Consequences worth keeping:
+* On `standard` (258 GB nominal, shared) F would very likely OOM. It fits comfortably
+  only on `memory` (677 GB) or `gpu_h200` (2 TB).
+* biotite runs `SelectTypeParameters=CR_CPU`, so `--mem` does **not** reserve RAM and
+  does not gate scheduling -- a co-scheduled job on the same node could still push F
+  into OOM. Preferring the 2 TB node is a real safety margin, not a queue-time
+  optimisation.
+* F re-reads the full 36 GB `secreted_all.tsv` (12.6 MB/s measured => ~48 min of
+  parsing before work begins). The secretome table did **not** shrink -- only the
+  whole-proteome FASTA did -- so this cost is unchanged by the scope reduction.
+
+Stage F's sbatch wrap does not use `python -u`, so its log stays empty until exit; a
+silent F is expected, not a hang. Verified progress by process inspection instead.
