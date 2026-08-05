@@ -2756,3 +2756,30 @@ Separate source trees, so editing the module could not disturb the 2 h+ incumben
 confirmed `repo/src/eptrans/dataset.py` still hashes to `3fd4b118` after staging v2.
 Whichever finishes first wins; the other is insurance. Incumbent was at **02:12:17** when
 v2 was submitted.
+
+### Correction: the RSS/bottleneck commit is `9eb8066`, not `9febf3b`
+
+I cited `9febf3b` for the corrected-units + bottleneck work. That hash is the
+**pre-amend** commit and is no longer reachable from HEAD. Sequence:
+
+1. Committed with `git commit -m "...backticks around a variable name..."`. The message
+   was in double quotes, so **bash executed the backticks as command substitution**
+   (`best: command not found` on stderr) and silently deleted that clause from the
+   message body — line 14 read `The real cost (1164765):  from groupby().first() ...`.
+2. Amended with `git commit --amend -F -` and a quoted heredoc, which restored the text
+   **and produced a new commit object**: `9eb8066`.
+3. I then quoted the old hash from memory instead of re-reading it. `9febf3b` is orphaned
+   — checking it out shows the corrupted message.
+
+Verified: `9eb8066` line 14 now reads `the "best" Series from groupby(...).first() is not
+lexsorted`, and `9febf3b` is confirmed NOT an ancestor of HEAD. The wrong hash never
+reached a tracked file (`grep` across md/py/sh/yaml: no hits), and all twelve other SHAs
+cited this session — 2f21af6, c0167e3, c3a9439, 7397b46, dcfa9f4, 22ebdb4, 39db2d5,
+8a652f1, f1e8c76, a22da94, 3a93f01, f5afb40 — are real and reachable.
+
+Two habits this argues for:
+* **Never put backticks in a `-m` message.** Use `-F -` with a quoted heredoc
+  (`<<'MSG'`), which is literal, or avoid backticks entirely. The failure is silent apart
+  from one stderr line, and it mutates durable history.
+* **Any `--amend` invalidates the hash.** Re-read `git log -1 --format=%h` after
+  amending; never carry the pre-amend SHA forward.
