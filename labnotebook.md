@@ -3371,3 +3371,58 @@ their λ-sweep numbers closely (thermophile 0.909, halophile 0.844, acidophile 0
 alkaliphile 0.752) since their pairs are byte-identical — a material shift there would
 indicate adapter retraining moved the shared feature space, not the class data.
 Psychrophile is the actual test.
+
+### CORRECTION: `reuse_outgroups` is ON, and outgroup concentration measured
+
+**Correction to two earlier statements in this notebook and in session prose**: I recorded
+`reuse_outgroups` as "False by user decision". That is wrong. `scripts/slurm/14_assemble_chain.sh`
+line 193 passes `--reuse-outgroups` on **all six** selection calls (thermophile high-only,
+then the five high+medium classes). Confirmed in the data: 1,122 outgroups serve >1 class,
+max exactly 6 = the class count.
+
+**The flag's semantics are narrower than the name suggests.** `selection.py:237`:
+
+```python
+used_this_class = set() if reuse_outgroups else used_outgroups
+```
+
+It governs **cross-class** reuse only. Within a class, `used_this_class.add(oidx)` still
+excludes after each use — verified: **zero** cases of one outgroup used twice within a
+single class. The reuse ceiling is therefore 6 (one per phenotype), not unbounded.
+
+**Concentration measured at both levels:**
+
+| Level | Units | Distinct outgroups | Mean | Top 10% share | Gini |
+|---|---|---|---|---|---|
+| Genome pairs | 5,460 | 3,728 | 1.46 | 23.8% | **0.245** |
+| Protein pairs | 412,925 | 2,080 | 199 | **63.9%** | **0.771** |
+
+The 0.245 → 0.771 gap is the finding, and **it is not caused by `reuse_outgroups`**. A
+genome reused 6× contributes at most 6× more *genome* pairs, but its *protein* contribution
+scales with proteome size and cluster density: one large well-clustered outgroup supplies
+thousands of protein pairs from a single genome pairing. Concentration is driven by
+proteome heterogeneity, not by the flag. Top 1% of outgroup genomes (21) supply 11.7% of
+all protein pairs; the single most-used supplies 3,183 = 0.77%.
+
+Per class (protein-pair level):
+
+| Class | Outgroups | Top-1 share | Gini |
+|---|---|---|---|
+| psychrophile | 329 | 1.03% | **0.324** |
+| hyperthermophile | 232 | 2.26% | **0.333** |
+| halophile | 965 | 1.00% | 0.636 |
+| thermophile | 474 | 1.81% | 0.622 |
+| alkaliphile | 230 | 3.83% | 0.613 |
+| acidophile | 253 | **7.49%** | 0.639 |
+
+**The whole-proteome classes are the most EVENLY distributed** (Gini 0.32–0.33), because
+every outgroup contributes its full proteome. Secreted classes are more concentrated
+(0.61–0.64) — secretome size varies far more between genomes than proteome size does.
+Worst single case: acidophile, one outgroup supplying 7.5% of that class's 3,901 pairs.
+
+**Implication.** Turning reuse off would cost ~1,732 genome pairs (5,460 → 3,728 ceiling)
+and worsen outgroup exhaustion while barely moving protein-level concentration — the wrong
+lever. The instrument that targets it directly is `max_pairs_per_cluster_class`, still
+`null` (r ≈ 0.25 × genome pairs suggested, never measured). Note `pos_weight` already
+balances *classes* by inverse frequency but not *genomes within* a class, so a per-genome
+or per-cluster cap is complementary rather than redundant.
