@@ -88,3 +88,57 @@ def test_inv_scope_c_catches_mesophile_union_violation():
     assert len(bad) == 0, "MESOA cytoplasmic protein should have been dropped"
     # and MESOB (outgroups psychrophile=whole) DOES keep its cytoplasmic protein
     assert len(out[(out.genome == "GB_MESOB") & (~out.is_secreted)]) == 1
+
+
+def test_inv_scope_d_polyextremophile_keeps_whole_proteome():
+    """INV-SCOPE-D: a genome whose single corpus label is a SECRETED-scope class but
+    which serves a WHOLE-scope class as a pair extremophile must keep its whole
+    proteome.
+
+    This is the deep-sea/soda-lake polyextremophile case: cold+saline organisms are
+    labelled halophile (one label per genome) yet form the psychrophile pairs. Keying
+    scope off the label alone reduced all 19 psychrophile and all 27 hyperthermophile
+    ext pair genomes to their secretome, so the psychrophile pair evaluation ran on
+    secreted proteins of salt/alkali-labelled genomes.
+    """
+    rows = []
+    for acc, label, ismeso in [("GB_POLY1", "halophile", False),
+                               ("GB_HALO1", "halophile", False),
+                               ("GB_MESOP", "mesophile", True)]:
+        for pid, sec in [("p_sec", True), ("p_cyt", False)]:
+            rows.append(dict(genome=acc, protein_id=pid, label=label,
+                             is_mesophile=ismeso, is_secreted=sec))
+    lab = pd.DataFrame(rows)
+    # POLY1 is labelled halophile but is the EXTREMOPHILE of a psychrophile pair.
+    # HALO1 serves only a halophile pair. Real schema uses "ext_acc".
+    pairs = pd.DataFrame([
+        dict(**{"class": "psychrophile"}, ext_acc="GB_POLY1", outgroup_acc="GB_MESOP"),
+        dict(**{"class": "halophile"},    ext_acc="GB_HALO1", outgroup_acc="GB_MESOP"),
+    ])
+    out, st = _apply_corpus_scope(
+        lab, pairs, {"halophile": "secreted", "psychrophile": "whole_proteome"},
+        "secreted", "is_secreted", "genome", "protein_id")
+    kept = set(zip(out.genome, out.protein_id))
+    # the polyextremophile keeps BOTH proteins despite its halophile label
+    assert ("GB_POLY1", "p_sec") in kept, "secreted protein must be kept"
+    assert ("GB_POLY1", "p_cyt") in kept, \
+        "INV-SCOPE-D: cytoplasmic protein of a whole-scope pair extremophile was dropped"
+    # a genome serving only the secreted class is still secreted-only
+    assert ("GB_HALO1", "p_sec") in kept and ("GB_HALO1", "p_cyt") not in kept
+    assert st["scope_whole_ext_pair_genomes"] == 1
+
+
+def test_inv_scope_d_accepts_legacy_ext_column_name():
+    """The union must not silently no-op when the frame uses extremophile_acc."""
+    rows = []
+    for pid, sec in [("p_sec", True), ("p_cyt", False)]:
+        rows.append(dict(genome="GB_POLY1", protein_id=pid, label="halophile",
+                         is_mesophile=False, is_secreted=sec))
+    lab = pd.DataFrame(rows)
+    pairs = pd.DataFrame([dict(**{"class": "psychrophile"},
+                               extremophile_acc="GB_POLY1", outgroup_acc="GB_MESOP")])
+    out, st = _apply_corpus_scope(
+        lab, pairs, {"halophile": "secreted", "psychrophile": "whole_proteome"},
+        "secreted", "is_secreted", "genome", "protein_id")
+    assert st["scope_whole_ext_pair_genomes"] == 1
+    assert ("GB_POLY1", "p_cyt") in set(zip(out.genome, out.protein_id))

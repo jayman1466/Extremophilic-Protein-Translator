@@ -593,12 +593,31 @@ def _apply_corpus_scope(
     # mesophile genomes that serve a whole-scope OUTGROUP role (from the genome
     # pairs table). bare_accession normalises GB_/RS_/CU_ prefixes on both sides.
     whole_meso: set = set()
+    # INV-SCOPE-D: an EXTREMOPHILE genome that serves a whole-scope class as a pair
+    # member must also keep its whole proteome, even when its single corpus `label`
+    # is a secreted-scope class. Polyextremophiles (cold+saline deep-sea, cold+alkaline
+    # soda lake) carry one label but serve several classes; keying scope off the label
+    # alone silently reduced them to their secretome, so every psychrophile ext pair
+    # genome (19/19) and every hyperthermophile ext pair genome (27/27) entered the
+    # corpus 100% secreted despite whole_proteome scope. Mirror the mesophile union
+    # rule onto the extremophile side.
+    whole_ext: set = set()
     if pairs is not None and len(pairs) and "class" in getattr(pairs, "columns", []):
         w = pairs[pairs["class"].isin(whole_classes)]
         for a in w["outgroup_acc"].dropna().astype(str):
             b = bare_accession(a)
             if b:
                 whole_meso.add(b)
+        # the pairs table names this column "ext_acc"; older//test frames use
+        # "extremophile_acc". Accept either so the union rule cannot silently
+        # no-op on a schema difference (that is exactly how the defect hid).
+        _ext_col = next((cc for cc in ("ext_acc", "extremophile_acc")
+                         if cc in w.columns), None)
+        if _ext_col is not None:
+            for a in w[_ext_col].dropna().astype(str):
+                b = bare_accession(a)
+                if b:
+                    whole_ext.add(b)
 
     sec = labeled[secreted_col].fillna(False).astype(bool)
     if is_meso_col in labeled.columns:
@@ -609,7 +628,7 @@ def _apply_corpus_scope(
     # vectorised bare accession: strip the same prefixes bare_accession() strips
     bare = labeled[genome_col].astype(str).str.replace(r"^(GB_|RS_|CU_)", "", regex=True)
 
-    in_whole_class = lab.isin(whole_classes)
+    in_whole_class = lab.isin(whole_classes) | bare.isin(whole_ext)
     in_whole_meso = bare.isin(whole_meso)
     keep = (
         ((~is_meso) & in_whole_class)                      # ext whole  -> all
@@ -625,6 +644,7 @@ def _apply_corpus_scope(
         "scope_dropped": int(n_before - len(out)),
         "scope_whole_classes": sorted(whole_classes),
         "scope_whole_mesophile_genomes": int(len(whole_meso)),
+        "scope_whole_ext_pair_genomes": int(len(whole_ext)),
     }
     return out, stats
 
