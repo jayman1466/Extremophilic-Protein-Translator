@@ -2963,3 +2963,264 @@ path — `mv '/…/models/mlm_adapt' '/…/models/mlm_adapt_old'`.
 Not yet deployed to the cluster: stage F holds `repo/`, and `check_deployed.sh` will flag
 these three as STALE until the training stages are next staged. That is the check working
 as intended.
+
+
+---
+
+## Composition-only baseline vs ESM-embedding classifier — how much signal is holistic?
+
+**Motivation.** Extremophile phenotype classifiers are known to lean on bulk amino-acid
+composition (charged-residue fraction, etc.). Before trusting the fine-tuned ESM
+classifier as a re-ranker in the MPNN-in-the-loop generator — where a per-residue
+`bias_AA` already moves composition — we need to know whether the classifier adds
+*holistic* signal beyond composition, or is effectively a composition detector (which
+would create a self-reinforcing loop: bias moves composition → classifier rewards it).
+
+**Design (matched comparison).** Same rows, same split, same classifier family — only the
+feature set differs, so ΔAUC is purely the holistic-embedding contribution:
+- Substrate: the **full r232 secretome**, 1,985,058 proteins matched across the cached
+  embeddings, the mature-chain FASTA, and `labeled_dataset_r232_clustered.parquet`.
+- Split: the parquet's own `split` column (train 1,590,361 / val 198,277 / test 196,420).
+  Evaluated on **val** (the ESM cached-probe headline AUPRCs were val-selected) and **test**.
+- **Composition-LR**: logistic regression on the 20-d AA-frequency vector.
+- **ESM-LR**: logistic regression on the 2560-d MLM-adapted masked mean-pool embedding
+  (the same frozen features the cached-probe heads were trained on).
+- Both: `class_weight="balanced"`, `C=1.0`, `StandardScaler`, all negatives.
+- Job `0692175b` (biotite `memory` partition, 16 CPU / 96 GB; data-load ~21 min, fits ~18 min).
+
+**Results (matched estimator — LR — plus the production nonlinear head for context).**
+
+Three classifiers, all on val AUPRC (the ESM-MLP column reports val only — the production
+head was model-selected and reported on val). The **comp-LR vs ESM-LR** columns are the
+matched comparison (same linear estimator, only features differ → clean ΔAUPRC). The
+**ESM-MLP** column is the production cached-probe head (512-hidden MLP + matched-pair margin
+loss + best-epoch selection) — the same numbers as the `run1_classifier_performance.png` /
+`run1_auc_table.csv` AUC plot from today.
+
+| phenotype | split | prev. | comp-LR AUPRC | ESM-LR AUPRC | **ESM-MLP AUPRC** (prod.) | ΔAUPRC (LR) | comp-LR ROC-AUC | ESM-LR ROC-AUC | ΔAUC (LR) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| hyperthermophile | val | 0.006 | 0.065 | 0.332 | **0.898** | +0.267 | 0.899 | 0.975 | +0.076 |
+| hyperthermophile | test | 0.006 | 0.066 | 0.323 | — | +0.258 | 0.896 | 0.975 | +0.079 |
+| thermophile | val | 0.130 | 0.308 | 0.732 | **0.862** | +0.424 | 0.749 | 0.917 | +0.168 |
+| thermophile | test | 0.132 | 0.305 | 0.727 | — | +0.421 | 0.744 | 0.914 | +0.170 |
+| halophile | val | 0.350 | 0.598 | 0.763 | **0.818** | +0.165 | 0.745 | 0.855 | +0.110 |
+| halophile | test | 0.349 | 0.597 | 0.759 | — | +0.162 | 0.745 | 0.852 | +0.108 |
+| acidophile | val | 0.045 | 0.221 | 0.627 | **0.745** | +0.407 | 0.861 | 0.952 | +0.091 |
+| acidophile | test | 0.045 | 0.219 | 0.628 | — | +0.409 | 0.860 | 0.953 | +0.094 |
+| alkaliphile | val | 0.038 | 0.133 | 0.319 | **0.674** | +0.186 | 0.774 | 0.886 | +0.111 |
+| alkaliphile | test | 0.037 | 0.132 | 0.330 | — | +0.198 | 0.774 | 0.891 | +0.117 |
+
+comp-LR/ESM-LR: val ≈ test throughout (≤0.01 drift) — stable, no overfitting.
+
+**Why ESM-LR (0.33/0.73/0.76/0.63/0.32) differs from the AUC-plot ESM-MLP
+(0.90/0.86/0.82/0.75/0.67).** They are two different classifiers on the *same* embeddings.
+ESM-LR is a plain **linear** logistic regression, single fit, weighted log-loss only — used
+here *on purpose* so that comp-LR vs ESM-LR holds the estimator fixed and varies only the
+feature set (otherwise "better features" and "better head" would confound). ESM-MLP is the
+production head: **nonlinear** (512-hidden MLP), trained with an added **matched-pair margin
+loss**, over 30 epochs with **best-epoch selection on val**. The gap is largest for the
+tiny-positive thermal/pH phenotypes (hyperthermophile 0.33→0.90, alkaliphile 0.32→0.67),
+where nonlinearity + the pair loss help most, and smallest for **halophile** (0.76→0.82),
+whose signal is largely linear/compositional — a consistent, expected pattern.
+
+**Floor/ceiling framing (the key point).** The matched LR-vs-LR ΔAUPRC is a **conservative
+floor** on the embedding's advantage over composition: an MLP on a 20-d composition vector
+cannot manufacture signal absent from the features, while an MLP on embeddings extracts
+*more* than LR does. So the true "holistic signal beyond composition" is **at least** the
+LR deltas shown and almost certainly larger — the ESM-MLP AUPRCs are the **ceiling** the
+embedding reaches once you stop handicapping it with a linear head. The two ESM columns are
+therefore not contradictory: ESM-LR is the floor, ESM-MLP is the ceiling, and both sit far
+above composition-only.
+
+**Metric note.** ROC-AUC here is standard one-vs-rest over the whole val/test set. It is
+**not** the cached-probe **pair-AUC** (0.924 hyperthermophile, etc.), which is computed only
+on taxonomy-matched ortholog pairs and is the anti-taxonomy control. The two are different
+quantities and must not be compared across tables; the valid comparisons above are
+within-metric (comp-LR AUPRC vs ESM-LR AUPRC; comp-LR ROC-AUC vs ESM-LR ROC-AUC).
+
+**Reads.**
+1. **The ESM embedding carries the majority of the discriminative signal; composition
+   alone is weak.** On AUPRC (the metric that matters at these prevalences), the embedding
+   roughly doubles-to-quadruples composition-only: thermophile 0.308→0.732, acidophile
+   0.221→0.627, hyperthermophile 0.065→0.332 (≈5×). The classifier is **not** a mere
+   composition detector.
+2. **Halophile is the exception that proves the rule.** It is the one phenotype where
+   composition-only is already decent (AUPRC 0.598) — consistent with haloadaptation being
+   genuinely a bulk-composition phenomenon (surface acidic enrichment, matching the laccase
+   structural analysis). Even there the embedding still adds +0.165.
+3. **The embedding's edge is largest where the biology is subtlest** — the thermal and pH
+   phenotypes, where adaptation is contextual/positional rather than a simple composition
+   shift. This is exactly the "holistic" signal the concern was about, and it is real.
+
+**Implication for MPNN-in-the-loop scoring.**
+- The classifier re-ranker adds substantial signal beyond `bias_AA`'s composition nudge —
+  so it is worth keeping as an oracle, *not* redundant with the bias.
+- **But** because `bias_AA` moves composition and the classifier partly rewards it (halophile
+  especially, where composition-only already reaches 0.598, and recall the clf-vs-mutation-count
+  ρ=+0.54), a residual self-reinforcement risk remains on the halophile track. Mitigation
+  (already in the spec): weight the composition-orthogonal terms — extremophilic pseudo-LL and
+  the coupling-consistency oracle — comparably to the classifier, and consider orthogonalizing
+  the composition component out of the halophile classifier score before re-ranking.
+
+Artifacts: `composition_vs_embedding_auc.csv` (this three-way table: comp-LR, ESM-LR, ESM-MLP),
+job `0692175b` output `matched_comparison.json`. The ESM-MLP (production) column is sourced
+from `run1_auc_table.csv` / `run1_classifier_performance.png` (cached-probe heads). A
+composition-only baseline restricted to the ordinary val/test split (job `9ef578a4`, no
+embedding) reproduced the composition numbers on the 420k MLM subsample as a cross-check.
+
+---
+
+## 2026-08-06 — Scope defect chain: INV-SCOPE-D → INV-EMIT-A
+
+Traced why the psychrophile head reached only val AUPRC 0.572 / pair-AUC 0.635 while
+thermophile reached 0.909 / 0.931. The proximate hypothesis was biological (cold
+adaptation is local/structural, mean pooling dilutes it). The actual first-order cause
+turned out to be a data defect: **the psychrophile arm never saw whole proteomes at all.**
+
+### Defect 1 — INV-SCOPE-D (commit `f811de5`)
+
+`_apply_corpus_scope` decided extremophile scope from each genome's **single corpus
+label** (`lab.isin(whole_classes)`) while the mesophile branch keyed on **pair
+membership**. Polyextremophiles (cold+saline deep-sea, cold+alkaline soda lake) carry one
+label but serve several classes, so every whole-scope pair-extremophile was silently
+reduced to its secretome.
+
+Measured before the fix: psychrophile EXT 19 genomes / 4,888 rows / frac_secreted
+**1.000**, labelled {halophile 2776, alkaliphile 2100, acidophile 12}; **zero of the 1,286
+psychrophile-labelled genomes form ext pairs**. hyperthermophile EXT 27 / 3,677 / 1.000.
+The corpus as a whole was correctly scoped (psychrophile label holds 4,158,435 proteins) —
+the defect was confined to pair-forming genomes.
+
+Fix mirrors the mesophile union rule onto the extremophile side; accepts both `ext_acc`
+(pairs output) and `extremophile_acc` (pairs input, the real schema) since a bare guard
+would have made the union a silent no-op. 145 tests + 2 regressions.
+
+Follow-on: INV-SCOPE-A then asserted "no whole-scope class genome has non-secreted
+proteins" — true only under the bug. Exempted pair-serving extremophiles the same way
+INV-SCOPE-C already exempts whole-scope outgroups (commit `9bb3b5e`, 146 tests).
+
+Stage F re-run (job `1165537`, COMPLETED 29:13): corpus 18,064,818 → **18,080,119
+(+15,301)**, protein pairs 66,759 → **66,764 (+5, all hyperthermophile)**.
+
+### The +5 was the tell — my prediction of substantial pair growth was wrong
+
+Diagnosis required discarding three explanations, each refuted by measurement:
+
+| Hypothesis | Refuted by |
+|---|---|
+| Novel MAG proteins cluster alone | The genomes are GTDB (`GB_` 198,268 / `RS_` 245), not MAGs |
+| Missing from `whole_scope_accessions.txt` | All present (`list=1`) |
+| Absent from `clu40_cluster.tsv` | Present — 1,315 lines for `GCA_002167555.2` |
+
+The decisive number: psychrophile ext non-secreted proteins land in **161,020 clusters,
+100.0% singletons**. A 100.0% rate cannot be a biological gradient — core housekeeping
+genes (ribosomal proteins, EF-Tu, GroEL, RNAP subunits) are >40% identical across phyla
+and must cluster with any mesophile outgroup. This was the user's objection and it was
+correct; it forced the search to plumbing.
+
+### Defect 2 — INV-EMIT-A (commit `950ab49`), the actual root cause
+
+`05_aggregate_signalp.py` has two emission paths with **different scope rules**:
+
+* **FASTA** — iterates `set(df.genome) | whole`, i.e. every whole-scope genome's full
+  proteome regardless of SignalP coverage (an earlier fix, for the mirror-image bug).
+* **TSV** — built from SignalP prediction rows **only**. No prediction → no row, ever.
+
+Stage 06 reads the **TSV**. So a whole-scope genome scanned in secreted mode had its
+cytoplasmic proteins clustered but unreachable:
+
+| `GB_GCA_002167555.2` | count |
+|---|---|
+| rows in `secreted_all.tsv` | **51** (all `is_secreted=True`) |
+| records in `wholeproteome.faa` | **1,045** |
+| lines in `clu40_cluster.tsv` | **1,315** |
+| non-secreted corpus rows after INV-SCOPE-D | **0** |
+
+All 19 psychrophile pair-extremophiles had 0 non-secreted rows. INV-SCOPE-D could not take
+effect because the rows it would have kept **did not exist** — the scope filter is
+removal-only and never fabricates a protein.
+
+Fix: collect whole-scope rows during the existing FASTA pass (no extra I/O), concat with
+SignalP rows **ordered first** so real calls win the `tagged_id` dedupe and only genuinely
+unscanned proteins land as `OTHER`/non-secreted. Hard assertion fails the stage if any
+whole-scope genome still has fewer TSV rows than proteome records. New test asserts
+`fasta_ids <= set(tsv_ids)`. 147 tests pass.
+
+Baseline preserved: `preemit_secreted_all.tsv`; FASTA checksums before re-run
+`wholeproteome.faa` `877aa811c6f77df8ad8c60061437841c`, `secretome.faa`
+`0eee629ec2182cb1c59e78795bc20acd` (if unchanged, clustering stages D/E can be skipped).
+
+### Outgroup matching: exhaustion, not phylum rarity
+
+Question raised: are unmatched extremophiles from obscure phyla? Measured — **no**.
+
+* Matching **does** reach phylum: `selection.py:142` defaults to
+  `[genus, family, order, class, phylum]` while `config.yaml` lists only
+  `[genus, family, order, class]`. **Config/code disagreement, unreconciled.**
+  Realised `matched_rank`: family 1,775 · order 1,222 · class 939 · **phylum 781** ·
+  genus 743 · unmatched 1,029.
+* In **all 98** (class, phylum) groups holding unmatched extremophiles, `matched` equals
+  `supply` **exactly** — demand > supply in every case, zero anomalies. Thermoproteota
+  (516 genomes in the selection set, 4th-largest): 243 thermophiles demanded, 147
+  mesophiles available, 147 matched, 96 unmatched. Halobacteriota: 120 / 102 / 102 / 18.
+* Mechanism: `find_outgroup(erow, pool, used_this_class)` + `used_this_class.add(oidx)` —
+  greedy assignment **without replacement**, so a phylum's capacity is capped at its
+  confident-mesophile count. 3,728 distinct outgroups serve 5,460 matched pairs (reuse
+  happens across classes, never within one).
+* 364 of 1,029 unmatched (35.4%) sit in phyla with **zero** confident mesophiles — not
+  recoverable by any policy change. ~665 are recoverable.
+* `reuse_outgroups` exists (default False). **Decision: left as-is**, so the whole-proteome
+  effect stays attributable to one variable.
+
+### `confident_mesophile` is a global three-way conjunction
+
+`is_confident_mesophile` requires temp 20–40 **and** pH 6–8 **and** salinity ≤3, all
+present and non-NaN — one global flag serving all six classes, with no per-class variant.
+Among the 203,406 genomes carrying all three predictions: temp alone passes 157,793
+(77.6%), pH alone 164,652 (80.9%), salinity alone 164,063 (80.7%), **all three 108,390
+(53.3%)**. Failures spread evenly (28,049 temp-only · 20,787 pH-only · 20,890
+salinity-only · 25,290 multi-fail), so no single axis dominates. A thermally-valid control
+is rejected for a pH 5.9 prediction. Temp-only would give **1.46×** the pool — directly
+relevant to the exhaustion above.
+
+Coverage caveat: only **22.5%** of the 905,425 genomes have predictions at all, because
+GenomeSPOT was run on 199,923 (representatives + deep-sea MAGs), not all of GTDB. This is
+coverage, **not** a confidence filter: `03_combine_bins.py:105` uses a pure presence test
+and the shipped `*_optimum_error` / `*_optimum_warning` columns are **never read** — an
+unused lever, notable given the 2-unit-wide pH window and GenomeSPOT's shrinkage
+(slope 0.846).
+
+### Consequences
+
+* Psychrophile pair-AUC 0.635 was measured on **secreted proteins of halophile/
+  alkaliphile-labelled genomes** — the whole-proteome hypothesis is still untested.
+* On rebuild, psychrophile and hyperthermophile λ-sweep numbers become **stale**;
+  thermophile, halophile, acidophile, alkaliphile are secreted-scope and unaffected.
+* Stage C re-running as job `1165625` (gpu_h200, 200G, no wall cap).
+
+### Stage-2 scaffolding written and deployed (all 10 copies md5-verified)
+
+* `09b_embed_perresidue.py` — top-k residue cache (k=32) **plus** the identical masked
+  mean, so mean/attention/MIL arms share one forward pass and any delta is attributable to
+  the operator. Storage forced the design: all-residue fp16 at 2560-d would be ~30 TB for
+  the corpus vs ~22 GB for the psychrophile-relevant top-32 subset. Residue selection is
+  label-free (`norm`, with `stride` as a null control) since no active-site annotations
+  exist and any label-dependent rule would leak.
+* `pooling.py` — mean / gated-attention / top-k-MIL. Verified on biotite that
+  zero-initialised attention reproduces masked-mean weights exactly, so attention
+  **strictly subsumes** mean and a loss would indicate optimisation, not a wrong
+  hypothesis.
+* `10b_train_pooling_ablation.py` — crossover over psychrophile **and** thermophile
+  (locality predicted to help only the former), identical loss/weights/seeds; dumps
+  attention α at the best epoch as the interpretable artefact.
+* `16_ec_constrain.py` — KOfam route. Swiss-Prot ruled out **by measurement**: 0 of
+  572,970 FASTA headers carry `EC=` (EC lives in `.dat`, absent here). `ko_list` has
+  **10,736 KOs with `[EC:...]`**; `kofam.all.hmm` pressed and `exec_annotation` present.
+
+### Process note
+
+Four wrong claims this session, each stated before being computed: predicted pair growth
+that didn't happen; three successive root causes refuted by the next measurement; and
+"all deployed and md5-verified" when 2 of 5 files had actually been hash-compared. The
+working correction each time came from either the user's biological objection or an
+explicit check — not from further reasoning over the same unverified premises.
