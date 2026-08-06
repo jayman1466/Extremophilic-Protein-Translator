@@ -45,6 +45,27 @@ class SplitResult:
     protein_pairs: pd.DataFrame | None = None  # ortholog pairs for L_pair (cluster regime)
 
 
+#: The extremophile-accession column has two spellings in this pipeline:
+#: selection.py (stage 04) emits ``extremophile_acc`` -- that is what
+#: ``all_pairs.tsv``, stage F's INPUT, carries -- while the pair table stage F
+#: WRITES (``labeled_dataset_protein_pairs.tsv``) names the same field
+#: ``ext_acc``. Any code that reads a pairs frame must therefore accept both, or
+#: it works on one table and raises KeyError (or worse, silently no-ops on a
+#: ``col in pairs`` guard) on the other. Resolve through this helper only.
+_EXT_ACC_COLS = ("extremophile_acc", "ext_acc")
+
+
+def _ext_acc_col(pairs) -> str:
+    """Return whichever extremophile-accession column `pairs` actually has."""
+    cols = getattr(pairs, "columns", ())
+    for c in _EXT_ACC_COLS:
+        if c in cols:
+            return c
+    raise KeyError(
+        f"pairs frame has no extremophile-accession column; expected one of "
+        f"{_EXT_ACC_COLS}, got {list(cols)}")
+
+
 def assign_labels(
     secreted: pd.DataFrame,
     genome_labels: pd.DataFrame,
@@ -205,7 +226,7 @@ def _coassign_matched_pairs(
     def union(a, b):
         parent[find(a)] = find(b)
 
-    for e_raw, m_raw in zip(pairs["extremophile_acc"], pairs["outgroup_acc"]):
+    for e_raw, m_raw in zip(pairs[_ext_acc_col(pairs)], pairs["outgroup_acc"]):
         e, m = bare_accession(e_raw), bare_accession(m_raw)
         # skip unmatched extremophiles (empty outgroup) — nothing to co-assign
         if not e or not m:
@@ -370,7 +391,7 @@ def _derive_protein_pairs(
     # into minutes; the corpus table returned by assemble_dataset is unaffected because
     # stratified_group_split still runs on the full `labeled` upstream.
     needed = set()
-    for col in ("extremophile_acc", "outgroup_acc"):
+    for col in (_ext_acc_col(pairs), "outgroup_acc"):
         if col in pairs:
             for a in pairs[col]:
                 b = bare_accession(a)
@@ -494,7 +515,7 @@ def _derive_protein_pairs(
     c_cls: list = []; c_clu: list = []; c_e: list = []; c_m: list = []
     c_eid: list = []; c_mid: list = []; c_sc: list = []; c_col: list = []
     for cls, e_raw, m_raw in zip(pairs.get("class", [None] * len(pairs)),
-                                 pairs["extremophile_acc"], pairs["outgroup_acc"]):
+                                 pairs[_ext_acc_col(pairs)], pairs["outgroup_acc"]):
         e, m = bare_accession(e_raw), bare_accession(m_raw)
         if not e or not m:
             continue
@@ -608,11 +629,11 @@ def _apply_corpus_scope(
             b = bare_accession(a)
             if b:
                 whole_meso.add(b)
-        # the pairs table names this column "ext_acc"; older//test frames use
-        # "extremophile_acc". Accept either so the union rule cannot silently
-        # no-op on a schema difference (that is exactly how the defect hid).
-        _ext_col = next((cc for cc in ("ext_acc", "extremophile_acc")
-                         if cc in w.columns), None)
+        # Resolve via _ext_acc_col: stage F's INPUT (all_pairs.tsv) spells this
+        # extremophile_acc, its OUTPUT spells it ext_acc. A `col in pairs` guard
+        # on one spelling makes the union a silent no-op on the other table --
+        # exactly how the original defect hid.
+        _ext_col = _ext_acc_col(w) if len(w.columns) else None
         if _ext_col is not None:
             for a in w[_ext_col].dropna().astype(str):
                 b = bare_accession(a)
@@ -813,14 +834,41 @@ def assemble_dataset(
         whole = set(_scope_stats["scope_whole_classes"])
         lab = out["label"].astype(str)
         sec = out[secreted_col].fillna(False).astype(bool) if secreted_col in out.columns else None
+        bare_all = out[genome_col].astype(str).str.replace(r"^(GB_|RS_|CU_)", "", regex=True)
+        # Genomes that serve a WHOLE-scope class as a pair EXTREMOPHILE. These are
+        # legitimately whole-proteome even when their single corpus `label` is a
+        # secreted-scope class (INV-SCOPE-D: polyextremophiles carry one label but
+        # serve several classes). Recomputed from the pairs table -- the same source
+        # _apply_corpus_scope used -- so the assertion has an independent witness.
+        whole_ext_acc: set = set()
+        if pairs is not None and len(pairs) and "class" in getattr(pairs, "columns", []):
+            from .gtdb import bare_accession as _ba_e
+            _we = pairs[pairs["class"].isin(whole)]
+            _ecol = _ext_acc_col(_we) if len(_we.columns) else None
+            if _ecol is not None:
+                whole_ext_acc = {_ba_e(a) for a in _we[_ecol].dropna().astype(str)
+                                 if _ba_e(a)}
         if sec is not None:
             # INV-SCOPE-A: no non-secreted protein carries a secreted-scope class label
+            # UNLESS its genome serves a whole-scope class as a pair extremophile.
             sec_class_rows = (~lab.isin(whole)) & lab.ne("mesophile")
-            bad_a = int((sec_class_rows & (~sec)).sum())
+            exempt_a = bare_all.isin(whole_ext_acc)
+            bad_a = int((sec_class_rows & (~sec) & (~exempt_a)).sum())
             assert bad_a == 0, (
                 f"INV-SCOPE-A violated: {bad_a:,} non-secreted proteins carry a "
-                f"secreted-scope class label (scope filter did not apply to corpus)")
+                f"secreted-scope class label and do NOT serve a whole-scope class "
+                f"as a pair extremophile (scope filter did not apply to corpus)")
             stats["inv_scope_a_bad"] = bad_a
+            # INV-SCOPE-D: the pair-serving extremophiles actually KEPT whole-proteome
+            # material. Zero here means the union rule silently no-opped (e.g. an
+            # accession-prefix or column-name mismatch), which is how the original
+            # defect hid -- so assert presence, not just absence of violations.
+            d_nonsec = int((sec_class_rows & (~sec) & exempt_a).sum())
+            stats["inv_scope_d_pair_ext_nonsecreted"] = d_nonsec
+            if whole_ext_acc and not bare_all.isin(whole_ext_acc).any():
+                raise AssertionError(
+                    "INV-SCOPE-D violated: no corpus protein comes from any "
+                    "whole-scope pair-extremophile genome (accession join failed)")
             # INV-SCOPE-B: whole-scope classes retain non-secreted proteins
             if whole:
                 whole_nonsec = int(((lab.isin(whole)) & (~sec)).sum())

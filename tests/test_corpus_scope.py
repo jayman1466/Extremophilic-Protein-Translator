@@ -142,3 +142,53 @@ def test_inv_scope_d_accepts_legacy_ext_column_name():
         "secreted", "is_secreted", "genome", "protein_id")
     assert st["scope_whole_ext_pair_genomes"] == 1
     assert ("GB_POLY1", "p_cyt") in set(zip(out.genome, out.protein_id))
+
+
+def test_inv_scope_a_exempts_pair_serving_extremophile_at_assembly():
+    """INV-SCOPE-A must not fire on the proteins INV-SCOPE-D deliberately keeps.
+
+    Regression for a real failure: after INV-SCOPE-D was added to
+    _apply_corpus_scope, stage F ran 18.5 min and then died on
+    "INV-SCOPE-A violated: 15,301 non-secreted proteins carry a secreted-scope
+    class label" -- those 15,301 rows were exactly the polyextremophile
+    whole-proteome proteins the fix was designed to admit. The unit tests passed
+    because none of them exercised the invariant block in assemble_dataset(),
+    only _apply_corpus_scope(). This test drives the full assemble path.
+    """
+    rows = []
+    def g(acc, label, ismeso, n_clust):
+        for pid, sec in [("p_sec", True), ("p_cyt", False)]:
+            rows.append(dict(genome=acc, protein_id=f"{acc}_{pid}", label=label,
+                             is_mesophile=ismeso, is_secreted=sec,
+                             cluster_id50=n_clust, cluster_id40=n_clust))
+    # POLY1: labelled halophile (secreted scope) but is the psychrophile pair ext
+    g("GB_POLY1", "halophile", False, "c1")
+    g("GB_MESOP", "mesophile", True,  "c1")
+    # a plain halophile + its outgroup, to keep the secreted branch exercised
+    g("GB_HALO1", "halophile", False, "c2")
+    g("GB_MESOH", "mesophile", True,  "c2")
+    # a genome actually LABELLED psychrophile, so INV-SCOPE-B (whole-scope classes
+    # retain non-secreted proteins) has a witness -- as it does in the real corpus,
+    # where 1,286 genomes carry the psychrophile label.
+    g("GB_PSYL1", "psychrophile", False, "c3")
+    lab = pd.DataFrame(rows)
+    genomes = lab.rename(columns={"genome": "accession"}).assign(
+        final_halophile=lab.label.eq("halophile"),
+        final_psychrophile=lab.label.eq("psychrophile"),
+        confident_mesophile=lab.is_mesophile)
+    pairs = pd.DataFrame([
+        dict(**{"class": "psychrophile"}, ext_acc="GB_POLY1", outgroup_acc="GB_MESOP"),
+        dict(**{"class": "halophile"},    ext_acc="GB_HALO1", outgroup_acc="GB_MESOH"),
+    ])
+    # must NOT raise AssertionError from the INV-SCOPE-A block
+    r = assemble_dataset(
+        lab, genomes, pairs=pairs,
+        scope_by_class={"halophile": "secreted", "psychrophile": "whole_proteome"},
+        cluster_col_by_scope={"secreted": "cluster_id50",
+                              "whole_proteome": "cluster_id40"},
+        seed=1)
+    st = r.stats
+    assert st.get("inv_scope_a_bad", 0) == 0
+    # and the exemption is real: the polyextremophile's cytoplasmic protein survived
+    assert st.get("inv_scope_d_pair_ext_nonsecreted", 0) >= 1, \
+        "INV-SCOPE-D kept no non-secreted pair-extremophile protein (union no-opped)"
