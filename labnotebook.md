@@ -3295,3 +3295,79 @@ housekeeping genes — the objection that redirected the search from biology to 
 
 Psychrophile at 942 pairs per genome pair vs 15–45 for the secreted classes is the
 whole-proteome effect the scope decision was made for, finally realised.
+
+### Per-class training composition, rebuilt corpus (supersedes the pre-fix table)
+
+Recomputed from `labeled_dataset.parquet` (21,580,199 rows) and the 412,925-pair table.
+Genome-quality tiers come from the corpus `label_confidence`; paired-genome tiers from the
+selection files' `final_confidence` (per the earlier decision that paired quality keys off
+selection, not the corpus label).
+
+| Class | Scope | Corpus genomes | Ext. proteins | Paired genomes | Genome pairs | Paired clusters | Protein pairs |
+|---|---|---|---|---|---|---|---|
+| thermophile | secreted | 4,993 → 5,159 | 1.11M → 1.13M | 474 → **474** | 474 | 8,999 → **8,999** | 13,136 |
+| hyperthermophile | whole | 632 → 864 | 1.12M → **1.88M** | 27 → **232** | 232 | 193 → **6,232** | 37,355 |
+| psychrophile | whole | 1,286 → 1,597 | 4.16M → **5.21M** | 19 → **329** | 329 | 634 → **97,733** | 309,989 |
+| halophile | secreted | 4,259 → 4,317 | 1.30M → 1.39M | 965 → **965** | 965 | 30,409 → **30,409** | 43,796 |
+| acidophile | secreted | 2,727 → 2,780 | 539k → 586k | 253 → **253** | 253 | 3,119 → **3,119** | 3,901 |
+| alkaliphile | secreted | 1,176 → 1,181 | 290k → 329k | 230 → **230** | 230 | 3,215 → **3,215** | 4,748 |
+| TOTAL | — | 15,073 → **15,898** | 8.51M → **10.52M** | 1,968 → **2,483** | 2,483 | 46,569 → **149,707** | **412,925** |
+
+**Paired genomes and paired clusters are byte-identical for all four secreted classes** —
+the same surgical signature as the pair counts.
+
+Quality composition of the gain (this matters for whether the 342× is real signal):
+
+* **psychrophile paired genomes 0 high / 19 med → 10 high / 319 med.** The increase is
+  medium-tier (OGT ≤ 20 °C evidence), **not** low-tier — no class has any low-tier paired
+  genome, reflecting the psychrophile_low and hyperthermophile_low exclusions.
+* **hyperthermophile 5 high / 22 med → 71 high / 161 med** — a large absolute gain in
+  high-confidence pairs, consistent with GenomeSPOT's hot end being well calibrated.
+* Corpus genome counts rose (15,073 → 15,898) because pair-serving polyextremophiles now
+  contribute full proteomes, so genomes that previously had zero surviving rows appear.
+
+Caveat: the paired-clusters column is not comparable across scopes — psychrophile's 97,733
+counts clusters at 40% identity over whole proteomes, halophile's 30,409 at 50% over
+secretomes.
+
+Artifacts: `perclass_training_table.png` / `.csv` **v2**.
+
+### Retraining submitted: job `1166233`, RUN_TAG=emitfix
+
+Full clean re-run chosen over cache reuse. Cache-reuse accounting (measured, and it
+corrects an earlier wrong statement of "90.4% needs re-embedding" — that counted corpus
+rows, but stage 09's input is `corpus_all.faa`, unchanged at 5,261,647 sequences because
+both FASTAs are byte-identical):
+
+| Quantity | Count |
+|---|---|
+| Corpus rows | 21,580,199 |
+| Rows with no sequence (never embeddable) | 16,424,069 (76.1%) |
+| **Embeddable** (corpus ∩ FASTA) | **5,156,130** |
+| — already cached | 2,067,342 (40%) |
+| — new to embed | **3,088,788 (60%)** |
+
+**All 412,925 pairs have both members embeddable (100.0%, every class)** — nothing in the
+pair term is blocked.
+
+New embedding work by label: mesophile 1,180,771 · psychrophile 1,010,516 ·
+hyperthermophile 759,938 · halophile 65,441 · alkaliphile 37,335 · acidophile 34,787 —
+concentrated exactly where the fix landed.
+
+**Why the 40% cache was discarded rather than reused:** those vectors came from an MLM
+adapter trained on an extremophile-only subsample of the *pre-fix* corpus, which contained
+no psychrophile cytoplasmic proteins. Reusing them would embed a corrected corpus through
+an adapter fitted to the defective one, mixing two feature distributions in one cache and
+confounding the very effect being measured. ~4.5 h saved is not worth an uninterpretable
+result.
+
+Sizing: cache 26.4 GB fp16 on disk, 52.8 GB fp32 in stage 10, against `--mem=400G`.
+Stage 00 (contacts) completed in 41 min; stage 08 (MLM adapter, ~10 h) is the long pole.
+`models_scoped/` and `embeddings_scoped/` are untouched under their own tag, preserving a
+three-way run-1 → scoped → emitfix comparison.
+
+**Read the sweep against this expectation:** the four secreted classes should reproduce
+their λ-sweep numbers closely (thermophile 0.909, halophile 0.844, acidophile 0.808,
+alkaliphile 0.752) since their pairs are byte-identical — a material shift there would
+indicate adapter retraining moved the shared feature space, not the class data.
+Psychrophile is the actual test.
