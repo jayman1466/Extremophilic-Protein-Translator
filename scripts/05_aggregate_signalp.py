@@ -147,6 +147,7 @@ def main() -> None:
         fh_s = open(args.faa_secreted, "w") if args.faa_secreted else None
         fh_w = open(args.faa_whole, "w") if args.faa_whole else None
         n_s = n_w = missing = 0
+        whole_rows: list[tuple] = []   # INV-EMIT-A, see flush() below
         # Iterate the UNION of prediction-table genomes and whole-scope genomes.
         #
         # THE BUG THIS FIXES: the loop used to walk df["genome"] only. Whole-proteome
@@ -180,8 +181,23 @@ def main() -> None:
                     seq = "".join(buf)
                     if fh_s and tid in sec_ids:
                         fh_s.write(f">{tid}\n{seq}\n"); n_s += 1
-                    if fh_w and gen in whole:
-                        fh_w.write(f">{tid}\n{seq}\n"); n_w += 1
+                    if gen in whole:
+                        if fh_w:
+                            fh_w.write(f">{tid}\n{seq}\n"); n_w += 1
+                        # INV-EMIT-A: the TSV must cover the same protein set as the
+                        # whole-proteome FASTA. Rows are otherwise built ONLY from
+                        # SignalP predictions, so a whole-scope genome scanned in
+                        # secreted mode contributed its full proteome to the FASTA
+                        # (and to clu40) while the TSV held only its secreted rows --
+                        # and stage 06 reads the TSV. Measured on the 2026-08-05 run:
+                        # GB_GCA_002167555.2 had 51 TSV rows, 1,045 FASTA records and
+                        # 1,315 clu40 lines, so its 994 cytoplasmic proteins could
+                        # never enter the corpus and every psychrophile pair-genome
+                        # stayed effectively secreted-scope. Emitting a row here (as
+                        # non-secreted; real SignalP calls win the dedupe below)
+                        # keeps TSV and FASTA in lockstep by construction.
+                        whole_rows.append((tid, gen, pid, "OTHER", float("nan"),
+                                           False, ANCHORING.get("OTHER", "none")))
 
                 for line in fh:
                     if line.startswith(">"):
@@ -203,6 +219,37 @@ def main() -> None:
             print(f"[05agg] whole-scope genomes requested {len(whole):,} | "
                   f"in prediction table {n_ws_emitted:,} | "
                   f"read from proteome regardless of SignalP {len(whole):,}")
+
+        # ---- INV-EMIT-A: rewrite the TSV so it covers the whole-scope proteomes ----
+        if whole_rows:
+            wdf = pd.DataFrame(whole_rows, columns=list(df.columns))
+            n_before = len(df)
+            # SignalP rows FIRST so keep="first" preserves real predictions and only
+            # the genuinely unscanned proteins land as OTHER/non-secreted.
+            df = (pd.concat([df, wdf], ignore_index=True)
+                    .drop_duplicates(subset=["tagged_id"], keep="first")
+                    .reset_index(drop=True))
+            n_added = len(df) - n_before
+            df.to_csv(args.out, sep="\t", index=False)
+            n_sec2 = int(df["is_secreted"].sum())
+            print(f"[05agg] INV-EMIT-A: +{n_added:,} whole-scope non-secreted rows "
+                  f"({len(wdf):,} candidates, {len(wdf)-n_added:,} already had a "
+                  f"SignalP call) -> {len(df):,} proteins, {n_sec2:,} secreted "
+                  f"({100*n_sec2/max(1,len(df)):.2f}%)")
+            if args.stats:
+                stats.update({"n_proteins": int(len(df)), "n_secreted": n_sec2,
+                              "secreted_fraction": round(n_sec2 / max(1, len(df)), 6),
+                              "n_whole_scope_rows_added": int(n_added),
+                              "n_genomes": int(df["genome"].nunique())})
+                Path(args.stats).write_text(json.dumps(stats, indent=1, sort_keys=True))
+            # Hard invariant: every whole-scope genome present in the FASTA must now
+            # have >= as many TSV rows as FASTA records. A silent divergence here is
+            # exactly what cost the psychrophile arm a full training run.
+            per_gen = df.groupby("genome").size()
+            bad = [g for g in sorted(whole & set(per_gen.index))
+                   if per_gen.get(g, 0) < wdf[wdf["genome"] == g].shape[0]]
+            assert not bad, (f"INV-EMIT-A violated: {len(bad)} whole-scope genomes have "
+                             f"fewer TSV rows than proteome records, e.g. {bad[:5]}")
         if n_s == 0 and args.faa_secreted:
             raise SystemExit("[05agg] secreted FASTA is EMPTY -- proteome roots wrong?")
         if args.faa_whole and whole and n_w == 0:
