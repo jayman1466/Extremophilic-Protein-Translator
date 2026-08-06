@@ -3224,3 +3224,33 @@ that didn't happen; three successive root causes refuted by the next measurement
 "all deployed and md5-verified" when 2 of 5 files had actually been hash-compared. The
 working correction each time came from either the user's biological objection or an
 explicit check — not from further reasoning over the same unverified premises.
+
+### INV-EMIT-A verified in production (job `1165625`, COMPLETED 1:08:53, peak RSS 287 GiB)
+
+Three independent confirmations that the fix did what was intended:
+
+| Check | Result |
+|---|---|
+| Whole-scope non-secreted rows added | **+3,184,192** (3,293,163 candidates − 108,971 that already had a SignalP call) |
+| `GB_GCA_002167555.2` rows in `secreted_all.tsv` | **1,045** = 994 non-secreted + 51 secreted, matching its 1,045 FASTA records exactly (was 51) |
+| FASTA checksums vs pre-run baseline | **both unchanged** — `wholeproteome.faa` `877aa811c6f77df8ad8c60061437841c`, `secretome.faa` `0eee629ec2182cb1c59e78795bc20acd` |
+
+Corpus input **125,221,498 → 128,405,690 proteins (+3,184,192, +2.5%)**; secreted count
+constant at **18,614,380**, so the secreted fraction falls 14.87% → 14.50% purely by
+denominator growth. The 51 real SignalP calls on the diagnostic genome survived the
+dedupe, confirming the SignalP-rows-first ordering works.
+
+**Only 108,971 of 3,293,163 whole-scope proteins (3.3%) had ever been in the TSV** — the
+scale of the defect. Because both FASTAs are byte-identical, `clu40_cluster.tsv` and
+`clu50_cluster.tsv` remain valid and **clustering stages D/E were skipped** (verified by
+checksum, not assumed): the chain is C→F, not C→D→E→F.
+
+Stage F resubmitted as job `1165687` (gpu_h200, 900G, no wall cap), reusing both cluster
+maps. Baseline preserved as `scopeD_labeled_dataset.parquet` /
+`scopeD_labeled_dataset_protein_pairs.tsv` (the INV-SCOPE-D-only state: 18,080,119 rows,
+66,764 pairs) for a like-for-like comparison.
+
+**Correction logged:** an earlier statement of this growth cited 119,678,568 / 14.95% as
+the pre-fix baseline. That is the line from a *previous* stage-F run, not job 1165625.
+The correct figures are 125,221,498 / 14.87%, which reconcile exactly
+(125,221,498 + 3,184,192 = 128,405,690) against the constant secreted count.
