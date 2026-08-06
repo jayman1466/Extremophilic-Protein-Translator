@@ -3254,3 +3254,44 @@ maps. Baseline preserved as `scopeD_labeled_dataset.parquet` /
 the pre-fix baseline. That is the line from a *previous* stage-F run, not job 1165625.
 The correct figures are 125,221,498 / 14.87%, which reconcile exactly
 (125,221,498 + 3,184,192 = 128,405,690) against the constant secreted count.
+
+### Stage F rebuild on the corrected corpus (job `1165687`, COMPLETED 45:30)
+
+Corpus scope **90,455,200 → 21,580,199** rows (was 18,080,119 under INV-SCOPE-D alone).
+Leakage invariant holds (max splits per group = 1); all 412,925 pairs same-split.
+Splits 17,262,603 / 2,160,044 / 2,157,552.
+
+| Class | Pairs before | Pairs after | Factor | Genome pairs | Pairs / gp |
+|---|---|---|---|---|---|
+| **psychrophile** | 906 | **309,989** | **342×** | 19 → **329** | 942.2 |
+| **hyperthermophile** | 277 | **37,355** | **135×** | 27 → **232** | 161.0 |
+| thermophile | 13,136 | 13,136 | **1.0×** | 474 | 27.7 |
+| halophile | 43,796 | 43,796 | **1.0×** | 965 | 45.4 |
+| acidophile | 3,901 | 3,901 | **1.0×** | 253 | 15.4 |
+| alkaliphile | 4,748 | 4,748 | **1.0×** | 230 | 20.6 |
+| TOTAL | 66,764 | **412,925** | 6.2× | | |
+
+**The four secreted-scope classes are byte-identical (exactly 1.0×)** — the strongest
+evidence the fix is surgical: it touched only whole-scope genomes, so the thermophile
+(0.909) / halophile (0.844) / acidophile (0.808) / alkaliphile (0.752) λ-sweep results
+remain valid and comparable. Only psychrophile and hyperthermophile numbers are stale.
+
+Label counts: mesophile 11,057,153 · psychrophile 5,213,973 · hyperthermophile 1,882,764 ·
+halophile 1,386,214 · thermophile 1,125,420 · acidophile 585,569 · alkaliphile 329,106.
+
+**Singleton anomaly resolved** (the finding that broke the investigation open):
+
+| Metric | Before | After |
+|---|---|---|
+| psychrophile ext cluster singleton rate | **100.0%** | **72.1%** |
+| hyperthermophile ext cluster singleton rate | 100.0% | 67.3% |
+| psychrophile shared clusters via NON-secreted ext proteins | **0** | **122,968** |
+| hyperthermophile shared clusters via NON-secreted ext proteins | 0 | 12,480 |
+| the 19 originally-broken genomes: non-secreted corpus rows | 0 | 49,787 |
+
+A ~70% singleton rate is what 40%-identity clustering should give (most proteins are
+lineage-specific). 100.0% was arithmetically impossible for genomes carrying ~300 core
+housekeeping genes — the objection that redirected the search from biology to plumbing.
+
+Psychrophile at 942 pairs per genome pair vs 15–45 for the secreted classes is the
+whole-proteome effect the scope decision was made for, finally realised.
