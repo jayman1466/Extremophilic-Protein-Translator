@@ -87,6 +87,20 @@ def main():
     ap.set_defaults(rubric_weights=True)
     ap.add_argument("--pair-batch-size", type=int, default=256,
                     help="matched-pair sub-batch per step for the active margin term")
+    ap.add_argument("--pointwise-scope", action="store_true",
+                    help="INV-SCOPE-E: restrict the POINTWISE (BCE) term to each "
+                         "phenotype's configured protein scope. The corpus admits a "
+                         "genome's whole proteome when that genome is an ext member of "
+                         "any whole_proteome-class pair (the INV-SCOPE-D union, keyed on "
+                         "GENOME not (genome,class)). For a secreted-scope class this "
+                         "silently labels that genome's cytoplasmic proteins y=1, so the "
+                         "BCE term trains on whole-proteome positives while the margin "
+                         "term stays secreted. Measured on the emitfix corpus: 33.6%% of "
+                         "alkaliphile, 27.4%% of acidophile, 8.8%% of halophile train "
+                         "positives are non-secreted; thermophile 0%%.")
+    ap.add_argument("--scope-config", default=None,
+                    help="path to config.yaml supplying dataset.protein_scope "
+                         "(--pointwise-scope only; default: repo config)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--emb-device", default="auto",
                     help="where the embedding matrix lives: auto|cpu|cuda. "
@@ -136,6 +150,22 @@ def main():
     def rows_for(tagged_ids):
         return torch.tensor([id2row[t] for t in tagged_ids], device=emb_dev)
 
+    # protein-scope map for --pointwise-scope (same config key stage 06 reads, so
+    # the two terms cannot drift apart)
+    secreted_col = "is_secreted"
+    scope_by_class, default_scope = None, "secreted"
+    if args.pointwise_scope:
+        from eptrans.config import load_config
+        cfg = load_config(args.scope_config)
+        ps = cfg.get_path("dataset.protein_scope", {}) or {}
+        scope_by_class = dict(ps.get("by_phenotype", {}) or {})
+        default_scope = ps.get("default", "secreted")
+        if not scope_by_class:
+            raise SystemExit("--pointwise-scope given but config dataset.protein_scope."
+                             "by_phenotype is empty")
+        print(f"[10] pointwise scope active: default={default_scope} "
+              f"by_phenotype={scope_by_class}", flush=True)
+
     Path(args.out_root).mkdir(parents=True, exist_ok=True)
     summary = {}
 
@@ -143,6 +173,33 @@ def main():
         y = phenotype_binary_labels(df, pheno)
         sub = df.assign(_y=y)
         sub = sub[sub["_y"].notna()]
+
+        # INV-SCOPE-E: align the pointwise term with the pair term's scope.
+        # _derive_protein_pairs builds its representative map from
+        # lab[lab.is_secreted] for a secreted-scope class, so the margin term
+        # only ever sees secreted proteins. The pointwise term above selects on
+        # the LABEL alone, and the corpus contains whole proteomes for any genome
+        # in the INV-SCOPE-D whole_ext union -- a union keyed on genome, not on
+        # (genome, class). A soda-lake genome labelled `alkaliphile` that is also
+        # an ext member of a psychrophile pair therefore contributes its entire
+        # cytoplasm as alkaliphile positives. Verified on the emitfix corpus:
+        # every leaking genome (alkaliphile 25/25, acidophile 21/21, halophile
+        # 32/32) is in whole_ext; thermophile has none and leaks nothing.
+        if args.pointwise_scope and scope_by_class:
+            sc = scope_by_class.get(pheno, default_scope)
+            if sc == "secreted":
+                if secreted_col not in sub.columns:
+                    raise SystemExit(
+                        f"--pointwise-scope: {pheno} is secreted-scope but the labeled "
+                        f"table has no {secreted_col!r} column")
+                keep = sub[secreted_col].fillna(False).astype(bool)
+                n_drop = int((~keep).sum())
+                n_pos_drop = int(((~keep) & (sub["_y"] == 1)).sum())
+                sub = sub[keep]
+                print(f"[10] {pheno}: pointwise scope={sc} -> dropped {n_drop:,} rows "
+                      f"({n_pos_drop:,} positives) outside scope", flush=True)
+            else:
+                print(f"[10] {pheno}: pointwise scope={sc} -> no filter", flush=True)
         tr = sub[sub["split"] == "train"]
         va = sub[sub["split"] == "val"]
         tr_rows = rows_for(tr["tagged_id"].astype(str).tolist())
