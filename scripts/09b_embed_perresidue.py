@@ -23,6 +23,11 @@ x 2560 d x fp16 = ~30 TB. This script caches a fixed-size TOP-K token summary
 per protein instead (k=32 default):
 
   topk_shard{i}.npy   (n, k, H) float16   -- k selected residue vectors
+  pos_shard{i}.npy    (n, k)    int32     -- TOKEN index each slot came from
+                                             (CLS=0, so residue r maps to token r+1;
+                                             -1 = padding slot for short proteins).
+                                             Lets alpha/MIL scores be mapped back
+                                             onto sequence/structure coordinates.
   mean_shard{i}.npy   (n, H)    float16   -- masked mean, IDENTICAL to stage 09
   lens_shard{i}.npy   (n,)      int32     -- true residue count (pre-truncation)
   ids_shard{i}.txt                        -- tagged_ids, same order
@@ -103,6 +108,7 @@ def main():
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     tk_path = out / f"topk_shard{args.shard}.npy"
+    pos_path = out / f"pos_shard{args.shard}.npy"
     mn_path = out / f"mean_shard{args.shard}.npy"
     ln_path = out / f"lens_shard{args.shard}.npy"
     ids_path = out / f"ids_shard{args.shard}.txt"
@@ -151,6 +157,7 @@ def main():
 
     K = args.topk
     topk = np.zeros((n, K, hidden), dtype=np.float16)
+    pos = np.full((n, K), -1, dtype=np.int32)   # token index per slot; -1 = padding
     means = np.empty((n, hidden), dtype=np.float16)
     lens = np.zeros((n,), dtype=np.int32)
     seqs = shard_df["sequence"].tolist()
@@ -197,6 +204,12 @@ def main():
             b = pooled.shape[0]
             means[i:i + b] = pooled.float().cpu().numpy().astype(np.float16)
             topk[i:i + b, :sel.shape[1]] = sel.cpu().numpy().astype(np.float16)
+            # record which TOKEN each kept slot came from, blanking padding slots
+            # to -1 so downstream never mistakes a gathered pad for token 0 (=CLS).
+            idx_np = idx.cpu().numpy().astype(np.int32)
+            selv_np = selv.squeeze(-1).cpu().numpy().astype(bool)
+            idx_np[~selv_np] = -1
+            pos[i:i + b, :idx_np.shape[1]] = idx_np
             lens[i:i + b] = valid.sum(1).cpu().numpy().astype(np.int32)
 
             if (i // bs) % 50 == 0:
@@ -207,7 +220,7 @@ def main():
                       flush=True)
 
     # atomic-ish writes: tmp then rename, so a killed job never leaves a half file
-    for arr, p in ((topk, tk_path), (means, mn_path), (lens, ln_path)):
+    for arr, p in ((topk, tk_path), (pos, pos_path), (means, mn_path), (lens, ln_path)):
         tmp = str(p) + ".tmp.npy"
         np.save(tmp, arr)
         Path(tmp).rename(p)

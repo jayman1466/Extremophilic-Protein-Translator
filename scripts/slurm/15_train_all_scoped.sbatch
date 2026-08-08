@@ -3,14 +3,18 @@
 #SBATCH --partition=gpu_h200
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=400G
+#SBATCH --mem=1900G
 #SBATCH --output=/groups/cress/projects/jaymin/eptrans_scratch/logs/train/train_all_%j.log
 #
-# ONE allocation, four stages, scope-corrected corpus (stage F job 1165065):
+# ONE allocation, four stages, scope-corrected corpus (stage F job 1167381):
 #   00  precompute contacts           -- ESM-2 contact maps for the MLM subsample (cached)
 #   08  domain-adaptive MLM adapter   -- extremophile-only corpus subsample, coupled masking
-#   09  embedding cache               -- whole corpus through the MLM-adapted backbone
-#   10  classifier heads, LAMBDA SWEEP -- all phenotypes x lam in {0.5,1,2,4}
+#   09  embedding cache (DUAL-EMIT)   -- whole corpus through the MLM-adapted backbone;
+#                                        ONE forward pass writes mean_shard AND topk_shard
+#                                        (K=32 per-residue block, L2-norm select) for pooling
+#   10a classifier heads, LAMBDA SWEEP -- MEAN pooling, all phenotypes x lam in {0.5,1,2,4}
+#   10b attention heads, POINTWISE     -- per phenotype, gated-attention over the K=32 block,
+#                                        trained at the single lam that maxed 10a val_auprc
 #
 # Runs the whole chain inside a single gpu_h200 job (no inter-job SLURM
 # dependency that can wedge in queue). NO wall-time cap (biotite standing rule).
@@ -36,14 +40,20 @@ OVERWRITE=${OVERWRITE:-0}
 LAMS=${LAMS:-"0.5 1 2 4"}
 MLM_EPOCHS=${MLM_EPOCHS:-3}
 CLF_EPOCHS=${CLF_EPOCHS:-30}
+# attention-pooling top-k cache: K residues per protein, sharded finer so no single
+# topk_shard*.npy (n_i, K, H) fp16 blows the 1.9 TB RAM during the per-batch gather.
+TOPK=${TOPK:-32}
+EMB_NSHARDS=${EMB_NSHARDS:-16}
+ATTN_DIM=${ATTN_DIM:-128}
+PHENOS="thermophile hyperthermophile psychrophile halophile acidophile alkaliphile"
 
 MODEL_ROOT=/groups/cress/projects/jaymin/IS1111/eptrans/models_$RUN_TAG
 EMB_ROOT=/groups/cress/projects/jaymin/IS1111/eptrans/embeddings_$RUN_TAG
 mkdir -p "$MODEL_ROOT" "$EMB_ROOT" "$SCR/logs/train"
 
 # ---- scope-corrected inputs (stage F 1165065) ----
-LABELED=$ASM/labeled_dataset.parquet                       # 18.06M scoped proteins
-PAIRS=$ASM/labeled_dataset_protein_pairs.tsv               # 66,759 matched pairs
+LABELED=$ASM/labeled_dataset.parquet                       # 22.01M scoped proteins (22,007,249)
+PAIRS=$ASM/labeled_dataset_protein_pairs.tsv               # 452,487 matched pairs
 MLM_SUB=$MODEL_ROOT/labeled_mlm_subsample.parquet          # built below (extremophile-only)
 # corpus spans secretome + whole proteome -> embedding needs sequences for both
 CORPUS_FASTA=$ASM/corpus_all.faa
@@ -134,15 +144,19 @@ if [ -f "$EMB_ROOT/secretome_scoped/.done" ]; then
   echo "[15] 09 embedding cache already done -- skipping"
 else
   refuse_clobber "$EMB_ROOT/secretome_scoped" "an embedding cache"
-  for sh in 0 1 2 3 4 5 6 7; do
+  for sh in $(seq 0 $((EMB_NSHARDS-1))); do
     if [ -f "$EMB_ROOT/secretome_scoped/.done_shard${sh}" ]; then
       echo "[15] 09 shard $sh already done"; continue
     fi
+    # DUAL-EMIT: one forward pass writes mean_shard${sh}.npy AND topk_shard${sh}.npy
+    # (n_i, K, H) fp16 + lens_shard${sh}.npy. Mean path is byte-identical to the
+    # no-topk run; the top-k block is what the attention head (10b) pools over.
     $PY "$REPO/scripts/09_embed_secretome.py" \
       --labeled "$LABELED" --fasta "$CORPUS_FASTA" \
       --mlm-adapter "$MODEL_ROOT/mlm_adapt/mlm_adapter_best" \
       --backbone-size 3B --lora-rank 32 --lora-alpha 64 \
-      --shard "$sh" --nshards 8 \
+      --shard "$sh" --nshards "$EMB_NSHARDS" \
+      --emit-topk --topk "$TOPK" --select norm \
       --batch-size 8 --max-len 1022 --device cuda \
       --out-dir "$EMB_ROOT/secretome_scoped"
     rc=$?; [ $rc -ne 0 ] && { echo "[15] 09 shard $sh FAILED rc=$rc"; exit $rc; }
@@ -160,17 +174,58 @@ echo "[15] 09 done  t=$(date -Is)"
 # ============================================================================
 for lam in $LAMS; do
   OUT="$MODEL_ROOT/cached_probes_lam${lam}"
-  if [ -f "$OUT/.done" ]; then echo "[15] 10 lam=$lam already done"; continue; fi
-  echo "[15] 10 sweep lam=$lam -> $OUT"
+  if [ -f "$OUT/.done" ]; then echo "[15] 10a lam=$lam already done"; continue; fi
+  echo "[15] 10a sweep lam=$lam -> $OUT"
   $PY "$REPO/scripts/10_train_cached_probe.py" \
     --cache-dir "$EMB_ROOT/secretome_scoped" \
     --labeled "$LABELED" --pairs "$PAIRS" --fasta "$CORPUS_FASTA" \
-    --phenotypes thermophile hyperthermophile psychrophile halophile acidophile alkaliphile \
+    --phenotypes $PHENOS \
+    --pointwise-scope --scope-config "$REPO/config/config.yaml" \
     --epochs "$CLF_EPOCHS" --lr 1e-3 --batch-size 4096 \
     --lam "$lam" --margin 1.0 \
+    --pooling mean \
     --device cuda --out-root "$OUT"
-  rc=$?; [ $rc -ne 0 ] && { echo "[15] 10 lam=$lam FAILED rc=$rc"; exit $rc; }
+  rc=$?; [ $rc -ne 0 ] && { echo "[15] 10a lam=$lam FAILED rc=$rc"; exit $rc; }
   touch "$OUT/.done"
 done
-echo "[15] 10 sweep done  t=$(date -Is)"
+echo "[15] 10a mean sweep done  t=$(date -Is)"
+
+# ============================================================================
+# stage 10b -- ATTENTION heads, POINTWISE at the per-class best lambda
+#   The mean sweep (10a) fixes lambda by measured val_auprc per phenotype. Each
+#   attention head then trains ONCE, at its own best lambda, pooling the K=32
+#   top-k block from 09's dual-emit cache. Two production classifiers exist per
+#   class: the mean head (10a, at best lam) and this attention head (10b).
+#   Output dirs are tagged clf_<pheno>_attn so they never collide with the
+#   clf_<pheno>_cached mean heads.
+# ============================================================================
+ATTN_OUT="$MODEL_ROOT/cached_probes_attn"
+mkdir -p "$ATTN_OUT"
+if [ -f "$ATTN_OUT/.done" ]; then
+  echo "[15] 10b attention pass already done -- skipping"
+else
+  for pheno in $PHENOS; do
+    if [ -f "$ATTN_OUT/clf_${pheno}_attn/.done" ]; then
+      echo "[15] 10b $pheno already done"; continue
+    fi
+    BEST_LAM=$($PY "$REPO/scripts/select_best_lam.py" \
+                 --model-root "$MODEL_ROOT" --lams "$LAMS" --pheno "$pheno")
+    rc=$?; [ $rc -ne 0 ] && { echo "[15] 10b $pheno lam-select FAILED rc=$rc"; exit $rc; }
+    echo "[15] 10b $pheno -> attention at best lam=$BEST_LAM"
+    $PY "$REPO/scripts/10_train_cached_probe.py" \
+      --cache-dir "$EMB_ROOT/secretome_scoped" \
+      --topk-cache-dir "$EMB_ROOT/secretome_scoped" \
+      --labeled "$LABELED" --pairs "$PAIRS" --fasta "$CORPUS_FASTA" \
+      --phenotypes "$pheno" \
+      --pointwise-scope --scope-config "$REPO/config/config.yaml" \
+      --epochs "$CLF_EPOCHS" --lr 1e-3 --batch-size 4096 \
+      --lam "$BEST_LAM" --margin 1.0 \
+      --pooling attention --attn-dim "$ATTN_DIM" \
+      --device cuda --out-root "$ATTN_OUT"
+    rc=$?; [ $rc -ne 0 ] && { echo "[15] 10b $pheno FAILED rc=$rc"; exit $rc; }
+    touch "$ATTN_OUT/clf_${pheno}_attn/.done"
+  done
+  touch "$ATTN_OUT/.done"
+fi
+echo "[15] 10b attention pass done  t=$(date -Is)"
 echo "[15] ALL STAGES COMPLETE  end=$(date -Is)"

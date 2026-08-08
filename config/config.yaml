@@ -334,4 +334,4 @@ modeling:
     margin: 1.0
     select_metric: "auprc"         # model-select / early-stop on val AUPRC
     neg_per_pos: 3.0               # cap negatives at 3x positives (bounds Stage-2 wall-clock)
-  confidence_weights: { high: 1.0, medium: 0.5, none: 1.0, low: 0.25 }
+  confidence_weights: { high: 1.0, medium: 0.5, none: 1.0, low: 0.15 }  # low 0.25->0.15 (2026-08-08): stronger skepticism of metadata-only labels; source of truth is CONFIDENCE_WEIGHTS in losses.py

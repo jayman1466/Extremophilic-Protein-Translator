@@ -3426,3 +3426,350 @@ lever. The instrument that targets it directly is `max_pairs_per_cluster_class`,
 `null` (r ≈ 0.25 × genome pairs suggested, never measured). Note `pos_weight` already
 balances *classes* by inverse frequency but not *genomes within* a class, so a per-genome
 or per-cluster cap is complementary rather than redundant.
+
+---
+
+## 2026-08-08 — Class-balance decisions, effective pos_weight, combined sbatch, leakage audit
+
+Pipeline-rebuild steps 5–13. All counts MEASURED on the current
+`assemble/labeled_dataset.parquet` + `labeled_dataset_protein_pairs.tsv`
+(re-assembled since the previous entry: proteins 18.06M -> **21,580,199**,
+pairs 66,759 -> **412,925**; the earlier 66,759 figure is stale).
+
+### Class imbalance — measured at three levels
+- **Cross-phenotype pairs** (labeled_dataset_protein_pairs.tsv, 412,925 total):
+  psychrophile 309,989 | halophile 43,796 | hyperthermophile 37,355 |
+  thermophile 13,136 | alkaliphile 4,748 | acidophile 3,901.
+  Spread = **79.5×** (psychrophile/acidophile). [job fcc88de7 + pair_imbalance.json]
+- **Within-head pos/neg** (train split, scoped) — negatives are SHARED within a
+  scope: secreted heads all share **7,824,488** negatives; whole-scope heads
+  share **8,844,060**. pos_frac 0.320 (psychrophile) -> 0.0289 (alkaliphile).
+  Raw pos_weight (N_neg/N_pos) 2.12 -> 33.64. [balance_job fcc88de7]
+- **Positive confidence tiers** — psychrophile 76.5% LOW / 22.3% med / 1.1% high;
+  halophile 82.3% med / only 2.5% low. [tier_job 9ec2ab44]
+
+### Decision 1 — LOSS WEIGHTING, not downsampling
+Heads are INDEPENDENT (`for pheno in args.phenotypes`), so cross-phenotype
+downsampling (79.5× spread) can only starve the majority head, never help a
+minority head's separate BCE. Within-head negative downsampling would discard
+up to 97.1% of the shared mesophile-negative signal. pos_weight = N_neg/N_pos
+balances analytically with zero data loss.
+
+### Decision 2 — keep rubric weights, compute pos_weight on EFFECTIVE counts
+Confidence weights (high 1.0/medium 0.5/low 0.25; mesophile none 1.0) stay on by
+default via `--rubric-weights`. KEY FIX: pos_weight must be computed on the
+confidence-weighted (effective) positive counts, not raw, or the two terms fight
+(rubric down-weights a positive inside the loss; raw pos_weight re-inflates it,
+net under-weighting positives — worst for the noisiest heads). Effective
+pos_weight runs 2–3× raw: psychrophile 6.75 (raw 2.12), halophile 13.09 (7.46),
+hyperthermophile 14.10 (5.87), thermophile 16.56 (8.69), acidophile 42.68
+(17.82), alkaliphile 90.97 (33.64).
+
+Code changes deployed to `$SCR/repo` (syntax-verified; /tmp backups):
+- `scripts/10_train_cached_probe.py`: pos_weight now `eff_neg/eff_pos` when
+  rubric weights active; reduces to raw N_neg/N_pos under `--no-rubric-weights`.
+  Logs both (`pos_weight X (raw Y)`); records `pos_weight_raw` in metrics.json.
+- `scripts/10b_train_pooling_ablation.py`: same effective-count fix.
+
+### Per-class inclusion (pointwise scope) — wired into stage 15
+`scripts/slurm/15_train_all_scoped.sbatch` stage-10 call now passes
+`--pointwise-scope --scope-config config/config.yaml`. Secreted-scope heads
+(halophile/acidophile/alkaliphile/thermophile) train only on `is_secreted`
+proteins; whole_proteome heads (hyperthermophile/psychrophile) use the full
+proteome. Scope map = config.dataset.protein_scope (committed at f16ebe3).
+
+### Combined single-allocation sbatch (step 11) — EXISTS
+`scripts/slurm/15_train_all_scoped.sbatch`: one gpu_h200 job (1 GPU/16 cpu/400G,
+no wall cap) runs stage 00 contacts -> 08 MLM adapter -> 09 embedding cache
+(8 shards in-process) -> 10 classifier heads (lambda sweep {0.5,1,2,4}).
+Idempotent `.done` markers per stage -> resubmit resumes at first unfinished
+stage. Builds corpus_all.faa (secretome+wholeproteome, header-deduped) in-job.
+MLM->classifier adapter remap via `load_mlm_adapter_into_classifier`
+(model.py:137), which RAISES on 0 transferred LoRA tensors (no silent
+vanilla-ESM fallback).
+
+### Leakage audit (step 10) — PASS, measured [job ef11b626 / 1167275]
+stratified_group_split (seed 1466) assigns whole `group`s (union-find over
+mmseqs 40% + 50% identity maps) to one split, stratified by majority label.
+- proteins 21,580,199 -> train 17,262,603 / val 2,160,044 / test 2,157,552
+- groups spanning >1 split: **0 of 18,810,756**; cluster_id40 spanning 0;
+  cluster_id50 spanning 0
+- pairs cross-split: **0 of 412,925** (train 330,573 / val 40,769 / test 41,583)
+
+### SignalP gap-fill (steps 1–4) — in flight
+signalp_targeted chunks 0–11, 14 have `.done`; chunks 12/13 (SLURM
+1167114/1167115) still running ~6.7 h, covering the remaining 211 gap genomes.
+chunk_14 (SLURM 1167269) already verified: 5 genomes / 14,143 proteins. Assemble
+stage C auto-merges `signalp_targeted/chunk_*` on rerun.
+
+### Pooling ablation (10b, SLURM 1167271 = host 3753baf9) — running, eval survives
+Batched-eval fix (`score_all(head, rows, bs=4096)` to CPU numpy) lets val +
+pair gathers run on the 23.56 GB A5000. psychrophile mean-pool ep30: val_auprc
+0.739, pair_auc 0.877 (vs old cached-probe 0.658). Attention/top-k arms +
+remaining phenotypes still running; ablation_summary.json not yet emitted.
+
+---
+
+## 2026-08-08 — Stage 15 upgraded to K=32 attention + dual-emit, submitted (job 1167340)
+
+### Three sbatch edits (deployed sha256 6fcc1472…208c, bash -n OK)
+1. **`--mem` 400G → 1900G.** K=32 top-k cache needs ~460 GB RAM per shard during
+   the per-batch gather; mean cache (~185 GB fp32) also lives in CPU RAM
+   (`--emb-device auto` picks cpu). gpu_h200 node-224-2t-8gpu-1 measured
+   RealMemory=2,063,701 MB (2.06 TB), AllocMem=0 at submit → 1900G honorable.
+2. **Stage 09 dual-emit at nshards 16.** Added `--emit-topk --topk 32 --select norm`
+   and `--nshards 16` (was 8). ONE forward pass now writes `mean_shard{i}.npy` AND
+   `topk_shard{i}.npy` (n_i, K=32, H=2560) fp16 + `lens_shard{i}.npy`. Mean path is
+   byte-identical to the no-topk run → any AUPRC delta is pooling, not representation.
+   Finer sharding (16) keeps any single `topk_shard*.npy` from blowing the 1.9 TB RAM.
+3. **Stage 10b attention pass, pointwise at per-class best λ.** After the 10a mean
+   λ-sweep {0.5,1,2,4}, `scripts/select_best_lam.py` reads each
+   `cached_probes_lam<λ>/cached_probe_summary.json`, picks the λ that MAXES measured
+   `val_auprc` per phenotype (ties → val_pair_auc → smaller λ), and stdout-returns it
+   for `$(...)` capture. Each attention head then trains ONCE at its own best λ via
+   `--pooling attention --attn-dim 128` over the K=32 block. Output tags:
+   mean → `clf_<pheno>_cached`, attention → `clf_<pheno>_attn` (never collide).
+   Two production classifiers per class (mean-at-best-λ + attention-at-best-λ).
+   K raised from 16 → 32 per user ("h200 has 2t ram, maybe K32 still works"), measured to fit.
+
+### Deployed-script verification (before writing sbatch, not assumed)
+- 09 args confirmed: `--emit-topk`/`--topk` (default 32)/`--select {norm,stride}` present.
+- 10 args confirmed: `--pooling {mean,attention}`, `--topk-cache-dir`, `--attn-dim` (default
+  128), `--emb-device` (default auto). **No `--topk` on stage 10** — K read from cache shape;
+  removed an erroneous `--topk` from the 10b call after checking the arg list.
+- 10 device branch: mean cache held in CPU RAM, per-batch indexed to GPU; attention path
+  fully memmap-backed (union up to 3.7 TB, never concatenated). No OOM path.
+- 10 output tag logic `tag = "cached" if not attention else "attn"` (line 400) → `.done`
+  markers in sbatch match.
+
+### Staleness catch (would have been a silent "COMPLETED but no work")
+Preflight found Aug 5 `models_scoped`/`embeddings_scoped` with EVERY `.done` marker set
+(`.contacts_done`, `mlm_adapt/.done`, 8× `.done_shard*`, `secretome_scoped/.done`, 4×
+`cached_probes_lam*/.done`). That tree pre-dates the Aug 8 scope-corrected corpus
+(`labeled_dataset.parquet` mtime 08-08 08:09 vs subsample/adapter 08-05) and the K=32
+decision — embeddings were mean-only `emb_shard*.npy`, **zero `topk_shard` files**. Because
+the `.done`-skip runs before the OVERWRITE guard, a `RUN_TAG=scoped` resubmit would have
+skipped all stages and "completed" in seconds on stale, wrong-corpus, no-topk data. Also
+found `assemble/corpus_all.faa` stale (mtime 08-05) but NOT tag-scoped → removed it so the
+job rebuilds from the Aug 8 FASTAs.
+- **Resolution (user pick):** fresh `RUN_TAG=scoped_k32` → rebuilds into
+  `models_scoped_k32`/`embeddings_scoped_k32`, Aug 5 tree left intact for later purge.
+- Corpus rebuild confirmed at runtime: **5,261,647 sequences** (from secretome.faa +
+  wholeproteome.faa, header-deduped) — fresh, not the stale 08-05 copy.
+
+### Corpus / pair counts (Aug 8 scope-corrected, stage F)
+- `labeled_dataset.parquet` 2.53 GB; `labeled_dataset_protein_pairs.tsv` **412,925 pairs**
+  (up from 90,984 pre-correction — 4.5×, driven by the scope fix + augmented cold set).
+- Leakage-aware splits (seed 1466, from prior audit job 1167275): pairs train 330,573 /
+  val 40,769 / test 41,583; 0 of 412,925 cross-split; 0 of 18,810,756 groups span splits.
+
+### Submission
+`RUN_TAG=scoped_k32 sbatch scripts/slurm/15_train_all_scoped.sbatch` → **job 1167340**,
+RUNNING on node-224-2t-8gpu-1 (H200, 143,771 MiB VRAM), start 2026-08-08T10:44:11-07:00.
+No wall cap. Idempotent per-stage `.done` → resubmit resumes at first unfinished stage.
+Expected chain: 00 contacts → 08 MLM (~10 h) → 09 dual-emit embed (16 shards) → 10a mean
+sweep (4 λ, minutes each) → 10b attention (6 phenos at per-class best λ).
+
+Artifacts (platform): `15_train_all_scoped.sbatch` (3871ac4c…, sha 6fcc1472…208c),
+`select_best_lam.py` (d58e47e4…, sha bee256e3…).
+
+---
+
+## 2026-08-08 (later) — INV-ID: dirty-defline id mismatch truncated the corpus to ~23%
+
+**User challenge that opened this:** "I thought it was a 22M corpus." Runtime log for job
+1167340 showed corpus FASTA = 5,261,647 seqs, but the labeled parquet is 22M. Investigating
+the gap uncovered a real pipeline bug (not a cosmetic mislabel), traced end-to-end below.
+
+### What is actually true (authoritative stage-C stats, `secreted_all.tsv`, mtime 08-08 07:38)
+- Proteins scanned: **133,977,295** across 57,437 genomes (log 1167285).
+- Genuinely secreted (SignalP `prediction != "OTHER"`): **19,692,434** (14.70% — plausible).
+  by_prediction: SP 13,517,260 · LIPO 4,965,688 · TAT 748,292 · PILIN 349,752 · TATLIPO
+  111,442 (non-OTHER sums to 19,692,434 ✓); OTHER 114,284,861.
+- Secreted sequences ACTUALLY written to `secretome.faa`: **only 2,057,964** — frozen at
+  exactly this number across three runs (jobs 1164632, 1165625, 1167285) while the secreted
+  table grew 17.9M → 18.6M → 19.7M. That frozen count is the tell.
+
+### Root cause (single, upstream): SignalP ran on Prodigal-deflined FASTA
+SignalP 6 input headers still carried the full Prodigal annotation, so the parsed ID column
+(`fields[0]` in `parse_prediction_results`) is DIRTY for every GTDB protein, e.g.
+`GB_GCA_000238995.1~CP003199.1_1 # 1 # 1263 # 1 # ID=1_1;partial=10;...`.
+`05_aggregate_signalp.py` stored that dirty string verbatim as `tagged_id`. Two downstream
+stages then disagreed on the key:
+1. **`secretome.faa` writer** cleans the id (`pid = line[1:].split()[0]`) before testing
+   `tid in sec_ids`, but `sec_ids` holds the DIRTY id → membership fails → only the ~2.06M
+   already-clean-id secreted proteins (original r232 production table + custom `CU_CUST`
+   genomes) ever get written. Hence the frozen 2,057,964.
+2. **stage-09 `attach_sequences(parquet, fasta)`** joins the DIRTY-id parquet against the
+   CLEAN-id FASTAs → only clean-id rows survive.
+
+### Scope of damage — affects secreted AND non-secreted (parquet breakdown, job 9c37e913)
+Of 22,477,732 parquet rows:
+| | secreted | non-secreted | total |
+|---|---:|---:|---:|
+| dirty id (dropped by stage-09 join) | 12,609,356 | 4,667,906 | **17,277,262 (77%)** |
+| clean id (survives join) | 2,057,964 | 3,142,506 | **5,200,470 (23%)** |
+| total | 14,667,320 | 7,810,412 | 22,477,732 |
+
+So the 14,667,320 `is_secreted=True` count is LEGITIMATE SignalP output, not inflated — my
+earlier "inflation" read was wrong; it came from comparing against the stale legacy r232
+table (~1.99M). The real failure is truncation: the training corpus was built from the
+5.2M clean-id survivors (stage-09 intersection = 5,156,130), i.e. **~23% of the intended
+corpus**, with the hyperthermophile/psychrophile whole-proteome classes gutted just as
+badly as the secretome (their dirty-id whole-proteome rows fail the same join).
+`wholeproteome.faa` itself is internally complete (whole-scope branch emits unconditionally
+with clean ids) but is unusable downstream because the parquet key is incompatible.
+
+### Fix applied (deployed repo `$S/repo`, `scripts/05_aggregate_signalp.py`, INV-ID)
+In the fresh-chunk parse loop, normalize the id to its first whitespace token before
+splitting on `~`:
+```python
+_tok = p.protein_id.split(maxsplit=1)
+clean_id = _tok[0] if _tok else p.protein_id
+gen, _, pid = clean_id.partition("~")
+rows.append((clean_id, gen or None, pid or clean_id, ...))
+```
+Now `sec_ids`, the parquet `tagged_id`, and both FASTAs all carry the same clean
+`{genome}~{locus}` key. Side benefit: proteins appearing in both the legacy table (clean)
+and a fresh chunk (previously dirty) now dedupe correctly (`drop_duplicates keep="first"`).
+- Verified: AST_OK; parsing a real chunk (`signalp_r232/chunk_0/prediction_results.txt`,
+  1,520,117 preds) → 200,000/200,000 sampled ids clean, 0 dirty; clean form matches the
+  legacy key format `GB_GCA_...~AE017199.1_36`.
+- Legacy table `secreted_proteins_r232.tsv` confirmed clean (separate `genome`+`protein_id`
+  columns; `tagged_id` built as `genome~protein_id`). whole_rows path already clean
+  (`pid = line[1:].split()[0]`). The fresh-chunk loop was the ONLY dirty source.
+
+### Actions taken
+1. **Cancelled job 1167340** (was ~30 min in, at stage 10 cached-probe `48,000/65,912`
+   pairs — training on the wrong 23% corpus). `scancel 1167340` confirmed.
+2. Applied + verified the INV-ID fix above.
+3. This notebook entry. **Corrects the prior 08-08 entry**: the recorded "corpus 5,261,647
+   sequences" was the TRUNCATED corpus, not the intended one — the correct scoped corpus is
+   built from 19,692,434 secreted + whole-proteome, pending re-aggregation.
+
+### Next (not yet done)
+Re-run assembly chain from stage C (05agg re-aggregate → re-emit both FASTAs → stage F
+rewrite parquet → 07 cluster → 09 embed → 10). Then resubmit training. Expect
+`secretome.faa` to jump from 2.06M to ~19.7M seqs and the stage-09 corpus to grow ~4×.
+
+## 2026-08-08 (later 2) — Deprecated-file cleanup (post-INV-ID regeneration)
+
+Since every artifact downstream of stage C is being regenerated on the corrected corpus,
+removed all pre-fix / experimental / cancelled-job outputs to eliminate current-vs-deprecated
+ambiguity. Irreversible `rm` on biotite (no Trash), done with explicit paths (no globs),
+in parallel with the running chain (verified no overlap with chain reads/writes).
+
+**Deleted (~191 GB):**
+- Group 1 — ASM deprecated data (~42 GB): `preemit_secreted_all.tsv` (34G, pre-emitfix secreted table),
+  `prescoped_labeled_dataset.parquet` (2.1G), `scopeD_labeled_dataset.parquet` (2.1G),
+  `corpus_all.faa` (1.9G, built by cancelled job 1167340 from the TRUNCATED FASTAs),
+  + companions `prescoped_dataset_splits.png`, `prescoped_labeled_dataset_protein_pairs.tsv`,
+  `scopeD_labeled_dataset_protein_pairs.tsv`.
+- Group 2 — PERSIST model/embedding trees (~149 GB): `embeddings_emitfix` (127G), `embeddings_scoped` (10G),
+  `embeddings_old` (9.6G), `models_old` (1.9G), `models_emitfix` (396M), `models_scoped` (324M),
+  `models_scoped_k32` (30M) + `embeddings_scoped_k32` (0, cancelled 1167340).
+- Group 3 — stale markers + superseded audit JSONs: `.C_emitfix_done`, `.F_v9_done`, `harvest_v9.json`,
+  `scope_leak_{audit,cache,colabels,tiers}.csv` (all regenerated by the current chain).
+
+**Kept (chain inputs / regenerating in place):** `secreted_proteins_r232.tsv` (live `--legacy`),
+`combined_labels.parquet`, `gtdb_meta.tsv`, `all_pairs.tsv` + `sel_*` stage-B outputs,
+reference trait CSVs, `config.yaml`, and the 08-08 files the chain overwrites
+(`secretome.faa`, `wholeproteome.faa`, `clu*`, `labeled_dataset.*`).
+
+Chain status at cleanup: C=1167378 R (~22 min), D=1167379 / E=1167380 / F=1167381 PD (afterok).
+
+## 2026-08-08 (later 3) — Per-residue phenotype saliency (interpretability tooling)
+
+Goal (user): pick a protein + orthologs, score which residues drive the phenotype
+call, map onto structure for "attention"-style structural readout.
+
+**Two additions, neither touches the running chain:**
+
+1. **`scripts/09b_embed_perresidue.py` — persist residue positions.** The top-k
+   cache stored the k=32 selected residue VECTORS but discarded WHICH positions
+   they came from, so cached alpha/MIL scores couldn't be mapped back to
+   sequence/structure. Added `pos_shard{i}.npy` (n, k) int32 = token index per
+   slot (CLS=0 so residue r -> token r+1; -1 = padding slot). Written atomically
+   alongside topk/mean/lens. AST_OK.
+
+2. **`scripts/score_protein.py` — NEW, full-length dense saliency.** For a handful
+   of hand-picked proteins the k=32 cache buys nothing (a full forward pass is a
+   few GPU-s and yields a DENSE weight over EVERY residue, including low-norm ones
+   the `norm` rule would drop), so this re-embeds rather than reading the cache.
+   - Loads backbone + MLM adapter (via existing `load_mlm_adapter_into_classifier`
+     remap) + a trained 10b head (`head_best.pt`).
+   - Head architecture is INFERRED from the state_dict (net.0.weight -> hidden,
+     V.weight -> attn_dim, presence of V/U/w -> attention), so no dependence on
+     remembered training args. mean/topk_mil are param-identical -> require
+     `--pooling` to disambiguate.
+   - attention -> per-residue alpha (head.alpha over full length); topk_mil ->
+     sigmoid(per-residue logit); mean -> reported uniform (honest: no localization
+     by construction).
+   - Emits `<id>_residue_scores.tsv` (residue_index, aa, saliency, percentile),
+     `saliency_summary.json` (top-15 residues, special_token_mass), and optionally
+     writes saliency into the PDB B-factor column (`--pdb-dir`, fixed-column
+     rewrite, `--bfactor percentile|alpha`) for PyMOL/Mol* spectrum coloring.
+   - Two input modes: `--fasta`, or `--from-pairs`+`--protein-id`+`--corpus-fasta`
+     to pull an ext protein + its taxonomy-matched outgroups straight from the
+     pair table and score them together (cross-ortholog consistency check).
+   - CAVEATS emitted with output: (a) softmax trained over K=32 -> absolute alpha
+     not calibrated at full length, use percentile; (b) genome-level label ->
+     saliency = "phenotype-correlated", NOT "catalytic"; (c) CLS/EOS mass reported
+     so a diffuse head is visible.
+   - Local unit tests PASS: FASTA read/clean-id, streaming id extract, head-kind
+     inference, PDB B-factor col rewrite (no column drift, element symbol intact),
+     percentile mapping.
+
+Artifacts: score_protein.py (fb86c985), 09b_embed_perresidue.py patched (95089d96).
+Deploy to $S/repo/scripts after D/E clustering finishes; not needed until a head
+is trained on the corrected corpus.
+
+## 2026-08-08 (later 4): Regeneration chain complete + confidence-weight change (low 0.25→0.15)
+
+### Chain completion (jobs 1167378–1167381, INV-ID corrected corpus)
+All four assemble-chain jobs COMPLETED. Verified from stage-06 (F=1167381) log + direct output inspection:
+- **labeled_dataset.parquet** 6.7G (Aug 08 14:14), **.tsv** 49G, **protein_pairs.tsv** 87M, splits.png 76K — all fresh Aug 08.
+- **22,007,249 rows** | 42,280 genomes | 11,435,706 groups (`sequence_cluster_merged(id40+id50)`).
+- Label counts: mesophile 11,557,784 · psychrophile 5,000,109 · hyperthermophile 1,832,384 · halophile 1,511,941 · thermophile 1,159,271 · acidophile 606,418 · alkaliphile 339,342.
+- Splits: train 17,597,678 · val 2,199,399 · test 2,210,172. **Leakage check: max splits per group = 1 (PASS).**
+- **Protein pairs: 452,487** (all same-split), ~5x the old truncated-corpus 90,984.
+- clu50 secretome clustering (D=1167379): 19,692,434 members (== secretome.faa) → 7,771,075 clusters; redundancy 2.534 mem/clu (39.5% reps); singletons 72.8%; size2 950,985; size3-5 697,060; size6-10 250,507; size11-50 188,198; size51-100 18,116; size>100 11,042; max cluster 6,902 (no runaway mega-cluster). clu40 wholeproteome (E=1167380) reported earlier: 1,161,996 clusters healthy.
+
+### confidence_weights: low 0.25 → 0.15 (user decision 2026-08-08, applied uniformly)
+Mechanism clarified before changing: TWO orthogonal knobs.
+- `pos_weight = n_neg/n_pos` from **raw counts**, per one-vs-rest head, automatic → the CLASS-IMBALANCE knob. Unaffected by this change.
+- `CONFIDENCE_WEIGHTS` (per-example multiplier w_i in weighted_bce/focal) → the LABEL-TRUST knob. This is what changed.
+- **Source of truth is the module constant `CONFIDENCE_WEIGHTS` in `src/eptrans/modeling/losses.py`, NOT config.yaml** (config line is documentation; runtime never reads it). Edited both; deployed losses.py to `$S/repo` and verified `confidence_to_weight('low')==0.15` in eptrans_ml.
+
+MEASURED per-class × tier composition (train split, job bd638239 on the new parquet) — rubric-rank weights measured, not assumed:
+| class | raw pos | high% | med% | low% | eff-signal drop @0.15 vs 0.25 |
+|---|---|---|---|---|---|
+| psychrophile | 4,000,852 | 0.8 | 19.4 | **79.8** | **−26.2%** |
+| hyperthermophile | 1,466,727 | 8.5 | 33.6 | 57.9 | −14.5% |
+| alkaliphile | 272,002 | 5.2 | 39.8 | 55.1 | −14.2% |
+| acidophile | 485,359 | 12.3 | 34.3 | 53.5 | −12.5% |
+| thermophile | 926,552 | 29.2 | 22.8 | 48.0 | −9.1% |
+| halophile | 1,207,940 | 13.7 | 83.6 | 2.8 | −0.5% |
+Mesophile negative pool (train): 9,238,246 rows, all tier 'none' (w_i=1.0, unaffected).
+Note: change does NOT reduce class imbalance (that's pos_weight). Its real effect is a label-trust cut that lands mostly on psychrophile, which is 79.8% low-tier by construction (GenomeSPOT rarely predicts Topt<15C, so hadal/deep-sea cold calls cannot reach high/med tier). User chose uniform 0.15 with this understood.
+Artifacts on biotite: `$ASM/tier_x_class_composition.csv`, `$ASM/effective_mass_by_class.csv`.
+
+## 2026-08-08 (later 5): Stage-15 k32 combined training LAUNCHED (job 1167477)
+
+Submitted `RUN_TAG=scoped_k32 sbatch scripts/slurm/15_train_all_scoped.sbatch` -> **job 1167477** (PD, gpu_h200, 1 GPU, --mem=1900G, no wall cap). Single allocation, 5 stages, idempotent .done markers:
+- 00 precompute contacts (MLM subsample 400k/20k, ESM-2 contact maps)
+- 08 MLM adapter (extremophile-only, contact-coupled masking, rank-32 LoRA, 3 epochs ~10h)
+- 09 embedding cache, DUAL-EMIT (mean_shard + topk_shard K=32 L2-norm select, 16 shards) through MLM-adapted 3B backbone
+- 10a mean-pooling classifier heads, LAMBDA SWEEP {0.5,1,2,4} x 6 phenotypes, --pointwise-scope
+- 10b attention-pooling heads, per-phenotype at its best-lambda (via select_best_lam.py), gated attention over K=32 block, --attn-dim 128
+Outputs -> models_scoped_k32/ + embeddings_scoped_k32/ (both verified ABSENT/clean pre-launch, no clobber trip).
+
+### Pre-launch verification (measured, not assumed)
+- **Confirmed the DEPLOYED sbatch is the k32 variant** (11,584 B, has --emit-topk / --pooling mean / --pooling attention / select_best_lam.py), NOT the stale Aug-5 local direct-sweep file. Deployed is what runs. Synced local repo to match.
+- **FIXED a real gap for user requirement 'save attention residue positions':** deployed `09_embed_secretome.py --emit-topk` computed the top-k residue token indices (`idx`) but DISCARDED them — saved only topk vectors/lens, no positions. My earlier pos-persistence patch was in 09b_embed_perresidue.py, a DIFFERENT script the sbatch never calls. Patched deployed 09_embed_secretome.py to persist `pos_shard{i}.npy` (n,K) int32 = token index per slot (0=CLS, r=residue r, L+1=EOS; -1=padding-gathered), mirroring the 09b convention. AST-valid; `have_all` now requires pos_shard. WITHOUT this, attention alpha could not be mapped back to residues without re-embedding all 22M proteins. Synced to local repo (09_embed_secretome.py 10,412 B).
+- Corrected stale sbatch provenance comments: stage F 1165065->1167381, 18.06M->22.01M proteins (22,007,249), 66,759->452,487 pairs.
+- Fresh corpus inputs verified Aug 08: secretome.faa 8.3G, wholeproteome.faa 1.1G, labeled_dataset.parquet 6.7G, pairs 87M. corpus_all.faa absent -> rebuilds from fresh FASTAs (expected).
+- Disk: 190 TB free on /groups (VAST). k32 top-k cache (~3.6 TB / 16 shards) fits.
+- Confidence weight low=0.15 (this session) is deployed in losses.py and will be picked up by stage 10.
+
+Answered user's 3 confirmations: (1) mean AND attention heads YES; (2) lambda sweep YES; (3) attention residue positions -- was NO, now YES after the pos_shard patch.

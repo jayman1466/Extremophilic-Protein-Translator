@@ -40,7 +40,7 @@ __all__ = [
 # Map genome-confidence tier -> sample weight (w_seq / w_i). Mesophiles carry
 # 'none' (label stamped from a confident-mesophile genome, full weight for the
 # negative class). Tunable; these are the starting values.
-CONFIDENCE_WEIGHTS = {"high": 1.0, "medium": 0.5, "none": 1.0, "low": 0.25}
+CONFIDENCE_WEIGHTS = {"high": 1.0, "medium": 0.5, "none": 1.0, "low": 0.15}
 
 
 def confidence_to_weight(conf, default: float = 1.0) -> float:
