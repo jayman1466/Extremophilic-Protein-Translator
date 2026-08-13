@@ -3773,3 +3773,189 @@ Outputs -> models_scoped_k32/ + embeddings_scoped_k32/ (both verified ABSENT/cle
 - Confidence weight low=0.15 (this session) is deployed in losses.py and will be picked up by stage 10.
 
 Answered user's 3 confirmations: (1) mean AND attention heads YES; (2) lambda sweep YES; (3) attention residue positions -- was NO, now YES after the pos_shard patch.
+
+---
+
+## 2026-08-12 — Psychrophile scope decision: secreted-trained beats whole-trained (controlled test)
+
+**Question.** With psychrophile flipped to `scope=secreted`, does a head *trained on
+secreted* psychrophile proteins actually beat the archived head *trained on
+whole-proteome* psychrophile proteins **when both are deployed on secreted
+proteins**? The two mean-sweep numbers already on record (whole val_auprc 0.5042
+vs secreted 0.2843, both λ=0.5) are NOT comparable — different val populations and
+base rates (whole ≈12.2%, secreted ≈5.65%).
+
+**Method (controlled, pure inference — no retrain).** Scored BOTH λ=0.5 mean heads
+on the IDENTICAL secreted psychrophile val set. Both heads live under
+`models_scoped_k32/` → same MLM adapter → the `secretome_scoped` embeddings are
+identical inputs; the only moving part is the trained head weights. Script
+`stm_detached/psy_scope_compare.py` imports the byte-identical feature/scope/label
+helpers from `rescore_tier_val.py`; gathers only the secreted-val rows from the
+mean cache via per-shard mmap fancy-index (no 90 GB full load). Ran detached on the
+biotite login node (standard partition saturated by signalp-array retries).
+Output: `models_scoped_k32/psy_scope_compare.json`.
+
+**Val set (identical for both heads).** n_val = 1,102,388 secreted proteins;
+n_pos = 62,204; base rate = 0.0564.
+
+| metric (secreted val) | whole-trained | secreted-trained | winner |
+|---|---|---|---|
+| all-tier AUROC (scope-decision metric) | 0.7699 | **0.8095** | secreted (+0.040) |
+| all-tier AUPRC | 0.188 | **0.2843** | secreted |
+| all-tier AUPRC-lift over base | 3.33× | **5.04×** | secreted |
+| H+M-only AUROC | **0.8225** | 0.7827 | whole (+0.040) |
+| H+M-only AUPRC | 0.0209 | **0.0239** | secreted (n_pos=3,640) |
+
+**Decision.** Secreted-trained wins on the standing scope-decision metric
+(all-tier AUROC 0.8095 vs 0.7699) AND on the deployment metric (AUPRC-lift 5.04×
+vs 3.33×). The single whole-head win is H+M-only AUROC, a narrower slice of 3,640
+highest-confidence positives; on the full deployment population (all-tier) secreted
+is unambiguously ahead. **Psychrophile goes forward with secreted scope for
+attention pooling** — consistent with the earlier user-set `scope=secreted` and now
+data-supported on a controlled, apples-to-apples comparison. Best λ = 0.5 (measured,
+job 1173037).
+
+Artifacts: `psy_scope_compare.json` (a98eeb8e / metrics), `psy_scope_compare.png`
+(scope comparison figure). Provenance: whole head =
+`psychrophile_whole_archive/lam0.5_clf_psychrophile_cached/head_best.pt`; secreted
+head = `psy_secreted_lam0.5/clf_psychrophile_cached/head_best.pt`.
+
+---
+
+## 2026-08-13 — Corpus reconciliation: the MAGs are already in; what a "retrain" actually changes
+
+**Why this entry exists.** Coming out of a context compaction, the standing plan
+was a "from-scratch retrain to fold in the 4,084 deep-sea MAGs." Before spending an
+H200 allocation I verified on disk what the current model was actually trained on,
+because redoing work that is already baked in is the exact circular waste we are
+trying to stop. Findings below are all measured from files on biotite, not recalled.
+
+**Finding 1 — the deep-sea MAGs are already in the trained corpus.** The 330
+selected MAGs (down-selected from the 4,084 labeled pool by the locked
+max_per_lineage selection: stage-03d header documents "320 for SignalP under
+secreted-scope + 15 whole-proteome, overlap 5") were ingested into
+`custom_genomes/` as `CU_CUST_*` on 2026-08-03, then flowed through the Aug-8
+rebuild. Measured in `assemble/labeled_dataset.parquet` (mtime 2026-08-08 14:14):
+330 CU_ genomes, 145,937 proteins, SignalP-scanned (present in `secreted_all.tsv`
+with prediction classes). MAG label distribution by genome:
+thermophile 242, halophile 31, acidophile 22, psychrophile 20,
+hyperthermophile 11, alkaliphile 1 (proteins: psychrophile 56,953,
+thermophile 48,577, hyperthermophile 19,082, halophile 12,412,
+acidophile 3,680, alkaliphile 1,845). **SignalP on the MAGs was already done.**
+
+**Finding 2 — corpus, clustering, pairs, and splits are already built at the
+committed scope.** `labeled_dataset_protein_pairs.tsv` (452,488 pairs) carries an
+explicit `scope` column: psychrophile & hyperthermophile = whole_proteome;
+halophile/thermophile/acidophile/alkaliphile = secreted. Per-class pairs:
+psychrophile 309,989, halophile 74,046, hyperthermophile 37,355,
+thermophile 17,596, alkaliphile 7,819, acidophile 5,682. Psychrophile pairs went
+from ~40 (pre-MAG, data-starved) to 309,989 — the MAG augmentation landed exactly
+on the weakest class. Splits are leakage-clean: 0 of 11,435,706 clusters straddle a
+split boundary (group=cluster_id, verified by groupby nunique).
+
+**Finding 3 — what a rebuild actually changes is the MLM tier scope, not the data.**
+The current adapter (mlm_adapt, trained 2026-08-08 19:55) was built
+**extremophile-only but ALL tiers** — `09_subsample_mlm.py:subsample()` drops
+mesophiles (is_mesophile) but does NOT filter label_confidence, so low-tier is in.
+User's Stage 1 wants **M+H only** ("low is too noisy"). Measured extremophile tier
+pool: low 6,161,382 / medium 3,453,917 / high 834,166 (of 10,449,465 ext rows).
+Dropping low removes ~59% of the extremophile MLM pool. MLM one-rep-per-cluster set
+sizes: M+H = 1,566,652 train clusters; M+H+L = 5,695,773. Because the top-k cache is
+built AFTER and FROM the adapter (stage order 08 adapter → 09 embed/cache →
+10 heads), the M+H change cascades: new adapter → new cache → new heads. THAT is the
+non-circular reason to rebuild — not the MAGs.
+
+**Finding 4 — psychrophile scope test (Stage 3) is now well-powered either way.**
+Psychrophile extremophile proteins: 5,000,109 total; 622,883 secreted (12.5%);
+1,010,516 in M+H tiers (35,786 of those secreted). Enough positives for a clean
+whole-vs-secreted comparison at both tier scopes.
+
+Provenance: audit script `stm_detached/corpus_audit.py`, output
+`stm_detached/corpus_audit.json`. Superseded old-corpus jobs cancelled this session:
+attn_one 1173782 (16h thrash), driver v2 pid 2510665, plus the moot compact-cache
+measurement jobs.
+
+---
+
+## 2026-08-13 — mhk32 rebuild: internally-consistent M+H adapter + cache
+
+**Why a new namespace.** Every downstream number (scope test, λ sweep, attention
+heads) must sit on the SAME MLM adapter and SAME embedding cache to be comparable.
+The one genuine, non-circular change since scoped_k32 is the MLM adapter tier scope
+(Stage-1 decision "low is too noisy for the adapter"). So mhk32 = scoped stages
+00/08/09 held byte-identical EXCEPT the MLM subsample is medium+high only. Old
+scoped_k32 tree left untouched. Namespace: `$PERSIST/runs/mhk32/`.
+
+### Phase 0 — foundation reused as-is + balance policy (all MEASURED)
+- **Scope/pairs/splits reused read-only** from `assemble/` (frozen, leakage-verified).
+  labeled_dataset.parquet = 22,007,249 rows (330 CU_ deep-sea MAGs already in,
+  SignalP-scanned). Pairs = 452,488 with explicit `scope` column: psychrophile
+  309,989 + hyperthermophile 37,355 = whole_proteome; halophile 74,046 /
+  thermophile 17,596 / alkaliphile 7,819 / acidophile 5,682 = secreted. Splits
+  leakage-clean (0 of 11,435,706 clusters straddle a boundary). No SignalP / cluster
+  / assembly re-run.
+- **Class imbalance at pair level:** ~55x span (psychrophile 309,989 → acidophile
+  5,682). Pairs already stratified per (cluster,class); within-class negatives via
+  neg_per_pos=3.
+- **Balance decision = LOSS WEIGHTING, not downsampling.** 10_train_cached_probe.py
+  trains on ALL negatives; class imbalance handled by pos_weight computed on
+  confidence-weighted EFFECTIVE counts (composes with the rubric term instead of
+  re-inflating raw positives). Matches standing decision keep_low_tier_all_phenotypes.
+- **Rubric-rank sample weights:** CONFIDENCE_WEIGHTS = {high 1.0, medium 0.5,
+  low 0.15, none 1.0}, hardcoded in losses.py, applied per-positive via
+  confidence_to_weight ON TOP of pos_weight. Rubric ON by default.
+  DRIFT NOTED (unresolved-by-design): config.yaml confidence_weights says low=0.25
+  and the 10_train_cached_probe.py docstring says "a quarter of a high-confidence
+  label", but the CODE reads the hardcoded 0.15 from losses.py (config value is
+  decorative — not read at runtime). User chose to KEEP 0.15 (match current code)
+  rather than edit losses.py to 0.25. No code change made.
+
+### Phase 1 — M+H-only MLM adapter (job 1174037, gpu_h200)
+- **Additive `--tiers` flag** added to 09_subsample_mlm.py (default keeps all tiers,
+  so scoped flow is byte-for-byte unchanged; .bak saved, AST_OK). Filters on
+  label_confidence AFTER the mesophile drop.
+- **M+H subsample built + verified** → `runs/mhk32/labeled_mlm_subsample.parquet`:
+  22,007,249 → drop mesophiles → 10,449,465 ext → keep M+H → 4,288,083 candidate
+  cluster reps → sampled 400,000 train / 20,000 val. Confidence = medium 336,656 +
+  high 83,344. ASSERTED: zero low, zero none, zero mesophile. Train label mix:
+  halophile 154,460 / psychrophile 90,806 / thermophile 67,123 / hyperthermophile
+  42,648 / acidophile 28,579 / alkaliphile 16,384. Verify JSON:
+  `runs/mhk32/mlm_subsample_verify.json`.
+- **Contact overlap with scoped:** only 23,250 / 420,000 (5.5%) ids overlap the
+  scoped contact_pairs.parquet (166,119 ids), so the M+H draw needs a near-full
+  contact precompute (396,750 new). Seeded from scoped via `cp` + `--resume` so the
+  overlap is free. Coupling-aware masking (--coupling-mode contact) held identical
+  to scoped per the standing "adapter method fixed, only tier scope changes" decision.
+- **Driver** `scripts/slurm/15_train_all_mhk32.sbatch` (job 1174037): ONE gpu_h200
+  allocation, stages 00 contacts → 08 adapter (rank32/alpha64, 3 epochs, lr 1e-4,
+  mask 0.15, coupling contact) → 09 dual-emit top-32 cache (whole 22M corpus, 16
+  shards, --select norm). Per-stage/per-shard .done markers = preemption-safe resume,
+  no wall cap. scope_test / λ sweep / attention are SEPARATE controlled submits.
+
+### Phase-3 driver prep (scope × tier test) — staged while 1174037 runs
+
+Read both ad-hoc scope/tier harnesses in full to reuse (NOT rebuild) them:
+- `scripts/scope_tier_measure.py` — Part B trains `all` (H+M+L) vs `hm` (H+M)
+  heads per phenotype on a fixed clean H+M val set at a given scope; weighted BCE
+  (rubric confidence weights + effective pos_weight) + matched-pair margin (λ=1,
+  margin=1). Loss replicates `10_train_cached_probe.py` exactly.
+- `stm_detached/psy_scope_compare.py` — does NOT train; scores two pre-trained
+  heads (whole- vs secreted-trained) on the IDENTICAL secreted psychrophile val
+  set via surgical mmap fancy-index (no 90 GB load).
+
+**Design finding:** the scope and tier axes are only comparable on ONE fixed
+eval set. `scope_tier_measure.py` evaluates each head at its own train scope, so
+whole-scope and secreted-scope runs land on different val sets — incomparable for
+the scope decision. `psy_scope_compare.py` fixes exactly this (one fixed secreted
+val set = the deployment compartment). Old scoped headline (identical secreted
+val set): secreted-trained 0.8095 vs whole-trained 0.7699 all-tier AUROC.
+
+**New driver** `stm_detached/psy_scope_tier_2x2.py` (deployed, REMOTE_AST_OK
+10103 B, SHA 85e0af12): runs the full psychrophile 2×2 — train pointwise scope
+∈ {whole, secreted} × tier ∈ {H+M+L, H+M}, all at λ=1 — with ALL four heads
+scored on ONE fixed clean secreted H+M val set (secreted val H+M positives + all
+secreted val negatives). Margin pairs aligned to train pointwise scope
+(INV-SCOPE-E: secreted-scope training uses only secreted ext/outgroup pairs).
+Reuses the exact head/loss/gather logic from `scope_tier_measure.py` Part B.
+Emits AUROC (primary) + AUPRC + deltas → `psy_scope_tier_2x2.json`. Gated on the
+stage-09 mhk32 cache landing.
