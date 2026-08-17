@@ -4348,6 +4348,27 @@ best epoch by val_auroc, and dumps `alpha_ext_best.npy` + `head_best.pt`.
 Job map `handoff/attn_jobs.json`. Prior expectation: attention ≈ +0.10 pair-AUC
 over mean pooling for psychrophile. Results to be recorded on harvest.
 
+**I/O contention incident + serial-chain fix (jobs 1176723–1176728 → 1176763–1176768).**
+The first submission co-scheduled 4 jobs on node-224-2t-8gpu-1 and they wedged:
+56 min elapsed, zero epoch progress, all stuck at the `[load] in-cache rows`
+gather step, CPULoad 11.8/224 (pure I/O wait), FreeMem down to ~250 GB. Root
+cause: each attention head gathers its full clean eval set (~1.04M val negatives)
+as a dense fp16 tensor from the **2.8 TB top-32 mmap** — every row is K32×H2560
+fp16 ≈ 160 KB, so one eval gather is ~166 GB of random Lustre reads (32× the
+per-row I/O of the mean-pooling λ sweep, which read the small `mean_shard`).
+Four jobs random-reading a 2.8 TB working set on a 2 TB-RAM node thrash the page
+cache into a livelock. This is a top-32-cache property, not a code bug.
+**Fix:** `scancel` all 6, resubmit as a serial `--dependency=afterany` chain
+(1176763 psychrophile → 764 thermo → 765 hyper → 766 acido → 767 alkali → 768
+halo). Solo, the worker gets full bandwidth: verified via
+`srun --overlap` on the compute node — `read_bytes` advancing steadily
+(~55–107 MB/s), State D, wchan `folio_wait_bit_common`, GPU warming (head on
+device). Per-phenotype gather ~20–40 min, full chain ~2–4 h. λ map unchanged
+(pair-AUC lock). Job map `handoff/attn_jobs_serial.json`.
+**Lesson for future top-32-cache heads:** never co-schedule mmap-gather jobs
+over the multi-TB top-K cache on one node — serialize them, or materialize each
+phenotype's rows into a compact in-RAM array once before training.
+
 **Selection-metric convention (mhk32, canonical):** scope/tier/signal decisions
 → AUROC; λ lock for deployment heads → pair-AUC; deployment lift reporting →
 AUPRC-as-lift over base rate; headline cross-phenotype ranking → pair-AUC.
