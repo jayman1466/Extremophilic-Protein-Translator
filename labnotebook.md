@@ -4372,3 +4372,68 @@ phenotype's rows into a compact in-RAM array once before training.
 **Selection-metric convention (mhk32, canonical):** scope/tier/signal decisions
 → AUROC; λ lock for deployment heads → pair-AUC; deployment lift reporting →
 AUPRC-as-lift over base rate; headline cross-phenotype ranking → pair-AUC.
+
+## 2026-08-17 — Psychrophile augmentation: ANI/T-opt analysis → DO NOT AUGMENT (negative result)
+
+**Question (user).** We have empirical growth-temperature data (TEMPURA + Toki +
+Madin + OGT-F, integrated in `psychrophile_measured_overlay_r232.tsv`, 2,149
+GTDB reps with empirical OGT, 443 in the strict cold band) but could only join
+it to GTDB genomes by normalized species name. The deep-sea MAGs (4,084, the
+DSGC/hadal set) are mostly novel and did not name-match. Could an ANI approach
+bridge empirical T-opt onto the MAGs and rescue psychrophile (currently at its
+~0.60 pair-AUC ceiling)? Concern: psychrophile taxon matches often sit at genus
+level, so a loose ANI cutoff would pull in mesophiles.
+
+**The concern is correct, and quantified three independent ways. ANI cannot
+rescue psychrophile.**
+
+**(1) Within-genus OGT heterogeneity — a genus-level cutoff is a coin-flip.**
+From the 162 GTDB reps that carry both a genus and an empirical Topt (81 genera):
+45 genera contain a cold member (min Topt ≤15 °C); of the 21 such genera with
+≥2 measured members, **10 (48%) also contain a warm member (Topt ≥20 °C).** The
+"psychro-" genera are the worst offenders — the name does not protect you:
+- *Psychrobacter*: 12.5 → **27.0** °C (8 members)
+- *Psychromonas*: 12.0 → 22.5 °C (5)
+- *Psychroflexus*: 12.5 → 22.5 °C
+- *Glaciecola*: 12.5 → 25.0 °C
+- *Flavobacterium*: 10.0 → 26.0 °C (19)
+A genus-level (~85% ANI) transfer would therefore mislabel ~half its recruits.
+
+**(2) The phenotype-safe ANI band is already inside GTDB taxonomy.** OGT is
+conserved within ~95% ANI — but GTDB's species circumscription *is* a 95% ANI
+radius, so any MAG a strict (species-safe) ANI cutoff would rescue is one
+GTDB-Tk already gave a species name to. GTDB-Tk on all 4,084 MAGs
+(job 1163066, COMPLETED 4h59m; `gtdbtk_full/out/gtdbtk.{bac120,ar53}.summary.tsv`):
+`total=4084 species_named=2310 species_novel=1774`, with
+`family_named=3996 genus_named=3585`. The **1,774 species-novel MAGs all report
+`closest_genome_ani = N/A`** — by construction there is no ≥95% reference, so
+there is no ANI value to threshold on. A species-safe ANI bridge has nothing to
+grip; only a genus-loose one adds MAGs, and (1) says those are unsafe.
+
+**(3) Genome-intrinsic T-opt says the deep-sea MAGs are mesophiles.** GenomeSPOT
+on all 4,084 MAGs (`genomespot_predictions_deepsea_mags.tsv`): temperature_optimum
+median **35.2 °C**, mean 40.6, p5 22.5, p25 29.4, p75 46.6; **only 5 MAGs ≤15 °C
+and 84 ≤20 °C.** Despite ~2–4 °C ambient deep-ocean water, the intrinsic thermal
+signature is mesophilic — the same environment≠physiology lesson the whole
+project rests on (a microbe in cold water is usually a mesophile surviving
+suboptimally, not a psychrophile). The genome-intrinsic axis is the *correct*
+evidence for novel MAGs (it doesn't inherit genus heterogeneity), and it yields
+5 usable cold genomes.
+
+**Augmentation calculus.**
+| Path | Usable psychrophile MAGs gained | Safe? |
+|---|---|---|
+| Fix species-name join (2,310 species-named MAGs) | ~small; most named MAGs are not cold-species | safe |
+| Species-safe ANI → 1,774 novel MAGs | **0** (ANI = N/A by construction) | n/a |
+| Genus-loose ANI (~85%) → novel MAGs | ~1,774 | **unsafe: 48% of cold genera are OGT-mixed** |
+| GenomeSPOT-intrinsic cold MAGs (≤15 °C) | **5** | safe, negligible |
+
+**DECISION: do not augment psychrophile via ANI or the deep-sea MAG set.** Record
+psychrophile as-is — mean-pool pair-AUC 0.607 (λ2.0), attention pair-AUC 0.597.
+The ~0.60 ceiling is a genuine data limit: cold-adapted *secreted* proteins are
+scarce in the sequenced world, and the isolation-source proxy fails hardest for
+cold because cold tolerance leans on membrane/cytoplasmic biology, not the
+secretome. This is itself a finding — psychrophile is where the secretome
+de-risking assumption ("from an extremophile ≈ is extremophilic") is weakest.
+Numbers here are measured, not projected; provenance = jobs 1163066 (GTDB-Tk),
+deep-sea GenomeSPOT run, and the TEMPURA/OGT overlay artifacts.
