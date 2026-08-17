@@ -3959,3 +3959,395 @@ secreted val negatives). Margin pairs aligned to train pointwise scope
 Reuses the exact head/loss/gather logic from `scope_tier_measure.py` Part B.
 Emits AUROC (primary) + AUPRC + deltas → `psy_scope_tier_2x2.json`. Gated on the
 stage-09 mhk32 cache landing.
+### Build 1174037 FAILED at stage 08 (HF Hub transient) → fixed + resubmitted as 1174115
+
+Job 1174037 ran 3h41m: stage 00 (contacts) COMPLETED — contact_pairs.parquet
+48 MB (scoped seed) → 161 MB, `.contacts_done` written 14:17:20. Stage 08 then
+died immediately at model load:
+```
+RuntimeError: Cannot send a request, as the client has been closed.
+OSError: Can't load the model for 'facebook/esm2_t36_3B_UR50D'
+```
+Root cause: driver set HF_HOME but NOT offline mode, so every stage pings the HF
+Hub for metadata at load. Stage 00 got through; 3.5 h later the httpx client hit
+a transient node connection failure and — with no offline fallback — couldn't
+read the already-present 27 GB local cache. NOT a code/data bug.
+
+Fix: added `export HF_HUB_OFFLINE=1` + `export TRANSFORMERS_OFFLINE=1` after
+HF_HOME in the driver (.bak_offline saved). Verified offline resolution before
+resubmit: AutoConfig+AutoTokenizer load from cache (hidden=2560, vocab=33),
+weight index resolves, refs/main=476b6399 (complete .bin snapshot). No Hub
+contact.
+
+Resubmitted as **job 1174115** (gpu_h200, node-224-2t-8gpu-1, start 14:59:05).
+Resume confirmed: `00 contacts already done -- skipping` (no 4.5 h recompute),
+stage 08 joined 420,000 proteins, `Loading weights 588/588` completed instantly
+from offline cache — the exact line that crashed before. Adapter now training.
+Driver synced to local repo scripts/slurm/15_train_all_mhk32.sbatch (was
+remote-only, never tracked).
+### Stage 08 adapter DONE (job 1174115) + stage 09 cache in progress
+
+**mhk32 M+H-only adapter** (`runs/mhk32/mlm_adapt/mlm_adapter_best/`), finished
+Aug 14 02:32. val_ppl per epoch (step): 6.1659 (26,263) → 6.1657 (52,527) →
+**6.1548 (78,791)**. Monotonic, best=last (epoch 2). vs scoped baseline
+6.237→6.217→6.2168: the M+H-only set reaches a LOWER final val-PPL
+(6.1548 < 6.2168) — tighter high-confidence training gives cleaner MLM
+generalization, the rationale for the M+H tier restriction. adapter_model.
+safetensors = 94,413,200 B (94.4 MB, rank-32 LoRA as expected). mlm_history.json
+= 1,576 train_loss points + 3 val_ppl. `.done` marker present.
+
+**Stage 09 cache** (whole 22M corpus, dual-emit top-32, 16 shards): shard 0 done
+(.done_shard0; emb/topk/ids/lens/pos all present), shard 1 ~57% at ~142 seq/s.
+~1 h/shard → cache ETA ~15 h. Downstream (phase-3 2×2, λ sweep, attention) gated
+on all 16 shards + $EMB/.done.
+
+### Stage 09 cache COMPLETE + per-head counts (mhk32)
+
+**Cache** `runs/mhk32/embeddings/secretome_mhk32`: 16/16 shards done
+(`.done_shard0..15` + `$EMB/.done`), **17,700,477 rows**, emb float16 (…,2560),
+pos int32 (…,32), ~2.8 TB. Adapter remap asserted at build: 288 LoRA tensors,
+0 unmatched — the mhk32 M+H-only adapter is the one embedded in the cache.
+This ONE cache over the WHOLE 22M corpus serves every downstream head so all
+scope/λ/tier numbers are comparable.
+
+Cache retention (psychrophile positives): high 100% (41,249), medium 100%
+(969,267), low 14.9% (594,424 of 3,989,593); overall pos 32.1%. Built to
+preserve H+M signal while subsampling the low tail.
+
+**Broader secretome definition note (mhk32):** `is_secreted=True` here means
+signal-peptide-bearing = 14.67M/22M proteins (SignalP SP/LIPO/TAT/TATLIPO/PILIN),
+which is broader than the old 1.98M soluble-secreted (SP+TAT only) definition
+used in the r232 runs. "secreted" scope below = this 14.67M signal-peptide set.
+
+**Per-head sequence counts (psychrophile, train split, in-cache):**
+
+| Scope | Tier | Total | Neg (mesophile) | Pos | pos breakdown |
+|---|---|---|---|---|---|
+| whole | all (H+M+L) | 10,523,329 | 9,238,246 | 1,285,083 | H+M 809,719 + low 475,364 |
+| whole | H+M | 10,047,965 | 9,238,246 | 809,719 | H+M only |
+| secreted | all (H+M+L) | 8,806,705 | 8,308,774 | 497,931 | H+M 28,529 + low 469,402 |
+| secreted | H+M | 8,337,303 | 8,308,774 | 28,529 | H+M only |
+
+Negatives identical within a scope (H+M mask touches positives only — the
+positives-only H+M rule keeps "technically low" mesophiles as negatives).
+
+### Phase-3 psychrophile scope×tier 2×2 (job 1175979) — LOCK
+
+Driver `scripts/psy_scope_tier_2x2.py`, sbatch
+`scripts/slurm/16_psy_scope_tier_2x2.sbatch`. All 4 cells scored on the SAME
+fixed secreted-clean eval set (psychrophile secreted val H+M positives + all
+secreted val negatives): **pos=3,640, neg=1,040,184, base=0.0035**, λ=1.0.
+CONFIDENCE_WEIGHTS {high:1.0, medium:0.5, low:0.15, none:1.0}.
+
+| Scope | Tier | AUROC | AUPRC | train_pos | pos_weight | pairs |
+|---|---|---|---|---|---|---|
+| whole | H+M+L | 0.8038 | 0.0214 | 1,285,083 | 18.75 | 248,647 |
+| whole | H+M | 0.8555 | 0.0306 | 809,719 | 21.92 | 248,647 |
+| secreted | H+M+L | 0.7778 | 0.0369 | 497,931 | 96.96 | 3,793 |
+| **secreted** | **H+M** | **0.8924** | **0.0872** | 28,529 | 543.75 | 3,793 |
+
+Deltas: H+M − H+M+L = +0.0517 AUROC (whole), +0.1146 (secreted); secreted −
+whole (H+M) = +0.0369 AUROC. Both AUROC and AUPRC agree in every comparison.
+
+**Findings:** (1) dropping the low tier HELPS psychrophile in both scopes — its
+low tier is 75% of positives and is net noise (metadata-only/conflict labels).
+(2) secreted beats whole for H+M, consistent with the standing
+psychrophile_scope=secreted decision.
+
+**LOCKED: psychrophile scope=secreted, tier=H+M (AUROC 0.8924).** Caveat:
+secreted×H+M trains on only 28,529 positives (pos_weight 543.75) so there is
+some variance, but AUPRC (0.0872 ≈ 25× base) confirms it is not an AUROC
+artifact.
+
+**Tier policy for the other 5 phenotypes = per-phenotype empirical** (user
+decision, this span). Psychrophile's "drop low tier" result is driven by its
+unusually noisy low tier (75% low) and does NOT auto-propagate: halophile (6%
+low), thermophile (19%), acidophile (24%), alkaliphile (34%), hyperthermophile
+(48%) have cleaner low tiers. Each phenotype's tier is decided by its own AUROC
+via the 1×2 driver (`scripts/phenotype_tier_1x2.py`, sbatch
+`scripts/slurm/17_phenotype_tier_1x2.sbatch`), scope locked = secreted, run as
+job 1176274 (H+M vs H+M+L per phenotype, each scored on its own clean eval set).
+
+### Phase-3 per-phenotype tier 1×2 (job 1176274) — per-phenotype tier LOCK
+
+Driver `scripts/phenotype_tier_1x2.py`, sbatch
+`scripts/slurm/17_phenotype_tier_1x2.sbatch`. Scope locked = secreted,
+GPU-resident (train-device=cuda), λ=1.0, 30 epochs. Each phenotype scored on
+its OWN clean eval set (that-phenotype secreted val H+M positives + all secreted
+val negatives). Job COMPLETED 1h30m, exit 0. (Note: a first submission wrapped
+as `bash <sbatch>` under submit_job ignored the #SBATCH directives and landed on
+partition=standard with no GPU — cancelled 1176273; resubmitted via `sbatch
+<file>` directly = 1176274, correct gpu_h200 alloc. Gotcha reaffirmed: sbatch the
+file, don't bash it.)
+
+| Phenotype | eval base | all AUROC | H+M AUROC | d(H+M−all) | all AUPRC | H+M AUPRC | tier |
+|---|---|---|---|---|---|---|---|
+| thermophile | 0.0548 | 0.9620 | 0.9686 | +0.0066 | 0.7870 | 0.7917 | **H+M** |
+| hyperthermophile | 0.0014 | 0.9889 | 0.9988 | +0.0099 | 0.8736 | 0.9152 | **H+M** |
+| acidophile | 0.0227 | 0.9761 | 0.9830 | +0.0069 | 0.7810 | 0.7881 | **H+M** |
+| alkaliphile | 0.0105 | 0.9651 | 0.9747 | +0.0096 | 0.6440 | 0.6662 | **H+M** |
+| halophile | 0.1182 | 0.9423 | 0.9420 | −0.0003 | 0.7522 | 0.7499 | **H+M+L** |
+
+**Per-phenotype tier decisions (user: per-phenotype empirical, AUROC-max,
+AUPRC-confirmed):**
+- thermophile, hyperthermophile, acidophile, alkaliphile → **H+M** (drop low).
+  Improvement is marginal (+0.007 to +0.010 AUROC) but consistent on both
+  metrics — cleaner than psychrophile but low tier still slightly net-noise.
+- halophile → **H+M+L** (keep all). The one exception: essentially tied
+  (−0.0003 AUROC, −0.0023 AUPRC), so keep low (6% low share, cleanest low tier,
+  most positives 1.15M). Keeping low costs nothing.
+- psychrophile → **H+M** (from 2×2, +0.1146 AUROC — its low tier is 75% noise).
+
+**Interpretation:** psychrophile's strong "drop low" result does NOT generalize;
+it is driven by its uniquely noisy (75%) low tier. The per-phenotype 1×2
+confirms the other phenotypes gain little or nothing from dropping low, and
+halophile prefers keeping it. This is why the tier decision was made
+per-phenotype rather than globally propagated.
+
+**FINAL locked scope+tier per phenotype (all scope=secreted):**
+psychrophile H+M · thermophile H+M · hyperthermophile H+M · acidophile H+M ·
+alkaliphile H+M · halophile H+M+L.
+
+**REVISED tier policy (user, this span): uniform H+M for ALL 6 phenotypes.**
+Halophile's H+M+L preference was within noise (−0.0003 AUROC, −0.0023 AUPRC), so
+for consistency the tier is set to H+M across the board rather than treating
+halophile as a special case. All other phenotypes already preferred H+M. This
+supersedes the halophile→H+M+L line above. FINAL locked (all scope=secreted,
+tier=H+M): psychrophile, thermophile, hyperthermophile, acidophile, alkaliphile,
+halophile.
+
+### Rubric-rank sample weights + class balance (mhk32) — definition & measurement
+
+**Rubric-rank sample weights.** Per-protein loss weight is a function of the
+genome-level label confidence tier (the "rubric rank"), hardcoded in
+`src/eptrans/modeling/losses.py:43`:
+
+    CONFIDENCE_WEIGHTS = {"high": 1.0, "medium": 0.5, "none": 1.0, "low": 0.15}
+
+- high (metadata AND prediction agree): full weight 1.0.
+- medium (prediction only): 0.5 — down-weighted, prediction is a proxy.
+- low (metadata only, or metadata/prediction conflict): 0.15 — strongly
+  down-weighted, weakest evidence.
+- none (label stamped from a confident-mesophile genome, i.e. a negative): 1.0 —
+  full weight; confident mesophiles are high-quality negatives.
+
+`confidence_to_weight()` (same file) maps the tier string to this weight; every
+downstream head (2×2, 1×2, λ sweep, attention) applies it identically via a
+per-sample `tr_w` multiplier on the BCE term. Deployed copy on biotite verified
+byte-identical to local repo (line 43 matches).
+
+**Class balance = effective (confidence-weighted) pos_weight.** Rather than
+downsampling negatives, positives are up-weighted in the BCE via
+`pos_weight = eff_neg / eff_pos`, where eff_pos = Σ(sample_weight over positives)
+and eff_neg = Σ(sample_weight over negatives). This COMPOSES with the rubric: a
+low-tier positive contributes only 0.15 to eff_pos, so the effective pos_weight
+reflects the confidence-discounted positive mass, not the raw count. Measured
+pos_weight per head (scope=secreted, H+M unless noted), from the phase-3 result
+JSONs:
+
+| Phenotype | tier | train_pos | pos_weight (eff) |
+|---|---|---|---|
+| psychrophile | H+M | 28,529 | 543.75 |
+| thermophile | H+M | 481,901 | 22.09 |
+| hyperthermophile | H+M | 12,076 | 975.44 |
+| acidophile | H+M | 197,845 | 64.54 |
+| alkaliphile | H+M | 92,691 | 155.71 |
+| halophile | H+M | 1,123,318 | 12.89 |
+
+**Downsampling vs loss weighting — decision: loss weighting (no downsampling).**
+Measured rationale: (1) the ONE cache is built over the whole corpus with the low
+tail already subsampled at cache-build (psychrophile low retained 14.9%), so the
+negative pool is fixed and shared across all heads at a locked scope — downsampling
+negatives per-head would break the "one cache serves all heads" comparability.
+(2) Effective pos_weight handles the imbalance analytically and composes with the
+rubric weights in a single BCE term; the measured AUROCs (0.89–0.999) show the
+weighting is sufficient even at pos_weight ~975 (hyperthermophile). (3) The
+H+M-vs-all deltas (2×2/1×2) directly measure that tier-based sample weighting +
+tier restriction, not negative downsampling, is what moves the metric.
+
+## 2026-08-17 — PRODUCTION RUN SUMMARY (mhk32, consolidated)
+
+Single index for the internally-consistent production run. Namespace
+`$PERSIST/runs/mhk32/`. All heads sit on ONE M+H-only MLM adapter and ONE top-32
+embedding cache over the whole 22M corpus, so every scope/tier/λ number is
+directly comparable. Detailed per-stage entries above (2026-08-13 → 2026-08-16);
+this section is the consolidated record requested for the production run.
+
+### 1. What went into ADAPTER training (M+H-only MLM adapter)
+
+- **Corpus source (frozen, reused read-only):** `assemble/labeled_dataset.parquet`
+  = 22,007,249 rows (incl. 330 CU_ deep-sea MAGs), mtime Aug 8; pairs
+  `assemble/labeled_dataset_protein_pairs.tsv` mtime Aug 8. No SignalP / cluster /
+  assembly re-run. Splits leakage-clean (0 of 11,435,706 clusters straddle a
+  split boundary); split dist train 17,597,678 / val 2,199,399 / test 2,210,172.
+- **Tier restriction (the one genuine change vs scoped_k32):** MLM adapter trained
+  on medium+high extremophiles ONLY ("low is too noisy for the adapter" — with
+  Low the adapter is barely distinguishable from vanilla ESM). `--tiers` flag on
+  09_subsample_mlm.py, filtering label_confidence after the mesophile drop.
+- **Subsample funnel:** 22,007,249 → drop mesophiles → 10,449,465 extremophile →
+  keep M+H → 4,288,083 candidate cluster reps → sampled **400,000 train /
+  20,000 val**. Confidence: medium 336,656 + high 83,344. ASSERTED zero low,
+  zero none, zero mesophile. Train label mix: halophile 154,460 / psychrophile
+  90,806 / thermophile 67,123 / hyperthermophile 42,648 / acidophile 28,579 /
+  alkaliphile 16,384. Verify JSON `runs/mhk32/mlm_subsample_verify.json`.
+- **Adapter config:** ESM2-3B `facebook/esm2_t36_3B_UR50D` backbone, rank-32 LoRA
+  (alpha 64, dropout 0.05), 3 epochs, lr 1e-4, mask 0.15, coupling-aware masking
+  (contact mode), contacts precomputed stage-00 (396,750 pairs, scoped seed +
+  --resume). Job 1174115 (gpu_h200; 1174037 died on an HF-Hub transient at stage
+  08, fixed with HF_HUB_OFFLINE=1 + TRANSFORMERS_OFFLINE=1).
+- **Adapter result:** val_ppl 6.1659 (26,263) → 6.1657 (52,527) → **6.1548
+  (78,791)**, monotonic, best=epoch 2. LOWER final val-PPL than scoped baseline
+  (6.1548 < 6.2168) — tighter high-confidence training → cleaner MLM
+  generalization, validating the M+H restriction. `adapter_model.safetensors` =
+  94,413,200 B (94.4 MB, rank-32). Path `runs/mhk32/mlm_adapt/mlm_adapter_best/`.
+
+### 2. Embedding cache (shared by all downstream heads)
+
+`runs/mhk32/embeddings/secretome_mhk32`: 16/16 shards, **17,700,477 rows**, emb
+float16 (…,2560), pos int32 (…,32), ~2.8 TB. Adapter remap asserted at build:
+288 LoRA tensors, 0 unmatched (the M+H adapter is the one embedded). Low tail
+subsampled at build (psychrophile positives: high 100% 41,249, medium 100%
+969,267, low 14.9% 594,424/3,989,593; overall pos 32.1%). `secreted` scope below
+= signal-peptide-bearing 14.67M/22M (SP/LIPO/TAT/TATLIPO/PILIN), broader than the
+old 1.98M soluble-secreted definition.
+
+### 3. Proteins into each SCOPE × TIER screen head (train split, in-cache)
+
+**Psychrophile 2×2 (scope × tier), job 1175979:**
+
+| Scope | Tier | Total | Neg (mesophile) | Pos | pos breakdown | train pairs |
+|---|---|---|---|---|---|---|
+| whole | H+M+L | 10,523,329 | 9,238,246 | 1,285,083 | H+M 809,719 + low 475,364 | 248,647 |
+| whole | H+M | 10,047,965 | 9,238,246 | 809,719 | H+M only | 248,647 |
+| secreted | H+M+L | 8,806,705 | 8,308,774 | 497,931 | H+M 28,529 + low 469,402 | 3,793 |
+| secreted | H+M | 8,337,303 | 8,308,774 | 28,529 | H+M only | 3,793 |
+
+**Per-phenotype tier 1×2 (scope=secreted, H+M+L vs H+M), job 1176274** — train
+counts per head:
+
+| Phenotype | tier | train_n | train_pos | pos_weight (eff) | train_pairs |
+|---|---|---|---|---|---|
+| thermophile | H+M+L | 9,235,326 | 926,552 | 18.76 | 13,956 |
+| thermophile | H+M | 8,790,675 | 481,901 | 22.09 | 13,956 |
+| hyperthermophile | H+M+L | 8,440,832 | 132,058 | 313.36 | 235 |
+| hyperthermophile | H+M | 8,320,850 | 12,076 | 975.44 | 235 |
+| acidophile | H+M+L | 8,766,094 | 457,320 | 49.56 | 4,575 |
+| acidophile | H+M | 8,506,619 | 197,845 | 64.54 | 4,575 |
+| alkaliphile | H+M+L | 8,551,214 | 242,440 | 109.58 | 6,377 |
+| alkaliphile | H+M | 8,401,465 | 92,691 | 155.71 | 6,377 |
+| halophile | H+M+L | 9,465,361 | 1,156,587 | 12.80 | 59,426 |
+| halophile | H+M | 9,432,092 | 1,123,318 | 12.89 | 59,426 |
+
+### 4. Output metrics of the scope/tier screens (λ=1.0)
+
+**Psychrophile 2×2** (all four heads on ONE fixed clean secreted H+M val set:
+pos=3,640, neg=1,040,184, base=0.0035):
+
+| Scope | Tier | AUROC | AUPRC |
+|---|---|---|---|
+| whole | H+M+L | 0.8038 | 0.0214 |
+| whole | H+M | 0.8555 | 0.0306 |
+| secreted | H+M+L | 0.7778 | 0.0369 |
+| **secreted** | **H+M** | **0.8924** | **0.0872** |
+
+Findings: dropping low HELPS psychrophile both scopes (+0.0517 whole, +0.1146
+secreted; its low tier is 75% of positives and net noise); secreted beats whole
+for H+M (+0.0369 AUROC). AUROC & AUPRC agree everywhere.
+
+**Per-phenotype 1×2** (scope=secreted; each scored on its own clean eval set):
+
+| Phenotype | eval base | all AUROC | H+M AUROC | d(H+M−all) | all AUPRC | H+M AUPRC |
+|---|---|---|---|---|---|---|
+| thermophile | 0.0548 | 0.9620 | 0.9686 | +0.0066 | 0.7870 | 0.7917 |
+| hyperthermophile | 0.0014 | 0.9889 | 0.9988 | +0.0099 | 0.8736 | 0.9152 |
+| acidophile | 0.0227 | 0.9761 | 0.9830 | +0.0069 | 0.7810 | 0.7881 |
+| alkaliphile | 0.0105 | 0.9651 | 0.9747 | +0.0096 | 0.6440 | 0.6662 |
+| halophile | 0.1182 | 0.9423 | 0.9420 | −0.0003 | 0.7522 | 0.7499 |
+
+### 5. LOCKED scope + tier (all phenotypes)
+
+**scope = secreted, tier = H+M** for ALL 6 phenotypes. thermophile / hyper /
+acido / alkali / psychrophile all prefer H+M on AUROC; halophile is a within-noise
+tie (−0.0003), set to H+M for a uniform, consistent policy (user decision this
+span). psychrophile's large H+M win (+0.1146) is unique to its 75%-noisy low
+tier — it does NOT generalize, which is exactly why tier was decided
+per-phenotype empirically rather than propagated globally.
+
+### 6. λ sweep at locked scope+tier (job 1176405, COMPLETE)
+
+Grid λ ∈ {0, 0.5, 1, 2, 4} × 6 phenotypes, all at the locked scope=secreted,
+tier=H+M, seed 1466, mean-pooled cached-probe heads. Each phenotype scored on
+its own fixed clean secreted H+M val set. Driver `scripts/lam_sweep.py` (now
+records `val_pair_auc` alongside `val_auroc`/`val_auprc` at every grid point).
+Artifact `lam_sweep_all.json` (bb960172-050a-468d-8539-5c9834237fa3), keyed by
+λ string → ["phenotypes"][pheno] → {val_auroc, val_auprc, val_pair_auc}.
+
+**AUROC grid** (pointwise separation; rows = phenotype, cols = λ):
+
+| pheno | λ0 | λ0.5 | λ1 | λ2 | λ4 |
+|---|---|---|---|---|---|
+| psychrophile | **0.9057** | 0.8988 | 0.8967 | 0.8956 | 0.8965 |
+| thermophile | **0.9693** | 0.9691 | 0.9688 | 0.9687 | 0.9688 |
+| hyperthermophile | **0.9990** | 0.9990 | 0.9989 | 0.9990 | 0.9990 |
+| acidophile | **0.9838** | 0.9830 | 0.9832 | 0.9832 | 0.9827 |
+| alkaliphile | **0.9785** | 0.9771 | 0.9770 | 0.9769 | 0.9766 |
+| halophile | **0.9470** | 0.9436 | 0.9421 | 0.9407 | 0.9367 |
+
+**pair-AUC grid** (matched-pair ranking; rows = phenotype, cols = λ):
+
+| pheno | λ0 | λ0.5 | λ1 | λ2 | λ4 |
+|---|---|---|---|---|---|
+| psychrophile | 0.5606 | 0.5884 | 0.5969 | **0.6071** | 0.6007 |
+| thermophile | 0.9067 | 0.9072 | **0.9095** | 0.9089 | 0.9058 |
+| hyperthermophile | 0.9150 | 0.9531 | 0.9541 | 0.9551 | **0.9590** |
+| acidophile | 0.7996 | 0.7966 | **0.8071** | 0.8014 | 0.8003 |
+| alkaliphile | 0.7371 | 0.7416 | 0.7405 | **0.7518** | 0.7482 |
+| halophile | 0.7718 | **0.7744** | 0.7702 | 0.7691 | 0.7675 |
+
+**KEY FINDING — the two metrics disagree systematically.** AUROC is maximized
+(or statistically tied, ≤0.0003) at **λ=0** for ALL SIX phenotypes: adding the
+matched-pair margin loss slightly *lowers* pointwise class separation
+everywhere. But pair-AUC prefers **λ>0** for all six. The margin loss trades a
+little pointwise AUROC for better matched-pair ranking — which is exactly the
+mechanism the ortholog pairs exist to serve (rank the extremophile ortholog
+above its mesophile partner). The two objectives are not the same optimum.
+
+### 7. λ LOCK policy — by pair-AUC (user decision this span)
+
+For the attention-pooling deployment heads, λ is locked to the **pair-AUC**
+optimum per phenotype (NOT the AUROC optimum). Rationale: the deployment task is
+pair-ranking (score an ortholog against its mesophile partner), so the selection
+metric must be pair-AUC. The AUROC-optimal λ=0 head is a worse ranker.
+
+| phenotype | locked λ (by pair-AUC) | pair-AUC at that λ |
+|---|---|---|
+| psychrophile | 2.0 | 0.6071 |
+| thermophile | 1.0 | 0.9095 |
+| hyperthermophile | 4.0 | 0.9590 |
+| acidophile | 1.0 | 0.8071 |
+| alkaliphile | 2.0 | 0.7518 |
+| halophile | 0.5 | 0.7744 |
+
+Selector `scripts/select_best_lam.py` now supports `--metric pair_auc`
+(primary key `val_pair_auc`); the mhk32 lock policy is `--metric pair_auc`.
+Verified: the selector reproduces all six locks above from `lam_sweep_all.json`
+exactly. Artifacts `best_lam_by_pairauc.json` + `attn_lam_map.json`
+(={pheno: λ}, the operative map fed to the attention driver). The AUROC-optimal
+alternative (λ=0 for all six, or 4.0 for hyperthermophile on the earlier
+broader read) is recorded in `best_lam_by_pheno.json` for contrast but is NOT
+the lock.
+
+### 8. Best-λ attention-pooling heads (jobs 1176723–1176728, RUNNING)
+
+Six independent jobs, one per phenotype, each submitted as
+`PHENO=<p> LAM=<λ*> sbatch scripts/slurm/19_attn_head.sbatch` with λ* from the
+pair-AUC lock table above. K=32 attention pooling over the top-32 cached
+embeddings, same locked scope=secreted / tier=H+M / seed 1466. Driver
+`scripts/attn_heads.py` emits val_auroc/val_auprc/val_pair_auc/val_pair_acc,
+best epoch by val_auroc, and dumps `alpha_ext_best.npy` + `head_best.pt`.
+Job map `handoff/attn_jobs.json`. Prior expectation: attention ≈ +0.10 pair-AUC
+over mean pooling for psychrophile. Results to be recorded on harvest.
+
+**Selection-metric convention (mhk32, canonical):** scope/tier/signal decisions
+→ AUROC; λ lock for deployment heads → pair-AUC; deployment lift reporting →
+AUPRC-as-lift over base rate; headline cross-phenotype ranking → pair-AUC.

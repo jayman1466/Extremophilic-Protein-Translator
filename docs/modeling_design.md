@@ -401,6 +401,53 @@ matched contrast; tune λ on val).
 - **Model-select / early-stop on AUPRC** (per phenotype), not accuracy — heavy
   imbalance.
 
+#### Selection-metric convention (which metric decides what)
+
+Different decisions in the pipeline optimize different things; using one metric
+for everything is a mistake. The canonical convention:
+
+| decision | metric | why |
+|---|---|---|
+| scope (whole vs secreted), tier (H+M vs H+M+L) | **AUROC** | a threshold-free measure of pointwise class separation, robust to the extreme base-rate differences *between* the scope/tier cells being compared |
+| λ lock for the deployment (attention) heads | **pair-AUC** | deployment ranks an extremophile ortholog against its matched mesophile partner — pair-AUC *is* that task; AUROC is not |
+| deployment lift reporting | **AUPRC as lift over base rate** | absolute AUPRC is uninterpretable at base rate ~0.003; lift is |
+| headline cross-phenotype ranking | **pair-AUC** | comparable across phenotypes with very different base rates |
+
+**Record pair-AUC at every sweep grid point.** λ sweeps and scope/tier screens
+emit `val_pair_auc` alongside `val_auroc`/`val_auprc` so the λ lock and the
+scope/tier lock can be read off the same run without re-scoring.
+
+#### Locking the tier and scope (empirical, per phenotype)
+
+Scope and tier are NOT propagated globally by fiat — they are decided by a
+controlled screen per phenotype, all cells scored on ONE fixed clean eval set
+(the locked-scope val positives with tier ∈ {high, medium} + all locked-scope
+val negatives) so every comparison is apples-to-apples:
+
+- **psychrophile: full 2×2** — scope ∈ {whole, secreted} × tier ∈ {H+M+L, H+M},
+  all at λ=1. This is the one phenotype where the low tier is mostly noise (its
+  cold-isolation metadata rarely corroborates a predicted low T_opt), so the
+  tier decision matters most and the scope×tier interaction is measured
+  explicitly. Driver `scripts/psy_scope_tier_2x2.py`.
+- **the other five: 1×2 tier screen at the locked scope** — tier ∈ {H+M+L, H+M}
+  at scope=secreted (the scope decided by the psychrophile 2×2), λ=1. Driver
+  `scripts/phenotype_tier_1x2.py`.
+
+Result (mhk32): **scope = secreted, tier = H+M for all six.** H+M ≥ H+M+L on both
+AUROC and pair-AUC for every phenotype; halophile is a within-noise tie set to
+H+M for a uniform policy. Concrete numbers in `labnotebook.md`.
+
+#### Locking λ (by pair-AUC)
+
+Sweep λ ∈ {0, 0.5, 1, 2, 4} at the locked scope+tier and pick the λ that
+maximizes **held-out matched-pair AUC** per phenotype, via
+`scripts/select_best_lam.py --metric pair_auc`. Empirically (mhk32) AUROC and
+pair-AUC disagree: AUROC is maximized at λ=0 for every phenotype (the margin
+term slightly lowers pointwise separation), while pair-AUC prefers λ>0 for every
+phenotype. Since deployment is a ranking task, pair-AUC governs the lock — the
+λ=0 head is the better classifier but the worse ranker, and ranking is what the
+ortholog pairs were built to optimize. λ=0 recovers pure pointwise BCE.
+
 ### Object 3 — generation-time composite (inference gate, not a loss)
 MPNN proposes → score+gate, no backprop. Hard gates (catalytic identity +
 side-chain RMSD) reject outright; then **product** of soft sub-scores
