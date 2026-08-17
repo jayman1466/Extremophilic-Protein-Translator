@@ -118,7 +118,13 @@ def main():
         r = np.asarray(rows); sh = shard_of[r]; lo = local_of[r]
         outa = np.empty((len(r), K, H), dtype=np.float16)
         for j in np.unique(sh):
-            sel = sh == j; outa[sel] = mm[j][lo[sel]]
+            sel = sh == j
+            loj = lo[sel]
+            order = np.argsort(loj, kind="stable")   # sort into monotonic offset order
+            block = mm[j][loj[order]]                 # sequential Lustre read (no seek amplification)
+            dest = np.empty_like(block)
+            dest[order] = block                        # unscatter back to caller's row order
+            outa[sel] = dest
         kv = np.minimum(lens_all[r], K)
         mask = (np.arange(K)[None, :] < kv[:, None]).astype(np.float16)
         return torch.from_numpy(outa), torch.from_numpy(mask)
