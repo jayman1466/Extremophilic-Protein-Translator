@@ -4389,10 +4389,10 @@ bb960172), pair-AUC at the same locked λ. Δ = attention − mean.
 | hyperthermophile | 4.0 | 0.9981 | 0.8916 | 0.9375 | 20 | 0.9590 | −0.0674 | −0.0009 |
 | acidophile | 1.0 | 0.9769 | 0.7807 | 0.8448 | 12 | 0.8071 | −0.0264 | −0.0063 |
 | alkaliphile | 2.0 | 0.9684 | 0.7164 | 0.7966 | 29 | 0.7518 | −0.0354 | −0.0085 |
-| halophile | 0.5 | *(running — see below)* | | | | 0.7744 | | |
+| halophile | 0.5 | 0.9331 | 0.7524 | 0.7917 | 11 | 0.7744 | −0.0220 | −0.0105 |
 
 **VERDICT: mean pooling is the production choice for every phenotype.** For all
-five harvested heads, K=32 gated attention is **worse than the mean of the same
+**six** harvested heads, K=32 gated attention is **worse than the mean of the same
 top-32 block on BOTH metrics** — pair-AUC by 0.010–0.067 and AUROC by
 0.001–0.055 — never better on either. This is not a val-only artifact; it holds
 across the full clean eval set. Interpretation: the adaptation signal ESM2 3B
@@ -4405,22 +4405,24 @@ psychrophile shows the *largest* attention penalty (ΔpairAUC −0.0101, ΔAUROC
 −0.0553). Production heads therefore use **mean pooling** — simpler, cheaper (no
 top-K gather, no attention params), and ≥ attention on both metrics for all six.
 
-**Halophile attention (1176820) — recorded as still-computing, does not change
-the verdict.** Halophile carries the largest sets of the six (63,846 protein
-pairs, ~4× thermophile's 15,604; most-abundant extremophile), and its attention
-head is single-threaded through the six sequential `gather_topk` calls
-(val-clean, val-pair ×2, train-clean, train-pair ×2) over the 2.8 TB top-32
-cache — ~160 KB/row × ~200k+ rows of random Lustre reads. Sampled healthy and
-advancing throughout (State R/D, one core pinned ~100%, `read_bytes`
-monotonically rising past 1.05 TB, ~110 MB/s bursts; 24 h SLURM limit, ~15 h
-headroom), GPU staged 598 MiB, epoch loop not yet entered at ~9.7 h wall. Its
-attention pair-AUC is the one data point still outstanding, but the production
-decision does not depend on it: halophile's **mean-pool pair-AUC 0.7744** already
-stands as its locked production value, and mean pooling has beaten attention on
-every other head. Attention pair-AUC for halophile will be appended to the table
-above when the head lands (background watcher writes
-`handoff/attn_summary_patched.json`); it can only confirm, not overturn, the
-mean-pooling verdict.
+**Halophile attention (1176820) — HARVESTED, confirms the verdict.** Halophile
+carries the largest sets of the six (63,846 protein pairs, ~4× thermophile's
+15,604; most-abundant extremophile), and its attention head was single-threaded
+through the six sequential `gather_topk` calls (val-clean, val-pair ×2,
+train-clean, train-pair ×2) over the 2.8 TB top-32 cache — ~160 KB/row × ~200k+
+rows of random Lustre reads. The cache-streaming preamble alone took most of the
+wall clock; the head reached first epoch, ran all 30, and exited 0 at 03:04
+(total 48,689 s ≈ 13.5 h). Best epoch 11 by val_auroc: **AUROC 0.9331, AUPRC
+0.7197, pair-AUC 0.7524, pair-acc 0.7917.** Mean-pool reference (lam_sweep_all
+lam0.5): AUROC 0.9436, pair-AUC 0.7744. **Δ pair-AUC −0.0220, Δ AUROC −0.0105 —
+attention loses on both, exactly as for the other five.** The mean-pooling
+verdict now holds across all six phenotypes with no exceptions. metrics.json at
+`$RUN/phase5_attn/attn_halophile/metrics.json` (harvested to
+`handoff/attn_halophile_metrics.json`); note pos_weight differs between runs
+(attention 5.23 at neg_per_pos 3.0 downsampled train_n=4.49M vs mean-pool 12.89
+on full train_n=9.43M) — this is the training-set construction difference, not a
+metric discrepancy; both evaluate on the identical clean val set (base_rate
+0.1182, val_pairs 7065).
 
 ## 2026-08-17 — Psychrophile augmentation: ANI/T-opt analysis → DO NOT AUGMENT (negative result)
 
