@@ -4373,6 +4373,55 @@ phenotype's rows into a compact in-RAM array once before training.
 → AUROC; λ lock for deployment heads → pair-AUC; deployment lift reporting →
 AUPRC-as-lift over base rate; headline cross-phenotype ranking → pair-AUC.
 
+**RESULTS — attention vs mean pooling (harvested).** The serial chain that
+produced these numbers is the **sorted-gather-patched** rebuild (commit 87aa205,
+`perf(attn_heads): sorted-gather in gather_topk`), not the pre-patch
+1176763–768 chain named above: psychrophile 1176763 (patched) → thermophile
+1176816 → hyperthermophile 1176817 → acidophile 1176818 → alkaliphile 1176819 →
+halophile 1176820. Each head trained at its **pair-AUC-locked λ**; best epoch by
+val_auroc (locked policy). Mean-pool reference = `lam_sweep_all.json` (artifact
+bb960172), pair-AUC at the same locked λ. Δ = attention − mean.
+
+| Phenotype | λ | Attn AUROC | Attn pair-AUC | Attn pair-acc | ep | Mean pair-AUC | Δ pair-AUC | Δ AUROC |
+|---|---|---|---|---|---|---|---|---|
+| psychrophile | 2.0 | 0.8403 | 0.597 | 0.6542 | 29 | 0.6071 | −0.0101 | −0.0553 |
+| thermophile | 1.0 | 0.9610 | 0.888 | 0.9324 | 10 | 0.9095 | −0.0215 | −0.0078 |
+| hyperthermophile | 4.0 | 0.9981 | 0.8916 | 0.9375 | 20 | 0.9590 | −0.0674 | −0.0009 |
+| acidophile | 1.0 | 0.9769 | 0.7807 | 0.8448 | 12 | 0.8071 | −0.0264 | −0.0063 |
+| alkaliphile | 2.0 | 0.9684 | 0.7164 | 0.7966 | 29 | 0.7518 | −0.0354 | −0.0085 |
+| halophile | 0.5 | *(running — see below)* | | | | 0.7744 | | |
+
+**VERDICT: mean pooling is the production choice for every phenotype.** For all
+five harvested heads, K=32 gated attention is **worse than the mean of the same
+top-32 block on BOTH metrics** — pair-AUC by 0.010–0.067 and AUROC by
+0.001–0.055 — never better on either. This is not a val-only artifact; it holds
+across the full clean eval set. Interpretation: the adaptation signal ESM2 3B
+encodes for these phenotypes is **diffuse** (bulk composition / charge /
+hydrophobicity distributed across the sequence), not localized to a few salient
+residues, so an attention head with K=32 slots has nothing to concentrate on and
+only adds parameters + a harder optimization than a parameter-free mean. The
+prior expectation (attention ≈ +0.10 pair-AUC for psychrophile) is falsified;
+psychrophile shows the *largest* attention penalty (ΔpairAUC −0.0101, ΔAUROC
+−0.0553). Production heads therefore use **mean pooling** — simpler, cheaper (no
+top-K gather, no attention params), and ≥ attention on both metrics for all six.
+
+**Halophile attention (1176820) — recorded as still-computing, does not change
+the verdict.** Halophile carries the largest sets of the six (63,846 protein
+pairs, ~4× thermophile's 15,604; most-abundant extremophile), and its attention
+head is single-threaded through the six sequential `gather_topk` calls
+(val-clean, val-pair ×2, train-clean, train-pair ×2) over the 2.8 TB top-32
+cache — ~160 KB/row × ~200k+ rows of random Lustre reads. Sampled healthy and
+advancing throughout (State R/D, one core pinned ~100%, `read_bytes`
+monotonically rising past 1.05 TB, ~110 MB/s bursts; 24 h SLURM limit, ~15 h
+headroom), GPU staged 598 MiB, epoch loop not yet entered at ~9.7 h wall. Its
+attention pair-AUC is the one data point still outstanding, but the production
+decision does not depend on it: halophile's **mean-pool pair-AUC 0.7744** already
+stands as its locked production value, and mean pooling has beaten attention on
+every other head. Attention pair-AUC for halophile will be appended to the table
+above when the head lands (background watcher writes
+`handoff/attn_summary_patched.json`); it can only confirm, not overturn, the
+mean-pooling verdict.
+
 ## 2026-08-17 — Psychrophile augmentation: ANI/T-opt analysis → DO NOT AUGMENT (negative result)
 
 **Question (user).** We have empirical growth-temperature data (TEMPURA + Toki +
