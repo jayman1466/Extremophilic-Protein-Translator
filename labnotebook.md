@@ -4486,3 +4486,80 @@ secretome. This is itself a finding — psychrophile is where the secretome
 de-risking assumption ("from an extremophile ≈ is extremophilic") is weakest.
 Numbers here are measured, not projected; provenance = jobs 1163066 (GTDB-Tk),
 deep-sea GenomeSPOT run, and the TEMPURA/OGT overlay artifacts.
+
+## 2026-08-18 — Psychrophile directional-selection probe: phylogeny-controlled → NO site-specific cold signal (negative result)
+
+**Question (user e7 Idea #2).** If we take a few of the largest psychrophile/
+mesophile cross-labeled protein clusters, align them, and look for residue
+columns most statistically directional (psy vs meso), do we see specific
+positions — mappable to structural pockets — under stronger cold selection?
+(Companion to Idea #1, answered from the archived whole-proteome sweep: 65× more
+pairs still lands at ~0.59–0.60 pair-AUC, so pair count is not the binding
+constraint.)
+
+**Probe construction.** Whole-scope clustering (clu40) classified 1,564 genomes:
+psychroHM=439, mesophile=547, other=578; 37,241 clusters with mixed psy/meso
+membership. `extract_psy_probe.py` (job eceebe72) selected the **12** clusters
+passing ≥20 psy + ≥20 meso genomes with broad genus depth (the
+pseudoreplication guard), written to `$S/assemble/psy_probe/`. Each cluster ~350
+psy genomes / ~205 genera vs ~300 meso / ~235 genera. MAFFT alignments cached as
+`<safe_rep>.aln.faa`; per-cluster psy/meso genome + phylum lists in
+`probe_manifest.json`.
+
+**First pass (label-shuffle null) — CONFOUNDED.** `analyze_psy_probe.py`
+(job aa94ec21): vectorized G-test per alignment column, 2000-permutation null by
+shuffling psy/meso labels globally. Result: signal overwhelmingly concentrated
+in ONE cluster `GB_GCA_003602475…` = **58.2% significant columns (357/613)**;
+the other 11 clusters 0–8.9%. That single cluster held 357 of 400 total
+significant columns.
+
+**Diagnosis = phylogenetic confounding.** Whole-sequence %-identity was
+interspersed for all 12 (psy-meso ≈ psy-psy ≈ meso-meso, no gross subfamily
+split), but phylum composition exposed it: the outlier cluster's **mesophile**
+set carried 106 Thermoproteota (archaea) while its psychrophile set was
+essentially all bacteria. The 58% "directional" columns track a **domain-level
+archaea-vs-bacteria split**, not cold adaptation. A global label-shuffle null
+does not protect against phylogeny.
+
+**Fix — phylum-stratified permutation null (job 0dac5c22, COMPLETED 10s).**
+`analyze_stratified.py`: identical G-test, but the 2000-permutation null shuffles
+psy/meso labels **within each phylum** (`stratified_perm`), reusing the cached
+alignments. Emits `n_phyla_shared` per cluster.
+
+**RESULT — zero directional columns across all 12 clusters.**
+
+| Null model | Total sig. cols (FDR<0.05) / valid | Outlier `GCA_003602475` |
+|---|---|---|
+| Label-shuffle (confounded) | 400 / 3522 | 357 / 613 (58.2%) |
+| **Phylum-stratified** | **0 / 3522** | **0 / 613** |
+
+Every one of the 12 clusters returns **0** significant columns under the
+stratified null. Each shares **26–31 phyla** between its cold and warm members
+(min 26, max 31), so the stratified null has genuine depth — this is not a
+starved test. The outlier's 357 columns collapse to 0, confirming they were
+entirely the archaea-vs-bacteria confound.
+
+**INTERPRETATION.** There is **no site-specific, phylogeny-robust directional
+selection signal** in psychrophile-vs-mesophile secreted orthologs at the
+alignment-column level. Idea #2's hoped-for outcome — a handful of cold-selected
+residue positions mapping to structural pockets — does not exist in this data.
+This is fully consistent with the attention-vs-mean verdict (§ attention entry):
+psychrophile adaptation is **diffuse** (bulk composition / charge /
+hydrophobicity spread across the sequence), not localized to salient residues a
+K=32 attention pooler or a per-column G-test could concentrate on. Two
+independent methods now converge on the same conclusion.
+
+**Combined psychrophile picture (now closed).** Three independent lines agree the
+~0.60 pair-AUC ceiling is a genuine biological property of diffuse cold
+adaptation, not a data-volume or method artifact: (1) archived whole-proteome
+H+M sweep — 65× more pairs, same ~0.59–0.60 pair-AUC; (2) ANI/T-opt augmentation
+analysis — cannot safely add cold genomes (DO NOT AUGMENT); (3) this
+phylogeny-controlled residue probe — no site-level signal to localize. No
+pockets to chase, no augmentation to rescue it, no pooling architecture to
+recover it.
+
+**Provenance.** Jobs eceebe72 (extract), aa94ec21 (label-shuffle, confounded),
+0dac5c22 (phylum-stratified, definitive). Artifact
+`directional_stratified_results.json` (f0a1eb31 / v55de8d47) — per-cluster
+valid/sig column counts, n_phyla_shared, ref sequences. Null: 2000 permutations,
+seed 1466, MINCOV=0.6, BH-FDR<0.05.
