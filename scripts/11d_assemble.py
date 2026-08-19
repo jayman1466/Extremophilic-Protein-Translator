@@ -30,13 +30,28 @@ def main():
         cons = cand.get("conservation", [])
         active = cand.get("active_site", [])
         assigned = cand.get("active_site_assigned", False)
+        # §16b interface constraints (may be absent on older candidates.json)
+        iface_faces = cand.get("interfaces", {}) or {}
+        # Flat 1-based union across all populated faces, for the .iface channel:
+        iface_positions_set = set()
+        # Per-position -> list of face labels for tooltip aggregation:
+        iface_by_pos = {}
+        for face_label, face in iface_faces.items():
+            for p in face.get("positions", []):
+                iface_positions_set.add(int(p))
+                iface_by_pos.setdefault(int(p), []).append(face_label)
+        iface_positions = sorted(iface_positions_set)
+        # keys as strings so jsonification preserves them across the tojson filter
+        iface_by_pos_str = {str(k): v for k, v in iface_by_pos.items()}
         rows = []
         for d in cand["designs"]:
             did = d["design_id"]
             ff = fold.get(did, {})
             track = dict(seq=d["sequence"], wt=wt_seq, conservation=cons,
                          active_site=active, active_site_assigned=assigned,
-                         mutations=d.get("mutations", []))
+                         mutations=d.get("mutations", []),
+                         interfaces=iface_positions,
+                         interfaces_by_position=iface_by_pos_str)
             metrics = {
                 "biophysical_score": d.get("biophysical_score"),
                 "plddt": ff.get("plddt"),

@@ -16,13 +16,15 @@ results.json schema:
         {"design_id","sequence","classifier_score",
          "active_site_rmsd","n_mutations","structure_file",
          "metrics": {label: value, ...},
-         # sequence-track payload (3 orthogonal display channels):
+         # sequence-track payload (4 orthogonal display channels):
          "track": {
             "seq": "<design seq>", "wt": "<wt seq>",
-            "conservation": [float in [0,1] | null, ...],   # per-residue MSA conservation
+            "conservation": [float in [0,1] | null, ...],    # per-residue MSA conservation
             "active_site": [1-based int, ...],               # putative catalytic residues
             "active_site_assigned": bool,                    # false -> UI shows warning
-            "mutations": [{"pos":1-based,"wt":a,"mut":b}, ...]
+            "mutations": [{"pos":1-based,"wt":a,"mut":b}, ...],
+            "interfaces": [1-based int, ...],                # union of §16b protected faces
+            "interfaces_by_position": {"pos": ["face_label", ...]}  # per-pos face membership
          }},
         ...
      ]

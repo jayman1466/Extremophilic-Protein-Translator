@@ -231,6 +231,17 @@ a:hover { color: var(--ept-magma); text-decoration: underline; text-underline-of
 }
 /* mutated AND active-site: magma outline (higher-risk), keep dot */
 .res.mut.as { outline-color: var(--ept-magma); }
+/* interface channel (§16b): teal overline + dot marker ABOVE, so it can't
+   collide with the active-site underline+dot below. */
+.res.iface { border-top: 3px solid #0F766E; }
+.res.iface::before {
+  content: "";
+  position: absolute; left: 50%; top: -0.55em; transform: translateX(-50%);
+  width: 4px; height: 4px; border-radius: 50%; background: #0F766E;
+}
+/* mutated at an interface residue: teal outline (identity is supposed to be
+   frozen at interfaces, so a mutation here is a bug — surface it clearly). */
+.res.mut.iface { outline-color: #0F766E; }
 
 .track-legend { font-size: 0.78rem; color: rgba(0,0,0,0.65); margin-top: 0.5rem; }
 .track-legend .swatch {
