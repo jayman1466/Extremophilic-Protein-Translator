@@ -121,6 +121,7 @@ def mpnn_propose(
     seed: int,
     model_type: str = "ligand_mpnn",
     timeout_s: int = 1800,
+    bias_AA_per_residue: dict | None = None,  # {"A12": {"G": 5.0}, ...}
 ) -> tuple[list[dict], str]:
     """Run one LigandMPNN batch. Returns (parsed_records, stderr_tail).
 
@@ -149,6 +150,11 @@ def mpnn_propose(
         cmd += ["--fixed_residues", fixed_str]
     if bias_str:
         cmd += ["--bias_AA", bias_str]
+    if bias_AA_per_residue:
+        # LigandMPNN expects a JSON path with {"A12": {"G": 5.0}, ...}
+        bias_pr_path = workdir / "bias_AA_per_residue.json"
+        bias_pr_path.write_text(json.dumps(bias_AA_per_residue))
+        cmd += ["--bias_AA_per_residue", str(bias_pr_path.resolve())]
 
     t0 = time.time()
     r = subprocess.run(cmd, cwd=mpnn_repo, capture_output=True, text=True, timeout=timeout_s)
@@ -342,6 +348,25 @@ def main():
     ap.add_argument("--refold-workdir", required=True,
                     help="11e_esmfold_worker queue dir; a running worker is required")
 
+    # ---- survivor-conditioned iteration (v2 knob; default OFF) ----
+    # When --survivor-topk > 0, after round r we take the top-K survivors so
+    # far by score_product; positions where >= --survivor-min-agreement of the
+    # top-K agree on a non-WT AA get a per-residue bias of
+    # +survivor-bias-strength log-odds toward that AA in round r+1's MPNN call.
+    # This turns the plain iid loop into a soft-hill-climb (an actual MPNN-in-
+    # the-loop feedback, matching what the script's docstring already claims).
+    ap.add_argument("--survivor-topk", type=int, default=0,
+                    help="top-K survivors used to bias later rounds; 0=disable "
+                         "(default keeps legacy iid behavior)")
+    ap.add_argument("--survivor-min-agreement", type=int, default=2,
+                    help="min top-K survivors that must share a non-WT AA at a "
+                         "position for that position to be biased next round")
+    ap.add_argument("--survivor-bias-strength", type=float, default=5.0,
+                    help="per-residue bias log-odds applied to consensus AA")
+    ap.add_argument("--survivor-warmup-rounds", type=int, default=2,
+                    help="draw survivors from all rounds >= this; earlier "
+                         "rounds are iid warmup so we have a survivor pool")
+
     # ---- misc ----
     ap.add_argument("--coupling-mode", default="both",
                     choices=["none", "contact", "span", "both"])
@@ -480,11 +505,61 @@ def main():
     mpnn_root = workdir / "_mpnn"
     mpnn_root.mkdir(parents=True, exist_ok=True)
 
+    def build_survivor_bias(
+        survivors: list[dict], K: int, min_agree: int, strength: float
+    ) -> tuple[dict, dict]:
+        """Return (per_residue_bias_dict, diagnostic).
+
+        per_residue_bias_dict: {"<chain><resid>": {AA: strength}} for positions
+        where >= min_agree of the top-K survivors agree on a NON-WT AA (WT-only
+        columns are left unbiased since MPNN already sees WT via backbone).
+        """
+        if not survivors or K <= 0:
+            return {}, {"topk_used": 0, "biased_positions": 0}
+        top = sorted(survivors, key=lambda d: d["score_product"], reverse=True)[:K]
+        bias_pr: dict = {}
+        biased = []
+        for i in range(L):
+            wt_aa = seq[i]
+            # tally non-WT AAs at this column across top-K
+            tally: dict[str, int] = {}
+            for s in top:
+                aa = s["sequence"][i]
+                if aa != wt_aa:
+                    tally[aa] = tally.get(aa, 0) + 1
+            if not tally:
+                continue
+            best_aa, best_n = max(tally.items(), key=lambda kv: kv[1])
+            if best_n >= min_agree:
+                key = f"{args.design_chain}{i+1}"  # 1-based
+                bias_pr[key] = {best_aa: float(strength)}
+                biased.append({"pos": i + 1, "wt": wt_aa, "aa": best_aa,
+                               "agree": best_n, "of": len(top)})
+        return bias_pr, {"topk_used": len(top),
+                         "biased_positions": len(biased),
+                         "examples": biased[:15]}
+
     all_survivors: list[dict] = []
     round_stats: list[dict] = []
     for r in range(args.n_rounds):
         T = temp_for_round(r)
         round_dir = mpnn_root / f"r{r:02d}"
+
+        # Build survivor-conditioned per-residue bias for rounds past warmup.
+        per_res_bias: dict = {}
+        bias_diag: dict = {"topk_used": 0, "biased_positions": 0}
+        if (args.survivor_topk > 0
+                and r >= args.survivor_warmup_rounds
+                and len(all_survivors) > 0):
+            per_res_bias, bias_diag = build_survivor_bias(
+                all_survivors,
+                K=args.survivor_topk,
+                min_agree=args.survivor_min_agreement,
+                strength=args.survivor_bias_strength,
+            )
+            print(f"[11B] round {r} survivor-bias: topK={bias_diag['topk_used']} "
+                  f"biased_positions={bias_diag['biased_positions']}", flush=True)
+
         recs, _tail = mpnn_propose(
             mpnn_repo=args.mpnn_repo, mpnn_env=args.mpnn_env,
             wt_pdb=args.wt_pdb, design_chain=args.design_chain,
@@ -492,6 +567,7 @@ def main():
             temperature=T, n_designs=args.batch_per_round,
             workdir=round_dir, seed=args.seed + r,
             model_type=args.mpnn_model,
+            bias_AA_per_residue=(per_res_bias or None),
         )
         r_survivors, r_rejected = [], []
         for k, rec in enumerate(recs):
@@ -544,6 +620,7 @@ def main():
             round=r, temperature=T,
             proposed=len(recs), survivors=len(r_survivors),
             rejected=len(r_rejected), reject_breakdown=r_rejected,
+            survivor_bias=bias_diag,
         ))
         print(f"[11B] round {r} T={T:.3f}: {len(r_survivors)}/{len(recs)} survived "
               f"(cum {len(all_survivors)})", flush=True)

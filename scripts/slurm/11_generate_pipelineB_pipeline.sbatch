@@ -56,6 +56,11 @@ NDES=${GEN_NDESIGNS:-3}
 ROUNDS=${GEN_B_ROUNDS:-4}
 BATCH=${GEN_B_BATCH:-6}
 TEMPS=${GEN_B_TEMPERATURES:-0.05,0.10,0.20}
+# Survivor-conditioned iteration (v2). Default 0 keeps legacy iid behavior.
+SURVIVOR_TOPK=${GEN_B_SURVIVOR_TOPK:-0}
+SURVIVOR_MIN_AGREE=${GEN_B_SURVIVOR_MIN_AGREE:-2}
+SURVIVOR_BIAS_STRENGTH=${GEN_B_SURVIVOR_BIAS_STRENGTH:-5.0}
+SURVIVOR_WARMUP=${GEN_B_SURVIVOR_WARMUP:-2}
 MPNN_REPO=${GEN_B_MPNN_REPO:-$SW/LigandMPNN}
 MPNN_ENV=${GEN_B_MPNN_ENV:-ligandmpnn}
 MPNN_MODEL=${GEN_B_MPNN_MODEL:-ligand_mpnn}
@@ -167,6 +172,10 @@ for PH in $PHENOS; do
     --n-rounds "$ROUNDS" \
     --batch-per-round "$BATCH" \
     --temperatures "$TEMPS" \
+    --survivor-topk "$SURVIVOR_TOPK" \
+    --survivor-min-agreement "$SURVIVOR_MIN_AGREE" \
+    --survivor-bias-strength "$SURVIVOR_BIAS_STRENGTH" \
+    --survivor-warmup-rounds "$SURVIVOR_WARMUP" \
     --wt-pdb "$STRUCT/wt.pdb" \
     --conservation-freeze "$CONS_FREEZE" \
     --core-rmsd-cap "$CORE_CAP" \
