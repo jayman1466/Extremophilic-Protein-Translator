@@ -204,7 +204,7 @@ def render_track(track: dict, out_path: Path, *, wrap: int = 60, cell_w: float =
         ax.text(left_gutter - 0.05, yc, str(row_start_pos),
                 fontsize=6.5, color="#555", ha="right", va="center")
 
-    # legend — measure real text extents so labels never collide
+    # legend — width-budgeted layout so labels never collide
     lg_y = 0.10
     entries = [
         ("conservation (white \u2192 magma)", None, "gradient"),
@@ -214,14 +214,12 @@ def render_track(track: dict, out_path: Path, *, wrap: int = 60, cell_w: float =
     ]
     sw_w = 0.18
     sw_h = 0.14
-    sw_label_gap = 0.06   # inches between swatch and label
-    entry_gap    = 0.28   # inches between entries
-    lg_font      = 7.0
-
-    # renderer for measuring text width in inches
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
-    dpi_ = fig.dpi
+    sw_label_gap = 0.08   # inches between swatch and its label
+    entry_gap    = 0.35   # inches between entries
+    lg_font      = 7.5
+    # empirical per-character width at 7.5pt in DejaVu Sans (matplotlib default)
+    # in axes-inches units. Slight over-estimate to avoid collisions.
+    char_w_in = lg_font * 0.0095  # ~0.071 in/char at 7.5pt
 
     x = left_gutter
     for label, col, kind in entries:
@@ -241,11 +239,9 @@ def render_track(track: dict, out_path: Path, *, wrap: int = 60, cell_w: float =
             ax.add_patch(Rectangle((x, lg_y), sw_w, sw_h, facecolor="none",
                                    edgecolor=col, linewidth=1.1, zorder=2))
         label_x = x + sw_w + sw_label_gap
-        t = ax.text(label_x, lg_y + sw_h / 2, label, fontsize=lg_font,
-                    va="center", ha="left", color="#333")
-        # measured width in inches (bbox is in display pixels)
-        bbox = t.get_window_extent(renderer=renderer)
-        label_w_in = bbox.width / dpi_
+        ax.text(label_x, lg_y + sw_h / 2, label, fontsize=lg_font,
+                va="center", ha="left", color="#333")
+        label_w_in = char_w_in * len(label)
         x = label_x + label_w_in + entry_gap
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
