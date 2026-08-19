@@ -58,13 +58,44 @@ cd "$JOBDIR"
 SEQ=$(awk '!/^>/{printf "%s",$0}' input.fasta)
 echo "[gen] seq len=${#SEQ}  phenos=$PHENOS  n_designs=$NDES  gibbs=$GIBBS"
 
-MLM_ADAPTER=$PERSIST/models/mlm_adapt/mlm_adapter_best
+MLM_ADAPTER=${GEN_MLM_ADAPTER:-$PERSIST/runs/mhk32/mlm_adapt/mlm_adapter_best}
 # MSA target DB for `mmseqs easy-search` conservation. Use the CLUSTERED UniRef50
 # FASTA (non-redundant, ~24GB) — NOT the full uniprot_kb (90GB), which OOM'd a
 # single-query search. 11_generate passes --split-memory-limit as a guardrail either
 # way. (/shared/db/uniclust/30_2020_06 is an HH-suite DB for hhblits, not mmseqs.)
 UNIREF=${GEN_MSA_DB:-/shared/db/uniref/uniref50/latest/uniref50.fasta}
-HEADDIR=$PERSIST/models/cached_probes
+# Production mhk32 heads at $PERSIST/runs/mhk32/heads_meanpool/clf_<pheno>/head_best.pt.
+# Legacy cached_probes at $PERSIST/models/cached_probes/clf_<pheno>_cached/head_best.pt
+# is available by setting GEN_HEAD_LAYOUT=cached_probes.
+HEADDIR=${GEN_HEADDIR:-$PERSIST/runs/mhk32/heads_meanpool}
+HEAD_LAYOUT=${GEN_HEAD_LAYOUT:-mhk32}   # mhk32 -> clf_<PH>/head_best.pt; cached_probes -> clf_<PH>_cached/head_best.pt
+
+# ---- §16b interface-constraint knobs (optional; only wired if set) ----
+# GEN_ADDITIONAL_CONSTRAINTS   comma-separated explicit tokens and/or NL phrases.
+#                              Explicit tokens (contain a digit) go straight to frozen[].
+#                              NL phrases (e.g. "tetramer interfaces, protein-bRNA interface")
+#                              require GEN_COMPLEX_CIF and are resolved by biopython from
+#                              partner-chain contact geometry.
+# GEN_COMPLEX_CIF              path to the tetramer/complex CIF (required if any NL phrase)
+# GEN_DESIGN_CHAIN             chain being redesigned in the complex (default "A")
+# GEN_INTERFACE_CONTACT_CUTOFF heavy-atom cutoff for contact-residue selection (default 4.5)
+# GEN_INTERFACE_RMSD_CAP       per-face CA-RMSD cap in A after periodic refold (default 1.5;
+#                              0 disables per-face RMSD tracking)
+# GEN_INTERFACES_JSON_OUT      optional audit sidecar with resolved residues per face
+ADD_CONS=${GEN_ADDITIONAL_CONSTRAINTS:-}
+COMPLEX_CIF=${GEN_COMPLEX_CIF:-}
+DESIGN_CHAIN=${GEN_DESIGN_CHAIN:-A}
+IFACE_CUTOFF=${GEN_INTERFACE_CONTACT_CUTOFF:-4.5}
+IFACE_CAP=${GEN_INTERFACE_RMSD_CAP:-1.5}
+IFACES_JSON=${GEN_INTERFACES_JSON_OUT:-}
+IFACE_ARGS=()
+if [ -n "$ADD_CONS" ]; then
+  IFACE_ARGS+=("--additional-constraints" "$ADD_CONS")
+  [ -n "$COMPLEX_CIF" ]  && IFACE_ARGS+=("--complex-cif" "$COMPLEX_CIF")
+  IFACE_ARGS+=("--design-chain" "$DESIGN_CHAIN")
+  IFACE_ARGS+=("--interface-contact-cutoff" "$IFACE_CUTOFF")
+  IFACE_ARGS+=("--interface-rmsd-cap" "$IFACE_CAP")
+fi
 
 CAND_LIST=(); FOLD_LIST=()
 ANN_DIR=${GEN_ANN_DIR:-$SW/annotations}
@@ -118,11 +149,22 @@ fi
 # ---------- Stages 1,2,4,5 per phenotype (eptrans_ml) ----------
 for PH in $PHENOS; do
   echo "[gen] === $PH: masked-gen + scoring ==="
+  case "$HEAD_LAYOUT" in
+    mhk32)         HEAD_PATH="$HEADDIR/clf_${PH}/head_best.pt" ;;
+    cached_probes) HEAD_PATH="$HEADDIR/clf_${PH}_cached/head_best.pt" ;;
+    *)             echo "[gen] unknown GEN_HEAD_LAYOUT=$HEAD_LAYOUT" >&2; exit 2 ;;
+  esac
+  echo "[gen] head: $HEAD_PATH"
+  # per-phenotype interfaces audit sidecar (only in NL-phrase mode)
+  IF_ARGS_PH=("${IFACE_ARGS[@]}")
+  if [ -n "$ADD_CONS" ]; then
+    IF_ARGS_PH+=("--interfaces-json-out" "${IFACES_JSON:-$JOBDIR/interfaces_${PH}.json}")
+  fi
   python "$REPO/scripts/11_generate.py" \
     --seq "$SEQ" --phenotype "$PH" \
     --out "$JOBDIR/candidates_${PH}.json" \
     --mlm-adapter "$MLM_ADAPTER" \
-    --head "$HEADDIR/clf_${PH}_cached/head_best.pt" \
+    --head "$HEAD_PATH" \
     --uniref-db "$UNIREF" \
     --transfer-json "$JOBDIR/active_site_transfer.json" \
     --backbone-size 3B --n-designs "$NDES" --gibbs-iters "$GIBBS" \
@@ -131,6 +173,7 @@ for PH in $PHENOS; do
     --coupling-mode "$COUPLING" \
     --refold-recover "$REFOLD_RECOVER" \
     --refold-recover-after "$REFOLD_RECOVER_AFTER" \
+    "${IF_ARGS_PH[@]}" \
     --device cuda --workdir "$JOBDIR/_work_${PH}" --seed 1466
   CAND_LIST+=("$JOBDIR/candidates_${PH}.json")
 done
