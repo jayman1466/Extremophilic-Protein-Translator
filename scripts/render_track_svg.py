@@ -204,7 +204,7 @@ def render_track(track: dict, out_path: Path, *, wrap: int = 60, cell_w: float =
         ax.text(left_gutter - 0.05, yc, str(row_start_pos),
                 fontsize=6.5, color="#555", ha="right", va="center")
 
-    # legend
+    # legend — measure real text extents so labels never collide
     lg_y = 0.10
     entries = [
         ("conservation (white \u2192 magma)", None, "gradient"),
@@ -212,12 +212,20 @@ def render_track(track: dict, out_path: Path, *, wrap: int = 60, cell_w: float =
         ("interface (\u00a716b)", COL_INTERFACE, "overline"),
         ("mutation", COL_MUTATION, "outline"),
     ]
+    sw_w = 0.18
+    sw_h = 0.14
+    sw_label_gap = 0.06   # inches between swatch and label
+    entry_gap    = 0.28   # inches between entries
+    lg_font      = 7.0
+
+    # renderer for measuring text width in inches
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    dpi_ = fig.dpi
+
     x = left_gutter
     for label, col, kind in entries:
-        sw_w = 0.18
-        sw_h = 0.14
         if kind == "gradient":
-            # tiny left-to-right gradient block
             steps = 12
             for si in range(steps):
                 frac = si / max(1, steps - 1)
@@ -232,10 +240,13 @@ def render_track(track: dict, out_path: Path, *, wrap: int = 60, cell_w: float =
         elif kind == "outline":
             ax.add_patch(Rectangle((x, lg_y), sw_w, sw_h, facecolor="none",
                                    edgecolor=col, linewidth=1.1, zorder=2))
-        x += sw_w + 0.04
-        ax.text(x, lg_y + sw_h / 2, label, fontsize=6.5, va="center", ha="left",
-                color="#333")
-        x += 0.05 * len(label) + 0.15
+        label_x = x + sw_w + sw_label_gap
+        t = ax.text(label_x, lg_y + sw_h / 2, label, fontsize=lg_font,
+                    va="center", ha="left", color="#333")
+        # measured width in inches (bbox is in display pixels)
+        bbox = t.get_window_extent(renderer=renderer)
+        label_w_in = bbox.width / dpi_
+        x = label_x + label_w_in + entry_gap
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, format="svg", bbox_inches="tight", pad_inches=0.05)
