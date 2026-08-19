@@ -4671,3 +4671,134 @@ per-phenotype `interfaces_<PH>.json` audit (residues per face), and
 before). Zero other dep changes; adapter transfer + refold loop untouched
 in unconstrained runs (`--additional-constraints` empty = byte-identical
 old behaviour).
+
+## 2026-08-19 — IS621 A vs B head-to-head: Pipeline A resubmitted on H200; Pipeline B (MPNN-in-the-loop) built + submitted
+
+**Motivation.** IS621 (8WT6) is a small, well-annotated interface-constrained
+target. Runs on a single WT backbone with sharp active-site + tetramer +
+protein-bRNA + protein-target constraints and 4 phenotype heads (thermo,
+halo, hyper, alkali). Ideal head-to-head between the current sequence-first
+pipeline (A) and a structure-first MPNN-in-the-loop pipeline (B) — both use
+the same mhk32 adapter + heads, the same §16b constraints, the same active-
+site RMSD caps, the same 8WT6 backbone, the same phenotype targets. The
+only thing that changes is the proposer + soft-score composition.
+
+**Pipeline A (running).** After all 4 initial A jobs (1178378, 1178379,
+1178382, 1178383) OOM'd on the shared `gpu` A5000s (13.59 GB other-PID
+collision on `.to(device)` for ESM-2 3B), resubmitted on `gpu_h200` with
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` and no GPU-type
+subselector (bare `gpu:1`). All 4 landed on `node-224-2t-8gpu-1`:
+
+| SLURM job | phenotype | head AUROC | head pair-AUC | train pairs |
+|---|---|---|---|---|
+| 1178404 | thermophile | 0.9688 | 0.9095 | 13,956 |
+| 1178405 | halophile | 0.9436 | 0.7744 | 59,426 |
+| 1178406 | hyperthermophile | 0.9808 | 0.9590 | ~150 |
+| 1178407 | alkaliphile | 0.8790 | 0.7518 | 6,058 |
+
+Same 3 designs × 24 Gibbs iters × MH-anneal 0.05→0.005, coupling `both`,
+seed 1466. Commit `99b7f51`. Log pattern:
+`$SCRATCH/logs/is621_gen_%j.log`.
+
+**Pipeline B (submitted).** Commit `4779400`. Three new files:
+
+- `scripts/11_generate_pipelineB.py` (~600 lines). Reuses `_ca_coords`,
+  `_kabsch_rmsd`, `_rmsd_over`, `RefoldClient`, `biophysical_score`,
+  `run_msa_conservation`, `detect_active_site` from `11_generate.py`. New
+  code:
+  - **MPNN proposer**: `mpnn_propose(...)` — subprocess `conda run -n
+    ligandmpnn python <repo>/run.py --model_type ligand_mpnn --pdb_path
+    wt.pdb --fixed_residues "<active_site ∪ interfaces ∪ conservation ≥
+    0.90>" --bias_AA "<per-phenotype log-ratio>" --temperature <T>
+    --number_of_batches 1 --batch_size <K>`. Parses the resulting FASTA
+    (skipping the id=0 WT threading record) into `[{seq, seed,
+    overall_confidence, ligand_confidence, ...}]`.
+  - **Bias_AA table**: `data/bias_aa_by_phenotype.json` (5 KB, 6
+    phenotypes × 20 AAs, log-ratio `log((f_ext + 1) / (f_meso + 1))` from
+    the r232 secreted labeled dataset — 1,985,508 SignalP-secreted proteins
+    tagged in `labeled_dataset_r232_clustered.parquet`). Sanity: hyper up
+    on I/Y/K + down on Q/A/D; halo up on E/D + down on K; acido down on
+    E/R/D; alkali down on C. All published extremophile signatures
+    reproduce.
+  - **Oracle** (per candidate):
+    - Tier 1 (hard gates): active-site CA-RMSD ≤ 1.0 Å (post-ESMFold),
+      per-interface CA-RMSD ≤ 1.5 Å, no mutation at any residue with
+      conservation ≥ 0.90. Every candidate is folded (via the same
+      `RefoldClient` A uses); the diagram's "fold survivors only"
+      optimization requires soft/hard correlation we haven't measured.
+    - Tier 2 (soft ranking, equal exponents):
+      `score = p_classifier × exp(seqLL_design − seqLL_wt) × p_coupling`
+      where `p_classifier = σ(head(mean-pool(esm(design))))`, `seqLL` is
+      single-forward `Σ log P(x_i)/L` (NOT true pseudo-LL; L-fold masking
+      cost prohibitive for K designs × R rounds — ratio only), and
+      `p_coupling` = fraction of WT strong-contact pairs (contact prob ≥
+      0.5, min sep 6, top-k 128) whose contact prob ≥ 0.5 in the design.
+      All 4 sub-scores emitted per design so ranking can be re-run
+      offline with different weights.
+  - **Loop**: R rounds × K candidates. Temperature cycles through
+    `[0.05, 0.10, 0.20]` (round modulo). Top `--n-designs` survivors
+    (post-Tier-1) ranked by `score` product.
+- `scripts/slurm/11_generate_pipelineB_pipeline.sbatch` — generic backend,
+  same shape as `11_generate_pipeline.sbatch`. gpu_h200, expandable_segments.
+- `scripts/slurm/11_generate_is621_pipelineB.sbatch` — IS621 wrapper (same
+  hard-codes as A's IS621 wrapper: 306 aa 8WT6 sequence, 8WT6.cif,
+  `--core-rmsd-cap 1.0`, `--interface-rmsd-cap 1.5`, §16b constraints,
+  mhk32 adapter/heads).
+
+**Bias_AA input.** `scripts/prep_bias_aa.py` (commit `19c2055`) streams
+`labeled_dataset_r232_clustered.parquet` + `secreted_proteins_r232.faa`
+(825 MB) and joins on `tagged_id` == FASTA header. Original submission
+1178414 on `memory` partition was cancelled after discovering the JSON
+already existed (produced Aug 18 22:47 by an earlier run; 5100 bytes;
+`faa_matched=1985508, faa_unmatched=0`).
+
+| SLURM job | phenotype | status at submit | node |
+|---|---|---|---|
+| 1178417 | thermophile | PD Priority | (queued) |
+| 1178418 | halophile | PD Priority | (queued) |
+| 1178419 | hyperthermophile | PD Priority | (queued) |
+| 1178420 | alkaliphile | PD Priority | (queued) |
+
+Same job budget as A: gpu_h200, gpu:1, 16 CPU, 96G, 08:00:00. B params:
+`--n-rounds 4 --batch-per-round 6 --temperatures 0.05,0.10,0.20
+--conservation-freeze 0.90`. Final `--n-designs 3` (matches A's 3 designs
+per phenotype for a fair 3-vs-3 comparison).
+
+**A vs B expected differences (things to watch for at harvest).**
+
+1. **Mutation locations.** A anneals a full sequence-space walk under the
+   PLM; frozen positions come from active-site + interfaces + conservation.
+   B never proposes at any frozen position (LigandMPNN `--fixed_residues`
+   is a hard constraint at proposal time, not a post-hoc filter). Expect
+   B mutations to concentrate more sharply outside the interface + core
+   union than A's, and A's rare escape mutations near the interface to
+   have no B analogue.
+2. **Composition bias.** A has no `bias_AA` term (PLM composition ≈ Swiss-
+   Prot). B pushes proposals toward the phenotype's compositional signature
+   (hyper → I/Y/K enriched; halo → E/D enriched; acido → E/R/D avoided;
+   alkali → C avoided). Head classifier scores may not reward this — the
+   heads were trained on secreted-protein language, not on composition
+   priors — so B's `p_classifier` may not systematically exceed A's, but
+   its designs will read more like real extremophile proteins by amino
+   acid stats. Sub-scores are emitted separately so we can measure.
+3. **RMSD distribution.** B folds every candidate; A folds every 4 Gibbs
+   iterations (`GEN_REFOLD_EVERY=4`). B should have a tighter RMSD
+   distribution around the WT backbone by construction (MPNN is trained
+   to generate on-backbone), and A should be free to escape backbone at
+   accepted mutations that don't refold-fail.
+4. **Coupling preservation.** B's `p_coupling` term explicitly rewards WT
+   contact-graph preservation. A has no analogous term — expect B designs
+   to preserve more of the WT contact map even after accounting for
+   backbone RMSD.
+
+**Env.** No new deps for B. Uses existing `ligandmpnn` conda env (numpy
+pinned 1.26.4) via subprocess, `eptrans_ml` for scoring, `esmfold` for
+in-loop RefoldClient (same worker A uses; identical
+`scripts/11e_esmfold_worker.py`).
+
+**Path.** `$SCRATCH/gen/is621B_<timestamp>_<pheno>/` per phenotype.
+Outputs: `candidates_<pheno>.json` (with `pipeline: "B"`, `subscores`,
+`score_product`, `rmsds`, `mpnn_overall_confidence` per design, plus
+Pipeline-B extras: `mpnn_temperatures`, `round_stats`, `bias_aa`,
+`wt_contact_pairs`), `interfaces_<pheno>.json`, `results.json` (via
+`11d_assemble.py`), `structures/wt.pdb` + design PDBs, `_refold_worker.log`.
