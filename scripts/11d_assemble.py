@@ -14,7 +14,12 @@ from pathlib import Path
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--candidates", nargs="+", required=True, help="candidates.json per phenotype")
-    ap.add_argument("--folded", nargs="+", required=True, help="folded.json per phenotype (same order)")
+    ap.add_argument("--folded", nargs="+", default=None,
+                    help="folded.json per phenotype (same order); Pipeline A only. "
+                         "Pipeline B candidates carry per-design refold RMSDs in-line "
+                         "(rmsds{active_site, iface_*}), so --folded may be omitted or "
+                         "shorter than --candidates — missing entries fall back to the "
+                         "in-loop gate values.")
     ap.add_argument("--mpnn", required=True, help="shared mpnn.json")
     ap.add_argument("--out", required=True, help="results.json")
     args = ap.parse_args()
@@ -22,9 +27,34 @@ def main():
     mpnn = json.loads(Path(args.mpnn).read_text())
     by_phenotype = {}
     wt_seq = None
-    for cpath, fpath in zip(args.candidates, args.folded):
+    folded_paths = list(args.folded or [])
+    # pad with None so zip lines up; a candidate without a folded.json will
+    # fall back to per-design rmsds carried inside the candidate row itself.
+    while len(folded_paths) < len(args.candidates):
+        folded_paths.append(None)
+    for cpath, fpath in zip(args.candidates, folded_paths):
         cand = json.loads(Path(cpath).read_text())
-        fold = json.loads(Path(fpath).read_text())
+        fold = json.loads(Path(fpath).read_text()) if fpath else {}
+        # Pipeline B: derive a folded-shape dict from candidate rows themselves.
+        # Each row already carries rmsds{active_site, iface_*} from the in-loop
+        # gate; passes_rmsd is True because non-passing designs are rejected
+        # BEFORE ranking (Tier-1 hard gate). plddt isn't stored per-design in B,
+        # so leave it None — the webapp already handles missing plddt.
+        if not fold and cand.get("pipeline") == "B":
+            core_cap = cand.get("core_rmsd_cap")
+            iface_cap = cand.get("interface_rmsd_cap")
+            for d in cand.get("designs", []):
+                rmsds = d.get("rmsds", {}) or {}
+                core_rmsd = rmsds.get("active_site")
+                fold[d["design_id"]] = {
+                    "plddt": None,
+                    "active_site_rmsd": core_rmsd,       # webapp .active_site_rmsd
+                    "catalytic_core_rmsd": core_rmsd,    # metrics.catalytic_core_rmsd
+                    "passes_rmsd": True,                 # survivors passed Tier-1 gate
+                    "rmsd_cap": iface_cap,
+                    "core_rmsd_cap": core_cap,
+                    "structure_file": f"{d['design_id']}.pdb",
+                }
         wt_seq = cand["wt_sequence"]
         ph = cand["phenotype"]
         cons = cand.get("conservation", [])

@@ -119,6 +119,31 @@ class RefoldClient:
                 return None
             time.sleep(self.poll)
 
+    def refold_pdb(self, seq):
+        """Fold `seq` and return the raw PDB text, or None on timeout/error.
+
+        Used by Pipeline B to persist the winning designs' structures: the
+        in-loop gate calls refold_rmsd_multi() and throws the PDB away; we
+        re-fold once more (idempotent under ESMFold's greedy decoding) to
+        write structures/<design_id>.pdb for the webapp.
+        """
+        rid = uuid.uuid4().hex[:12]
+        tmp = self.req / f"{rid}.fasta.tmp"
+        tmp.write_text(seq)
+        tmp.rename(self.req / f"{rid}.fasta")
+        out = self.resp / f"{rid}.pdb"; err = self.resp / f"{rid}.err"
+        t0 = time.time()
+        while True:
+            if out.exists():
+                pdb = out.read_text(); out.unlink(missing_ok=True)
+                return pdb
+            if err.exists():
+                err.unlink(missing_ok=True)
+                return None
+            if time.time() - t0 > self.timeout:
+                return None
+            time.sleep(self.poll)
+
     def refold_rmsd_multi(self, seq, position_sets):
         """One fold, N RMSDs. `position_sets`: {label: [1-based positions]}.
 

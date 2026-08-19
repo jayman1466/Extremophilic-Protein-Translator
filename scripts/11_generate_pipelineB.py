@@ -552,11 +552,27 @@ def main():
     all_survivors.sort(key=lambda d: d["score_product"], reverse=True)
     top = all_survivors[: args.n_designs]
 
+    # Persist design PDBs so 11d_assemble.structure_file="{did}.pdb" resolves
+    # in the webapp. The in-loop gate discards each fold's PDB after computing
+    # RMSDs; re-fold each pick once more (ESMFold is deterministic for a given
+    # sequence). Output dir mirrors Pipeline A: <jobdir>/structures/.
+    struct_dir = Path(args.out).resolve().parent / "structures"
+    struct_dir.mkdir(parents=True, exist_ok=True)
+
     designs = []
     for lvl, d in enumerate(top):
         muts = [dict(pos=i + 1, wt=a, mut=b)
                 for i, (a, b) in enumerate(zip(seq, d["sequence"])) if a != b]
         did = f"{args.phenotype[:4]}_B{lvl+1}"
+        # Fold once more and write structures/<did>.pdb.
+        pdb_txt = refolder.refold_pdb(d["sequence"])
+        if pdb_txt:
+            (struct_dir / f"{did}.pdb").write_text(pdb_txt)
+            print(f"[11B] wrote {struct_dir/f'{did}.pdb'} ({len(pdb_txt)} bytes)",
+                  flush=True)
+        else:
+            print(f"[11B] WARN: refold_pdb({did}) returned None; "
+                  f"structure not persisted", flush=True)
         designs.append(dict(
             design_id=did, sequence=d["sequence"], level=lvl,
             round=d["round"], temperature=d["temperature"],
