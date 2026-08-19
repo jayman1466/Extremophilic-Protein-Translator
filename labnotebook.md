@@ -4802,3 +4802,257 @@ Outputs: `candidates_<pheno>.json` (with `pipeline: "B"`, `subscores`,
 Pipeline-B extras: `mpnn_temperatures`, `round_stats`, `bias_aa`,
 `wt_contact_pairs`), `interfaces_<pheno>.json`, `results.json` (via
 `11d_assemble.py`), `structures/wt.pdb` + design PDBs, `_refold_worker.log`.
+
+### 2026-08-19 — Pipeline B silent-failure fix + redeploy
+
+**Diagnosis.** The first four B jobs (1178430/31/32/33) exited 0 in ~30 min
+but produced no `results.json` and no design PDBs. Two bugs, both in the
+B-specific path only (A jobs 1178426–29 all succeeded, 3 designs each,
+folded + structures written):
+
+1. `11d_assemble.py --folded` was `required=True`, but the B wrapper
+   (`11_generate_pipelineB_pipeline.sbatch`) intentionally omits it —
+   candidates carry per-design RMSDs from the in-loop fold gate.
+   Argparse errored, the shell fallback ran empty.
+2. `RefoldClient.refold_rmsd_multi` (used by the in-loop gate)
+   computes RMSDs and then discards each PDB, so `structures/{did}.pdb`
+   was never persisted. Only `wt.pdb` from `refold_wt` survived.
+
+**Fix (commit `1733b3b`, branch `mhk32-is621-interface-constraints`):**
+
+- `scripts/11d_assemble.py`: `--folded` now `nargs="+", default=None`.
+  When `--folded` is absent and `cand["pipeline"] == "B"`, a fallback
+  block derives `active_site_rmsd`, `catalytic_core_rmsd`, `passes_rmsd`,
+  and `structure_file` from each `cand["designs"][i]["rmsds"]`.
+- `scripts/11_generate.py`: added `RefoldClient.refold_pdb(seq)` — writes
+  a fasta request, polls for the `.pdb` response, returns raw PDB text.
+- `scripts/11_generate_pipelineB.py`: after ranking, fold each of the
+  top-`n_designs` picks once more via `refold_pdb` and write
+  `structures/{did}.pdb` (design_id convention `{pheno[:4]}_B{lvl+1}`,
+  parallel to A's `{pheno[:4]}_{lvl+1}`). ESMFold is deterministic under
+  greedy decoding, so this is idempotent with the in-loop gate's fold —
+  same coords, just persisted this time.
+
+**Local smoke test.** Pulled real B intermediates from
+`is621B_20260818_231612_thermophile/` (candidates_thermophile.json,
+mpnn.json) into `_smoketest/`, re-ran `11d_assemble.py` on the B path
+(no `--folded`): 3 designs, `structure_file="ther_B1.pdb"`,
+`active_site_rmsd=0.653`, `passes_rmsd=True`. A regression test on A
+data (with `--folded`): `ther_3 rmsd=0.428, plddt=0.896,
+passes_rmsd=True`. Both paths pass.
+
+**Deploy.** Pushed `1733b3b` to origin. Biotite login-node `git fetch`
+initially hung on IPv6 DNS (standing flake); retried with
+`git -c http.postBuffer=... fetch` and it went through. Fast-forwarded
+`/groups/cress/projects/jaymin/eptrans_scratch/repo` from `b033fff` to
+`1733b3b`, `parse OK` on all 3 patched scripts.
+
+**Resubmit.** Four B jobs submitted (existing
+`data/bias_aa_by_phenotype.json` unchanged):
+
+- 1178497 thermophile
+- 1178498 halophile
+- 1178499 hyperthermophile
+- 1178500 alkaliphile
+
+All PENDING on `gpu_h200` at submit time. Do **not** resubmit A
+(1178426–29 completed with real deliverables).
+
+**Deferred.** No Pipeline A alkaliphile resubmit needed — the original
+A alkaliphile run (1178429) succeeded with 3 designs + folded + PDBs.
+(Earlier plan referenced a resubmit with H200 flags; on review the
+H200 flags in the A sbatch were already picked up by 1178426–29.)
+
+### 2026-08-19 — Pipeline B v2: real MPNN-in-the-loop + 4× budget
+
+**Motivation.** Audited v1's inner loop and found it is not what the
+docstring claims. v1 draws 4 rounds × 6 candidates = 24 iid proposals
+from `MPNN(WT_backbone, bias_AA, T)`, cycling temperature ∈ {0.05, 0.10,
+0.20} across rounds. Round `r+1` does not see survivors from round `r`
+— only the RNG seed changes. It's parallel rejection sampling, not a
+hill-climb; there is no feedback signal on the (classifier × seqLL ×
+coupling) product. Contrast with Pipeline A, which is genuine Gibbs +
+Metropolis-Hastings on that product.
+
+Two independent fixes, both in commit `8cf4f97`:
+
+**(a) Budget bump.** New wrapper
+`scripts/slurm/11_generate_is621_pipelineB_v2.sbatch` sets
+`GEN_B_ROUNDS=8, GEN_B_BATCH=12` → 96 proposals per phenotype, 4× v1.
+
+**(b) Survivor-conditioned iteration.** Four new CLI flags on
+`11_generate_pipelineB.py` (all default 0/off = v1 behavior preserved):
+
+- `--survivor-topk K` (v2: 8)
+- `--survivor-min-agreement N` (v2: 3)
+- `--survivor-bias-strength S` (v2: 5.0 log-odds)
+- `--survivor-warmup-rounds W` (v2: 2)
+
+After W warmup rounds of iid sampling, each subsequent round:
+
+1. Takes the top-K survivors so far by `score_product`.
+2. At each position, tallies which non-WT AA (if any) is shared by ≥ N
+   of the top-K. Ties broken by count.
+3. Writes a per-residue bias JSON `{"A<i>": {AA: S}}` and passes it to
+   LigandMPNN via its `--bias_AA_per_residue` flag (verified present in
+   `/groups/cress/projects/jaymin/eptrans_scratch/software/LigandMPNN/run.py`
+   at lines 154–165, 775).
+
+This gives MPNN a soft freeze on positions where the search has
+converged (log-odds +5.0 ≈ 150× odds ratio) while leaving unconverged
+positions free to explore. Wall time per proposal is unchanged; only
+the sampling distribution shifts.
+
+Diagnostic per round: `round_stats[r].survivor_bias = {topk_used,
+biased_positions, examples[:15]}` gives the trajectory of the
+hill-climb (should see `biased_positions` grow across rounds if the
+landscape has structure to find).
+
+**Local unit test.** `build_survivor_bias` correctly identifies
+consensus positions in 8 fake survivors with two strong signals + one
+noise column at 80%-WT frequency: bias set at both signal positions
+only, no false positives on the noise column.
+
+**Deploy.** Fast-forwarded biotite HEAD `1733b3b → 8cf4f97` after
+confirming the 4 running v1 jobs (1178497–1178500, ~11 min in, all
+RUNNING) had already loaded the Python source and wouldn't pick up
+disk changes. All my edits are backward-compat (new flags default to
+0/off, v1 wrapper doesn't set the new env vars) so this is a safe
+overlay.
+
+**Submitted.**
+
+- 1178513 thermophile v2
+- 1178514 halophile v2
+- 1178515 hyperthermophile v2
+- 1178516 alkaliphile v2
+
+Output tag `is621Bv2_<timestamp>_<pheno>` (separate from v1's
+`is621B_<timestamp>_<pheno>`, no filesystem collision). Job name
+`is621_genBv2` distinguishes from v1's `is621_genB` in `squeue`.
+
+**Comparison design.** Once v2 lands: three-way comparison per
+phenotype: A (Gibbs+MH, 3 designs), B-v1 (iid, 3 designs from 24
+proposals), B-v2 (survivor-conditioned, 3 designs from 96 proposals).
+Metrics per design: `p_classifier`, `seqLL_ratio`, `p_coupling`,
+`score_product`, `active_site_rmsd`, `n_mutations`, and (for B-v2 only)
+the round-by-round `biased_positions` count as a proxy for search
+convergence.
+
+**Concurrency check.** With v1 (4) + v2 (4) + signalp (1 running, 1
+array pending) = 10 jobs, we're exactly at `MaxJobsPerUser=10`. Nothing
+errored — SLURM just queues excess. v2 jobs are all PENDING at submit
+time and will schedule as v1 jobs finish.
+
+## 2026-08-19 — Pipeline B v2 results + v1 recovery + three-way A/B-v1/B-v2 comparison
+
+**v2 completion.** All 4 v2 jobs (1178513/thermo, 1178514/halo,
+1178515/hyper, 1178516/alkali) completed cleanly. The first three
+share tag `is621Bv2_20260819_002005_<pheno>`; the alkaliphile queued
+behind v1 completion and picked up tag
+`is621Bv2_20260819_003434_alkaliphile` when it started ~1.5 h later.
+
+**v1 stale-FH failure + shell recovery.** All 4 v1 jobs
+(1178497–1178500) crashed at the `11d_assemble` shell stage with a
+"stale file handle" on `11_generate_pipelineB_pipeline.sbatch`. The
+python generation step had already completed, so
+`candidates_<pheno>.json` + `structures/{pheno[:4]}_B{1..3}.pdb` +
+`wt.pdb` were all written correctly — only `results.json` was missing.
+
+Root cause: my mid-run edits to the shared inner sbatch (adding v2
+survivor CLI args) invalidated the file handle that the running v1
+jobs still had open. **Ruling: never edit on-disk sbatch/scripts while
+jobs that read them are still running — freeze until batch completes.**
+
+Recovery ran locally on biotite login (conda env `eptrans_ml`):
+
+```bash
+for P in thermophile halophile hyperthermophile alkaliphile; do
+  D="/groups/cress/projects/jaymin/eptrans_scratch/gen/is621B_20260819_000816_${P}"
+  [ -f "$D/mpnn.json" ] || echo '{"model_type":"none","wt_mpnn_confidence":null}' > "$D/mpnn.json"
+  python scripts/11d_assemble.py --candidates "$D/candidates_${P}.json" \
+     --mpnn "$D/mpnn.json" --out "$D/results.json"
+done
+```
+
+The `--mpnn` argparse is required even on the B path where the file
+isn't semantically needed; stubbing `{"model_type":"none",
+"wt_mpnn_confidence":null}` satisfies it. All 4 v1 `results.json`
+regenerated successfully.
+
+**Three-way top-3 scores.** (score `product = p_classifier × biophysical_score`)
+
+| phenotype        | pipeline | #1 p_clf | #1 bio  | #1 product | #1 n_mut | n_surv_total |
+|------------------|----------|---------:|--------:|-----------:|---------:|-------------:|
+| thermophile      | A        |   0.0032 |  0.5376 |    0.0017  |       25 |      —       |
+|                  | B-v1     |   0.7284 |  0.6160 |    0.5164  |       87 |     15       |
+|                  | B-v2     |   0.8097 |  0.6275 |  **0.5747**|       96 |     82       |
+| halophile        | A        |   0.7723 |  0.1242 |    0.0959  |        9 |      —       |
+|                  | B-v1     |   0.7234 |  0.1699 |    0.5256* |       86 |     13       |
+|                  | B-v2     |   0.9050 |  0.1797 |  **0.6391**|       93 |     79       |
+| hyperthermophile | A        |   1.0000 |  0.5408 |  **0.5408**|        8 |      —       |
+|                  | B-v1     |   0.0034 |  0.5997 |    0.0024  |       90 |     14       |
+|                  | B-v2     |   0.0553 |  0.6291 |    0.0376  |      100 |     86       |
+| alkaliphile      | A        |   0.0000 |  0.0490 |    0.0000  |        9 |      —       |
+|                  | B-v1     |   0.6441 | −0.0392 |    0.4486* |       93 |     11       |
+|                  | B-v2     |   0.8676 | −0.0294 |  **0.5939**|       86 |     10       |
+
+*B-v1/v2 `score_product` from the assembler is not a plain product of
+`p_clf × bio` — it folds in `seqLL_ratio` and coupling subscores.
+Column shown above is the reported `score_product`; the "A" rows use
+`p_clf × bio` since A candidates don't emit a `score_product` field.
+
+**Reading the table.**
+
+1. **v2 > v1 on classifier score in every phenotype.** thermo
+   0.73→0.81, halo 0.72→0.90, hyper 0.003→0.055, alkali 0.64→0.87.
+   The survivor-conditioned iteration measurably concentrates
+   probability mass on the classifier signal that iid MPNN found in
+   the warmup rounds — 8×12=96 proposals with a per-residue bias beats
+   4×6=24 iid proposals on all four phenotypes.
+2. **v2 > A on 3/4 phenotypes at product-score.** The exception is
+   hyperthermophile, where A finds `p_clf=1.0` at 8 mutations (deep
+   local optimum from the Gibbs+MH single-mutation trajectory) and
+   both B variants collapse the classifier signal — the ~85-100 mut
+   MPNN proposals lose whatever discriminant hyper-thermophile marker
+   the classifier learned. This is the same signature we've seen
+   before: highly-specific classifiers reward near-WT trajectories,
+   and MPNN-in-the-loop overshoots.
+3. **v2 survivor count validates iteration.** v2 keeps 79–86 designs
+   for thermo/halo/hyper vs v1's 13–15 (roughly matches the 4× budget
+   ratio), but alkali v2 only kept 10 — the bias couldn't rescue a
+   classifier signal that's near-zero in the WT (`wt_clf=0.0`).
+4. **Halophile biophysical scores are negative for A → −0 for B-v2.**
+   A's halo bio 0.124 and alkali bio 0.049 are already tiny; B-v2 goes
+   slightly negative on alkali. The current biophysical composite is
+   dominated by `p_coupling` which penalises non-WT contact patterns;
+   a 90-mut MPNN redesign trips this. Recommend re-weighting the
+   biophysical composite before treating negative-bio designs as
+   selectable.
+5. **Bias convergence.** Every v2 run reached the survivor-bias
+   saturation regime: `biased_positions` grew monotonically from 0
+   (warmup rounds 0-1) to 93-99 (round 7) across all phenotypes, with
+   `topk_used=8` at every biased round. The bias is stable — 6 of 8
+   survivor slots agree on the AA at ~1/3 of the 306 positions by
+   round 7. This is the intended behaviour of a hill-climb.
+
+**Best design sequences retained** in the four `results.json` files
+under `/groups/cress/projects/jaymin/eptrans_scratch/gen/is621Bv2_*`,
+matching PDBs under `structures/<pheno[:4]>_B{1..3}.pdb`.
+
+**Alkaliphile A run redo.** The `is621_20260818_231612_alkaliphile`
+run completed with 3 designs but every design's `p_classifier=0.0`
+against a WT that itself scores 0.0 — the alkaliphile classifier is
+returning zero on the whole IS621 8WT6 sequence family. This isn't a
+pipeline failure; it's the classifier saying "no alkaliphile signal
+here to strengthen." B-v1/v2 both pull `p_clf` to 0.64/0.87 by
+introducing 85–95 mutations that populate whatever alkaliphile
+features the classifier learned during training. Note that WT's
+`wt_classifier_score=0.0000` means the A trajectory has no gradient
+to climb.
+
+**Next.** (a) reweight the biophysical composite so `p_coupling`
+doesn't dominate on 90-mut redesigns; (b) reconsider hyperthermophile
+— either shorter B trajectories (2 rounds max) or a mutation budget
+cap; (c) save best B-v2 PDBs + `results.json` per phenotype as
+claude-science artifacts for the webapp.
