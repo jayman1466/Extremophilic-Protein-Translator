@@ -4608,3 +4608,66 @@ Provenance JSON for the four model-selection decisions:
 `runs/mhk32/phase4_lam_sweep/lam_sweep_all.json` (λ),
 `runs/mhk32/phase5_attn/attn_heads_summary.json` (pooling: mean wins all 6).
 Full run map: `runs/mhk32/MANIFEST.md`.
+
+## 2026-08-19 — IS621 (8WT6) redesign: §16b interface constraints wired, submitted
+
+**Branch/commits.** `mhk32-is621-interface-constraints`; tip `0bcbcb8` on
+origin. `6a34e00` = interface-constraint core in `scripts/11_generate.py` +
+new `src/eptrans/interfaces.py`; `0bcbcb8` = pipeline sbatch retargeted at
+mhk32 heads/adapter + IS621 launcher wrapper.
+
+**§16b in-loop protection.** `--additional-constraints` accepts explicit
+tokens (contain digit) and NL phrases (no digit). Explicit tokens go direct
+to `frozen[]`. NL phrases (e.g. `"tetramer interfaces, protein-bRNA
+interface, protein-target interface"`) resolve to per-partner-chain contact
+residues via biopython on `--complex-cif` (4.5 Å heavy-atom cutoff) and are
+added to `frozen[]` — identity locked, but tracked as named per-face RMSD
+sets with cap `--interface-rmsd-cap` (default 1.5 Å) alongside the
+active-site cap `--refold-rmsd-cap` (§16b: 1.0 Å for IS621). `RefoldClient
+.refold_rmsd_multi` runs ONE ESMFold call per checkpoint and returns N
+RMSDs from a shared dca map; a checkpoint passes iff every set is under
+its cap.
+
+**8WT6 chain A interface geometry (verified on biotite in eptrans_ml,
+biopython 1.88 installed today).** 306 residues resolved of 328 entity
+(resid 4–321). Six populated faces resolved, three empty faces skipped:
+
+| face | phrase | n_contacts | partner |
+|---|---|---|---|
+| iface_A_B | tetramer interfaces | 30 | B |
+| iface_A_D | tetramer interfaces | 25 | D |
+| iface_A_bRNA_E | protein-bRNA interface | 64 | E |
+| iface_A_bRNA_F | protein-bRNA interface | 11 | F |
+| iface_A_target_G | protein-target interface | 27 | G |
+| iface_A_target_H | protein-target interface | 19 | H |
+| iface_A_C (SKIPPED) | tetramer interfaces | 0 | C (diagonal) |
+| iface_A_donor_I (SKIPPED) | protein-donor interface | 0 | I |
+| iface_A_donor_J (SKIPPED) | protein-donor interface | 0 | J |
+
+Union protected on chain A: **142 residues of 306** (46%). A:C and A:donor
+are correctly empty in the pre-strand-exchange 8WT6 complex.
+
+**Submitted (2026-08-19 21:39 PT).** Two campaigns via
+`scripts/slurm/11_generate_is621.sbatch` — thin launcher that hard-codes the
+IS621 chain-A sequence (306 aa extracted from 8WT6), the 8WT6.cif path,
+`--core-rmsd-cap 1.0` / `--interface-rmsd-cap 1.5`, mhk32 adapter, and
+mhk32 mean-pool heads. Delegates to the generic `11_generate_pipeline.sbatch`.
+
+| SLURM job | phenotype | head AUROC | head AUPRC | head pair-AUC | train pairs |
+|---|---|---|---|---|---|
+| 1178378 | thermophile | 0.9688 | 0.7899 | 0.9095 | 13,956 |
+| 1178379 | halophile | 0.9436 | 0.7554 | 0.7744 | 59,426 |
+
+Both `PD Priority` on `gpu` at submit. Each: gpu:1, 16 CPU, 96G, 08:00:00,
+3 designs × 24 Gibbs iters, MH t0=0.05→t1=0.005, coupling=both, seed 1466.
+Log path pattern: `/groups/cress/projects/jaymin/eptrans_scratch/logs/is621_gen_%j.log`.
+Jobdir pattern: `$SCRATCH/gen/is621_<timestamp>_<pheno>/`.
+Output artefacts per jobdir: `input.fasta`, `active_site_transfer.json`,
+`candidates_<PH>.json`, `folded_<PH>.json`, `mpnn.json`, `results.json`,
+per-phenotype `interfaces_<PH>.json` audit (residues per face), and
+`structures/wt.pdb` + design PDBs.
+
+**Env.** `biopython==1.88` added to `eptrans_ml` (only ligandmpnn had it
+before). Zero other dep changes; adapter transfer + refold loop untouched
+in unconstrained runs (`--additional-constraints` empty = byte-identical
+old behaviour).
