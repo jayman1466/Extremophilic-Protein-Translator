@@ -4565,3 +4565,46 @@ recover it.
 `directional_stratified_results.json` (f0a1eb31 / v55de8d47) — per-cluster
 valid/sig column counts, n_phyla_shared, ref sequences. Null: 2000 permutations,
 seed 1466, MINCOV=0.6, BH-FDR<0.05.
+
+## 2026-08-18 — Production mean-pool deployment heads trained (job 1178100)
+
+Closes the mhk32 selection chain: the λ-sweep (job 1176405) and attention-vs-mean
+ablation saved summaries only — `lam_sweep.py` did not persist head weights. This
+run trains and **saves** the deployable mean-pool head for each phenotype at its
+locked λ, so a deployed classifier exists on disk. Trainer
+`scripts/19_train_meanpool_production.py` is byte-identical in train logic to
+`lam_sweep.py` (loss.detach() sync only, no extra RNG draw), so every cell below
+reproduces the committed phase-4 λ-sweep to 4 decimals.
+
+**SLURM 1178100** · node-224-2t-8gpu-1 (gpu_h200) · elapsed 3h22m · seed 1466 ·
+scope=secreted · tier=H+M · pooling=mean · neg_per_pos=3.0 ·
+confidence weights high 1.0 / medium 0.5 / low 0.15 / none 1.0.
+
+Heads at `runs/mhk32/heads_meanpool/clf_<pheno>/` — each `head_best.pt` (5.25 MB,
+Linear(2560,512)→GELU→Dropout(0.1)→Linear(512,1)) + `metrics.json`. Roll-up of the
+full λ∈{0,0.5,1,2,4} grid: `heads_meanpool/meanpool_production_all.json`.
+
+| phenotype | locked λ | AUROC | AUPRC | pair-AUC | best epoch | train_n | pos_weight | train_pairs | base_rate |
+|---|---|---|---|---|---|---|---|---|---|
+| psychrophile | 2.0 | 0.8956 | 0.0826 | 0.6071 | 17 | 8,337,303 | 543.75 | 3,793 | 0.0035 |
+| thermophile | 1.0 | 0.9688 | 0.7899 | 0.9095 | 16 | 8,790,675 | 22.09 | 13,956 | 0.0548 |
+| hyperthermophile | 4.0 | 0.9990 | 0.9157 | 0.9590 | 23 | 8,320,850 | 975.44 | 235 | 0.0014 |
+| acidophile | 1.0 | 0.9832 | 0.7888 | 0.8071 | 9 | 8,506,619 | 64.54 | 4,575 | 0.0227 |
+| alkaliphile | 2.0 | 0.9769 | 0.6643 | 0.7518 | 9 | 8,401,465 | 155.71 | 6,377 | 0.0105 |
+| halophile | 0.5 | 0.9436 | 0.7554 | 0.7744 | 22 | 9,432,092 | 12.89 | 59,426 | 0.1182 |
+
+**Halophile tier note:** locked to H+M (not the earlier H+M+L). At λ=1 the all-vs-H+M
+gap is +0.0003 AUROC / +0.0023 AUPRC (within noise) and reverses under pair-AUC
+(H+M 0.7701 > all 0.7698, the headline ranking metric). H+M has a complete λ-sweep
+(best λ=0.5, pair-AUC 0.7744); all-tier was never swept. Uniform H+M across all six.
+
+**psychrophile** is retained but CLOSED at ~0.61 pair-AUC (AUPRC 0.083 at base rate
+0.0035; only 3,793 pairs — biological/data limit). Production deployment leads with
+halophile + hyperthermophile heads.
+
+Provenance JSON for the four model-selection decisions:
+`runs/mhk32/phase3_psy_2x2/psy_scope_tier_2x2.json` (scope),
+`runs/mhk32/phase3_pheno_1x2/phenotype_tier_1x2.json` (tier),
+`runs/mhk32/phase4_lam_sweep/lam_sweep_all.json` (λ),
+`runs/mhk32/phase5_attn/attn_heads_summary.json` (pooling: mean wins all 6).
+Full run map: `runs/mhk32/MANIFEST.md`.
