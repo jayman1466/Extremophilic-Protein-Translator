@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
-#SBATCH --time=08:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=/groups/cress/projects/jaymin/eptrans_scratch/logs/is621_genB_%j.log
 # H200 large-mem + expandable_segments (mirrors 11_generate_is621.sbatch).
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

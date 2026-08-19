@@ -432,7 +432,9 @@ def main():
     hidden = base.config.hidden_size
     head = torch.nn.Sequential(torch.nn.Linear(hidden, 512), torch.nn.GELU(),
                                torch.nn.Dropout(0.1), torch.nn.Linear(512, 1))
-    head.load_state_dict(torch.load(args.head, map_location=args.device))
+    _ckpt = torch.load(args.head, map_location=args.device)
+    _sd = _ckpt["state_dict"] if isinstance(_ckpt, dict) and "state_dict" in _ckpt else _ckpt
+    head.load_state_dict(_sd)
     head.eval().to(args.device)
 
     score_classifier, seq_loglik, coupling_preservation, wt_pairs = build_oracle(

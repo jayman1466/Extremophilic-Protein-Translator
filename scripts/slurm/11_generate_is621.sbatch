@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
-#SBATCH --time=08:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=/groups/cress/projects/jaymin/eptrans_scratch/logs/is621_gen_%j.log
 # Fragment-tolerant allocator: prior submissions on the shared gpu partition
 # landed on A5000s already holding 13.6 GB, so the ESM-2 3B .to(device) step

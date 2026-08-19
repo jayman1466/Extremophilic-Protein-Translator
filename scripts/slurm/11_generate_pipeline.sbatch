@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
-#SBATCH --time=04:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=/groups/cress/projects/jaymin/eptrans_scratch/logs/gen_%j.log
 #
 # End-to-end generation pipeline (design doc: docs/generation_pipeline.md).

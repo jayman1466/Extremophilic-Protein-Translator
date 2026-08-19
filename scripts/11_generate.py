@@ -542,7 +542,9 @@ def main():
     # cached head (matches 10_train_cached_probe: Linear(hidden,512)->GELU->Dropout->Linear(512,1))
     head = torch.nn.Sequential(torch.nn.Linear(hidden, 512), torch.nn.GELU(),
                                torch.nn.Dropout(0.1), torch.nn.Linear(512, 1))
-    head.load_state_dict(torch.load(args.head, map_location=args.device))
+    _ckpt = torch.load(args.head, map_location=args.device)
+    _sd = _ckpt["state_dict"] if isinstance(_ckpt, dict) and "state_dict" in _ckpt else _ckpt
+    head.load_state_dict(_sd)
     head.eval().to(args.device)
 
     mask_id = tok.mask_token_id
