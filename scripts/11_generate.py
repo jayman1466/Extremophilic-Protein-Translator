@@ -119,6 +119,32 @@ class RefoldClient:
                 return None
             time.sleep(self.poll)
 
+    def refold_rmsd_multi(self, seq, position_sets):
+        """One fold, N RMSDs. `position_sets`: {label: [1-based positions]}.
+
+        Returns {label: rmsd_or_None}. This is the interface-aware path: with
+        multiple protected sets we want ONE ESMFold call per checkpoint, not one
+        per set. On timeout/error all values are None (loop degrades to no-refold).
+        """
+        rid = uuid.uuid4().hex[:12]
+        tmp = self.req / f"{rid}.fasta.tmp"
+        tmp.write_text(seq)
+        tmp.rename(self.req / f"{rid}.fasta")
+        out = self.resp / f"{rid}.pdb"; err = self.resp / f"{rid}.err"
+        t0 = time.time()
+        while True:
+            if out.exists():
+                pdb = out.read_text(); out.unlink(missing_ok=True)
+                dca = _ca_coords(pdb)
+                return {label: _rmsd_over(self.wt_ca, dca, positions)
+                        for label, positions in position_sets.items()}
+            if err.exists():
+                err.unlink(missing_ok=True)
+                return {label: None for label in position_sets}
+            if time.time() - t0 > self.timeout:
+                return {label: None for label in position_sets}
+            time.sleep(self.poll)
+
 # ---- biophysical proxies (non-learnable anti-gaming layer, modeling_design.md S2) ----
 def biophysical_score(seq, phenotype):
     L = len(seq)
@@ -331,7 +357,39 @@ def main():
                     help="refold + RMSD-check every N Gibbs passes (0 disables)")
     ap.add_argument("--refold-rmsd-cap", type=float, default=2.0,
                     help="active-site CA-RMSD (A) above which a checkpoint is rejected -> "
-                         "roll back to last passing sequence and reduce mask_rate")
+                         "roll back to last passing sequence and reduce mask_rate. Applied "
+                         "to the ACTIVE-SITE set; per-interface caps are set via "
+                         "--interface-rmsd-cap.")
+    # ---- interface / additional constraints (2026-08-18 spec, §16b) ----
+    # For targets that participate in a complex (IS621/8WT6 tetramer + bRNA + DNA),
+    # active-site RMSD alone is insufficient -- the partner-binding faces must also
+    # be protected. --additional-constraints locks residue IDENTITIES (never masked)
+    # and, when partner geometry is available, --interface-rmsd-cap applies a tighter
+    # PER-INTERFACE RMSD budget so drift is attributable per-face.
+    ap.add_argument("--additional-constraints", default="",
+                    help="Extra residues to freeze. Two modes: "
+                         "EXPLICIT ('A:45,A:88-92,120' -> those 1-based positions locked); "
+                         "NATURAL-LANGUAGE ('tetramer interfaces, protein-bRNA interface, "
+                         "protein-donor interface, protein-target interface') -- requires "
+                         "--complex-cif and --design-chain, resolves to partner-chain "
+                         "contact residues by geometry. Both forms union into the frozen "
+                         "set and are excluded from masking.")
+    ap.add_argument("--complex-cif", default="",
+                    help="Reference mmCIF of the biological assembly (e.g. 8WT6.cif). "
+                         "Required for natural-language --additional-constraints.")
+    ap.add_argument("--design-chain", default="A",
+                    help="Which chain in --complex-cif is the design target.")
+    ap.add_argument("--interface-contact-cutoff", type=float, default=4.5,
+                    help="heavy-atom cutoff (A) for design-chain residues to count as an "
+                         "interface contact with a partner chain")
+    ap.add_argument("--interface-rmsd-cap", type=float, default=1.5,
+                    help="per-interface CA-RMSD cap (A) applied SEPARATELY to each "
+                         "resolved face. A violation triggers backtracking with the "
+                         "offending face reported. Set to 0 to disable per-face checks "
+                         "and rely on --refold-rmsd-cap only.")
+    ap.add_argument("--interfaces-json-out", default="",
+                    help="Optional path to dump resolved interfaces (positions + partner "
+                         "chains) for audit before the run starts.")
     ap.add_argument("--refold-backoff", type=float, default=0.5,
                     help="multiply mask_rate by this after a rollback (more conservative)")
     ap.add_argument("--refold-max-fails", type=int, default=3,
@@ -400,6 +458,74 @@ def main():
     frozen, active_1b, assigned, src_counts = detect_active_site(seq, cons, transferred=transferred)
     print(f"[11] active-site: {len(active_1b)} frozen residues (assigned={assigned}); "
           f"sources {src_counts}", flush=True)
+
+    # ---- --additional-constraints (§16b, 2026-08-18): interface residues ----
+    # Two-stage resolution: explicit tokens first (unconditional), then natural-language
+    # phrases via biopython on --complex-cif (partner-chain contact geometry). All
+    # identified residues are added to the frozen[] mask and, if partner geometry was
+    # available, are grouped into named per-interface sets for tracked RMSD.
+    from eptrans.interfaces import (
+        parse_explicit_constraints,
+        resolve_interfaces_from_complex,
+    )
+    interfaces: dict[str, dict] = {}
+    added_frozen: set[int] = set()
+    if args.additional_constraints:
+        raw = args.additional_constraints
+        # split into explicit-tokens and NL-phrases
+        explicit_toks: list[str] = []
+        nl_phrases: list[str] = []
+        for tok in raw.split(","):
+            t = tok.strip()
+            if not t:
+                continue
+            # heuristic: contains a digit -> explicit; else -> NL phrase
+            if any(ch.isdigit() for ch in t):
+                explicit_toks.append(t)
+            else:
+                nl_phrases.append(t)
+        # explicit positions
+        if explicit_toks:
+            pos = parse_explicit_constraints(",".join(explicit_toks), L)
+            for p in pos:
+                frozen[p - 1] = True
+                added_frozen.add(p)
+            print(f"[11] additional-constraints (explicit): {len(pos)} positions locked",
+                  flush=True)
+        # natural-language phrases -> per-interface sets from --complex-cif
+        if nl_phrases:
+            if not args.complex_cif:
+                raise SystemExit(
+                    "[11] --additional-constraints contains natural-language phrases "
+                    "but --complex-cif was not provided"
+                )
+            interfaces = resolve_interfaces_from_complex(
+                args.complex_cif, design_chain=args.design_chain, phrases=nl_phrases,
+                contact_cutoff=args.interface_contact_cutoff,
+            )
+            for label, info in interfaces.items():
+                for p in info["positions"]:
+                    if 1 <= p <= L:
+                        frozen[p - 1] = True
+                        added_frozen.add(p)
+                print(f"[11] interface {label}: {info['n_contacts']} residues "
+                      f"(partner {info['partner_chains']}, phrase {info['phrase']!r})",
+                      flush=True)
+        if args.interfaces_json_out:
+            Path(args.interfaces_json_out).write_text(json.dumps({
+                "design_chain": args.design_chain,
+                "explicit_positions": sorted(int(p) for p in added_frozen
+                                              if p not in {q for info in interfaces.values()
+                                                            for q in info["positions"]}),
+                "interfaces": interfaces,
+                "n_frozen_added": len(added_frozen),
+                "contact_cutoff_A": args.interface_contact_cutoff,
+            }, indent=2))
+            print(f"[11] wrote interfaces audit -> {args.interfaces_json_out}", flush=True)
+        print(f"[11] additional-constraints TOTAL: +{len(added_frozen)} frozen residues "
+              f"(active-site {len(active_1b)} + interface {len(added_frozen)} = "
+              f"{int(frozen.sum())} total frozen of {L})",
+              flush=True)
 
     # Model: EsmForMaskedLM (3B) + trained MLM LoRA adapter, for BOTH proposer logits
     # and encoder-pooled scoring (one model load; .esm gives encoder hidden states).
@@ -521,17 +647,34 @@ def main():
     # still ramps how AGGRESSIVELY each design approaches it via mask_rate/target_mut_frac.
     mut_budget = max(1, int(round(args.max_mut_frac * L)))
 
-    # optional in-loop refold client (structural rollback). RMSD is measured over the
-    # active-site residues (same set the final Stage-6b gate uses).
+    # optional in-loop refold client (structural rollback). Two guardrail modes:
+    #  * active-site only: one set ("active_site"), cap = --refold-rmsd-cap
+    #  * multi-set (interface-aware, §16b): {"active_site": ..., "iface_X_Y": ...},
+    #    active-site cap = --refold-rmsd-cap, interface caps = --interface-rmsd-cap.
+    # A checkpoint passes iff EVERY set is under its cap. Rollback attributes the
+    # violation to the offending face.
     refolder = None
-    if args.refold_workdir and args.wt_pdb and args.refold_every > 0 and active_1b:
-        refolder = RefoldClient(args.refold_workdir, args.wt_pdb)
-        if refolder.wait_ready():
-            print(f"[11] refold worker ready; checking every {args.refold_every} passes "
-                  f"(cap {args.refold_rmsd_cap} A over {len(active_1b)} AS residues)", flush=True)
-        else:
-            print("[11] WARN refold worker never became READY -> disabling in-loop refold", flush=True)
-            refolder = None
+    protected_sets: dict[str, list[int]] = {}
+    protected_caps: dict[str, float] = {}
+    if args.refold_workdir and args.wt_pdb and args.refold_every > 0:
+        if active_1b:
+            protected_sets["active_site"] = active_1b
+            protected_caps["active_site"] = args.refold_rmsd_cap
+        # add per-interface sets (only if the user asked for --interface-rmsd-cap > 0)
+        if interfaces and args.interface_rmsd_cap > 0:
+            for label, info in interfaces.items():
+                protected_sets[label] = info["positions"]
+                protected_caps[label] = args.interface_rmsd_cap
+        if protected_sets:
+            refolder = RefoldClient(args.refold_workdir, args.wt_pdb)
+            if refolder.wait_ready():
+                sets_str = ", ".join(f"{k}({len(v)}) cap={protected_caps[k]}A"
+                                     for k, v in protected_sets.items())
+                print(f"[11] refold worker ready; checking every {args.refold_every} passes "
+                      f"over {len(protected_sets)} protected sets: {sets_str}", flush=True)
+            else:
+                print("[11] WARN refold worker never became READY -> disabling in-loop refold", flush=True)
+                refolder = None
 
     designs = []
     for lvl in range(args.n_designs):
@@ -579,17 +722,22 @@ def main():
                     best, best_score = cur, cur_score
             trace.append((it + 1, cur_score))
             T *= t_decay
-            # ---- periodic structural checkpoint: refold + active-site RMSD ----
+            # ---- periodic structural checkpoint: refold + per-set RMSDs ----
+            # A checkpoint passes iff EVERY protected set is under its cap. On failure
+            # the offending face is named in the rollback log.
             if refolder is not None and (it + 1) % args.refold_every == 0 and cur != last_good:
-                rmsd = refolder.refold_rmsd(cur, active_1b)
+                rmsds = refolder.refold_rmsd_multi(cur, protected_sets)
                 n_refolds += 1
-                if rmsd is not None and rmsd <= args.refold_rmsd_cap:
+                # evaluate per-set pass/fail
+                fails = []
+                for label, r in rmsds.items():
+                    cap = protected_caps[label]
+                    if r is None or r > cap:
+                        fails.append((label, r, cap))
+                if not fails:
                     last_good, last_good_score, consec_fails = cur, cur_score, 0
                     consec_passes += 1
                     msg = ""
-                    # Recover step size after sustained structural success, capped at
-                    # the level's scheduled value so recovery can never make a design
-                    # more aggressive than its aggressiveness level allows.
                     if (args.refold_recover > 1.0 and mask_rate < mask_rate0
                             and consec_passes >= args.refold_recover_after):
                         new_mr = min(mask_rate0, mask_rate * args.refold_recover)
@@ -598,17 +746,21 @@ def main():
                             mask_rate = new_mr
                             n_recover += 1
                         consec_passes = 0
+                    rmsd_str = ", ".join(f"{k}={r:.2f}" for k, r in rmsds.items())
                     print(f"[11]   {args.phenotype[:4]}_{lvl+1} pass {it+1}: refold OK "
-                          f"rmsd={rmsd:.2f} A (checkpoint){msg}", flush=True)
+                          f"[{rmsd_str}] (checkpoint){msg}", flush=True)
                 else:
-                    # roll back to the last passing sequence, take smaller steps next
                     consec_fails += 1; n_rollbacks += 1
                     cur, cur_score = last_good, last_good_score
                     consec_passes = 0
                     mask_rate = max(0.01, mask_rate * args.refold_backoff)
+                    fail_str = "; ".join(
+                        f"{lbl}={('None' if r is None else f'{r:.2f}')}>{cap}"
+                        for lbl, r, cap in fails
+                    )
                     print(f"[11]   {args.phenotype[:4]}_{lvl+1} pass {it+1}: refold FAIL "
-                          f"rmsd={rmsd} > {args.refold_rmsd_cap} -> rollback, "
-                          f"mask_rate->{mask_rate:.3f} (fail {consec_fails})", flush=True)
+                          f"[{fail_str}] -> rollback, mask_rate->{mask_rate:.3f} "
+                          f"(fail {consec_fails})", flush=True)
                     if consec_fails >= args.refold_max_fails:
                         print(f"[11]   {args.phenotype[:4]}_{lvl+1}: {consec_fails} consecutive "
                               f"refold fails -> stop, keep last_good", flush=True)
@@ -630,15 +782,22 @@ def main():
             cur, cur_score = best, best_score
 
         if refolder is not None and cur != last_good:
-            final_rmsd = refolder.refold_rmsd(cur, active_1b)
+            final_rmsds = refolder.refold_rmsd_multi(cur, protected_sets)
             n_refolds += 1
-            if final_rmsd is not None and final_rmsd <= args.refold_rmsd_cap:
+            fails = [(k, r, protected_caps[k]) for k, r in final_rmsds.items()
+                     if r is None or r > protected_caps[k]]
+            if not fails:
                 last_good, last_good_score = cur, cur_score
-                print(f"[11]   {args.phenotype[:4]}_{lvl+1} final refold OK "
-                      f"rmsd={final_rmsd:.2f} A", flush=True)
+                rmsd_str = ", ".join(f"{k}={r:.2f}" for k, r in final_rmsds.items())
+                print(f"[11]   {args.phenotype[:4]}_{lvl+1} final refold OK [{rmsd_str}]",
+                      flush=True)
             else:
+                fail_str = "; ".join(
+                    f"{lbl}={('None' if r is None else f'{r:.2f}')}>{cap}"
+                    for lbl, r, cap in fails
+                )
                 print(f"[11]   {args.phenotype[:4]}_{lvl+1} final refold FAIL "
-                      f"rmsd={final_rmsd} -> keep last_good", flush=True)
+                      f"[{fail_str}] -> keep last_good", flush=True)
         if refolder is not None:
             cur, cur_score = last_good, last_good_score
         muts = [dict(pos=i + 1, wt=a, mut=b) for i, (a, b) in enumerate(zip(seq, cur)) if a != b]
@@ -661,7 +820,10 @@ def main():
                conservation=[round(float(c), 3) for c in cons],
                active_site=active_1b, active_site_assigned=assigned,
                active_site_sources=src_counts, active_site_transfer=transfer_meta,
-               n_msa_hits=int(n_hits), designs=designs)
+               n_msa_hits=int(n_hits),
+               interfaces=interfaces,
+               interface_rmsd_cap=float(args.interface_rmsd_cap),
+               designs=designs)
     Path(args.out).write_text(json.dumps(out, indent=2))
     print(f"[11] wrote {args.out} ({len(designs)} designs)", flush=True)
 
