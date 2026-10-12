@@ -270,6 +270,17 @@ def build_oracle(model, tok, head, device: str, wt_seq: str):
     except Exception as e:
         print(f"[11B-oracle] WARN wt contact map failed ({type(e).__name__}: {e}); "
               f"coupling term set to 1.0 for every design", flush=True)
+        if os.environ.get("GEN_B_REQUIRE_COUPLING", "1") == "1":
+            # Silently neutralising the coupling factor makes score_product a
+            # two-term product while the logs and the output JSON still advertise
+            # three. That happened across every production run before 2026-10-12.
+            # Fail loudly by default; set GEN_B_REQUIRE_COUPLING=0 to opt out.
+            raise RuntimeError(
+                "WT contact map unavailable, so the coupling factor would be a "
+                "constant 1.0 and contribute nothing to ranking. Refusing to run "
+                "with a silently-degraded objective. Set GEN_B_REQUIRE_COUPLING=0 "
+                "to proceed with an explicitly two-term score."
+            ) from e
 
     @torch.no_grad()
     def coupling_preservation(s: str) -> float:

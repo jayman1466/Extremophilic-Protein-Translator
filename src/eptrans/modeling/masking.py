@@ -174,7 +174,16 @@ def contact_pairs_from_map(contacts: np.ndarray, threshold: float = 0.5,
     pairs. Returned indices are in the SAME coordinate system as ``contacts``
     (residue coords); the caller offsets for special tokens.
     """
+    if contacts is None:
+        raise ValueError(
+            "contact_pairs_from_map: contact map is None. The caller must handle a "
+            "contact-incapable model explicitly rather than passing None through — "
+            "silently coercing None here produced the 'coupling=1.0 for every design' "
+            "regression (IndexError via np.asarray(None).shape[0])."
+        )
     c = np.asarray(contacts, dtype=float)
+    if c.ndim != 2:
+        raise ValueError(f"contact_pairs_from_map: expected 2-D LxL map, got ndim={c.ndim}")
     L = c.shape[0]
     iu, ju = np.triu_indices(L, k=max(1, min_sep))
     probs = c[iu, ju]

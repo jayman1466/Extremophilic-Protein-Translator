@@ -145,22 +145,58 @@ def _predict_contacts(model, tokenizer, seq: str):
     exposing ``predict_contacts(tokens)`` returning an ``L x L`` map for the
     residue coordinates (special tokens already stripped). Returns a numpy
     array, or None if the model can't produce contacts.
+
+    PEFT WRAPPER UNWRAPPING (bug fix, 2026-10-12)
+    ---------------------------------------------
+    Generation loads the MLM checkpoint through ``peft.PeftModel.from_pretrained``.
+    ``PeftModel`` proxies ``__getattr__`` to the wrapped module but does NOT expose
+    ``predict_contacts`` (it lives on ``EsmPreTrainedModel``, two levels down past
+    ``PeftModel.base_model`` -> ``LoraModel.model``), so the call raised
+    ``AttributeError``. The inner ``except TypeError`` did not catch it, the outer
+    bare ``except Exception`` swallowed it, and this function returned ``None`` for
+    EVERY sequence. ``contact_pairs_from_map(None)`` then did
+    ``np.asarray(None).shape[0]`` -> ``IndexError: tuple index out of range``, which
+    the caller's own broad handler turned into the "coupling term set to 1.0 for
+    every design" fallback. Net effect: the coupling factor was silently constant
+    across all production runs and contributed nothing to ranking.
+
+    We now walk down to the first object that actually defines
+    ``predict_contacts`` before calling it, and we no longer swallow
+    ``AttributeError`` — a model that genuinely cannot produce contacts returns
+    ``None``, but a wiring bug surfaces instead of being masked.
     """
     import numpy as np
     import torch
-    try:
-        enc = tokenizer(seq, return_tensors="pt", truncation=True)
-        with torch.no_grad():
-            # HF EsmForMaskedLM.predict_contacts requires attention_mask; fair-esm
-            # takes tokens only — try the two-arg form first, fall back to one.
-            try:
-                out = model.predict_contacts(enc["input_ids"], enc["attention_mask"])
-            except TypeError:
-                out = model.predict_contacts(enc["input_ids"])
-        arr = out[0] if hasattr(out, "__getitem__") else out
-        return np.asarray(arr.detach().cpu() if hasattr(arr, "detach") else arr, dtype=float)
-    except Exception:
+
+    # Unwrap PeftModel / LoraModel / DataParallel layers to reach the ESM module
+    # that owns the contact head.
+    target = model
+    for _ in range(4):
+        if hasattr(type(target), "predict_contacts"):
+            break
+        nxt = getattr(target, "base_model", None) or getattr(target, "module", None)
+        if nxt is None or nxt is target:
+            break
+        target = nxt
+    if not hasattr(type(target), "predict_contacts"):
+        # Genuinely contact-incapable model: this is the only legitimate None.
         return None
+
+    enc = tokenizer(seq, return_tensors="pt", truncation=True)
+    dev = next(target.parameters()).device
+    enc = {k: v.to(dev) for k, v in enc.items()}
+    with torch.no_grad():
+        # HF EsmForMaskedLM.predict_contacts requires attention_mask; fair-esm
+        # takes tokens only — try the two-arg form first, fall back to one.
+        try:
+            out = target.predict_contacts(enc["input_ids"], enc["attention_mask"])
+        except TypeError:
+            out = target.predict_contacts(enc["input_ids"])
+    arr = out[0] if hasattr(out, "__getitem__") else out
+    cm = np.asarray(arr.detach().cpu() if hasattr(arr, "detach") else arr, dtype=float)
+    if cm.ndim != 2 or cm.shape[0] != cm.shape[1]:
+        raise ValueError(f"_predict_contacts: expected square LxL map, got {cm.shape}")
+    return cm
 
 
 def build_mlm_dataset(labeled_with_seq: pd.DataFrame, tokenizer, split: str = "train",
