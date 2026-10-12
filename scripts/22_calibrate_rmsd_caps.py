@@ -92,7 +92,14 @@ def main() -> None:
     ap.add_argument("--refold-workdir", required=True)
     ap.add_argument("--interfaces-json", default="",
                     help="interfaces JSON emitted by 11_generate_pipelineB.py")
-    ap.add_argument("--msa-a3m", default="")
+    ap.add_argument("--uniref-db", default="",
+                    help="mmseqs UniRef50 db; omit to block on protected sets "
+                         "only (conservation array left uniform)")
+    ap.add_argument("--workdir", default=".",
+                    help="MSA scratch; reuses hits.m8 if the generator already ran")
+    ap.add_argument("--transfer-json", default="",
+                    help="11a_annotate.py transfer JSON, so the calibrated caps "
+                         "cover the same active site the generator protects")
     ap.add_argument("--conservation-freeze", type=float, default=0.90)
     ap.add_argument("--counts", default="5,10,20,40,60,80,100")
     ap.add_argument("--reps", type=int, default=24)
@@ -108,7 +115,18 @@ def main() -> None:
                   if not l.startswith(">"))
     L = len(seq)
 
-    active = detect_active_site(args.wt_pdb) or []
+    # NOTE: an earlier revision called detect_active_site(args.wt_pdb), which is
+    # neither its signature nor its return type (it takes the sequence plus a
+    # conservation array and returns a 4-tuple) -- that call raised on entry, so
+    # this script had never completed a run.  Conservation must therefore be
+    # computed before the active site, not after it.
+    cons = (run_msa_conservation(seq, args.uniref_db, args.workdir)[0]
+            if args.uniref_db else np.zeros(L, dtype=float))
+    transferred = []
+    if args.transfer_json and Path(args.transfer_json).exists():
+        transferred = json.loads(Path(args.transfer_json).read_text()).get("transferred", [])
+    _frozen_act, active, _assigned, _src = detect_active_site(
+        seq, cons, freeze_thresh=args.conservation_freeze, transferred=transferred)
     protected_sets: dict[str, list[int]] = {}
     if active:
         protected_sets["active_site"] = sorted(active)
@@ -118,8 +136,6 @@ def main() -> None:
     if not protected_sets:
         raise SystemExit("[22] no protected sets -- nothing to calibrate")
 
-    cons = (run_msa_conservation(args.msa_a3m, L) if args.msa_a3m
-            else np.zeros(L, dtype=float))
     blocked = {p - 1 for ps in protected_sets.values() for p in ps}
     blocked |= {i for i in range(L) if cons[i] >= args.conservation_freeze}
     allowed = [i for i in range(L) if i not in blocked]

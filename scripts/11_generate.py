@@ -234,6 +234,38 @@ def henikoff_weights(msa_rows, L):
     return weights
 
 
+def msa_rows_from_m8(seq, m8_path, max_hits=2000):
+    """Implied MSA on the query coordinate frame, from an mmseqs m8 file.
+
+    Each row is ``{query_column_0based: target_residue}``; columns the hit does
+    not cover are simply absent, so a consumer must decide for itself whether a
+    missing column counts as a gap.  Row 0 is the query itself, so every column
+    has at least one member.
+
+    Factored out of ``run_msa_conservation`` so a second consumer -- the
+    coevolution mask in Pipeline B -- can rebuild the alignment from the
+    persisted ``hits.m8`` without paying for another mmseqs search.
+    """
+    L = len(seq)
+    rows = [{i: seq[i] for i in range(L)}]
+    for line in Path(m8_path).read_text().splitlines()[:max_hits]:
+        p = line.split("\t")
+        if len(p) < 7:
+            continue
+        _, _, _pid, qstart, _qend, qaln, taln = p[:7]
+        row = {}
+        qpos = int(qstart) - 1                             # 0-based query col
+        for qc, tc in zip(qaln, taln):
+            if qc == "-":
+                continue                                   # insertion vs query: no column
+            if 0 <= qpos < L and tc != "-":
+                row[qpos] = tc
+            qpos += 1
+        if row:
+            rows.append(row)
+    return rows
+
+
 def run_msa_conservation(seq, uniref_db, workdir, min_hits=25, max_hits=2000):
     """mmseqs easy-search -> per-query-column conservation in [0,1].
 
@@ -266,26 +298,7 @@ def run_msa_conservation(seq, uniref_db, workdir, min_hits=25, max_hits=2000):
               flush=True)
         return np.zeros(L, dtype=float), 0
 
-    # parse pairwise alignments -> implied MSA rows on the query coordinate frame.
-    # Row 0 is the query itself (always fully present) so every column has >=1 member.
-    query_row = {i: seq[i] for i in range(L)}
-    msa_rows = [query_row]
-    for line in m8.read_text().splitlines()[:max_hits]:
-        p = line.split("\t")
-        if len(p) < 7:
-            continue
-        _, _, _pid, qstart, _qend, qaln, taln = p[:7]
-        row = {}
-        qpos = int(qstart) - 1                             # 0-based query col
-        for qc, tc in zip(qaln, taln):
-            if qc == "-":
-                continue                                   # insertion vs query: no column
-            if 0 <= qpos < L and tc != "-":
-                row[qpos] = tc
-            qpos += 1
-        if row:
-            msa_rows.append(row)
-
+    msa_rows = msa_rows_from_m8(seq, m8, max_hits)
     n_hits = len(msa_rows) - 1                              # exclude the query row
     if n_hits < min_hits:
         print(f"[11] only {n_hits} MSA hits (<{min_hits}); uniform-conservation fallback",

@@ -12,7 +12,9 @@ Contrast with Pipeline A (scripts/11_generate.py):
          Tier 1 (hard gates, any fail => reject):
            - active-site CA-RMSD <= --core-rmsd-cap
            - per-interface CA-RMSD <= --interface-rmsd-cap
-           - no mutation at conservation c_i > --conservation-freeze
+           - no mutation at conservation c_i > --conservation-freeze, UNLESS that
+             position was opened by --coupling-mask coevolution, in which case the
+             partner that justified opening it must mutate too (half-mutation gate)
            - refolded pLDDT >= --min-plddt (via 11e worker or on-demand ESMFold)
          Tier 2 (soft product for RANKING survivors):
            score = p_classifier * seqLL_ratio * p_coupling
@@ -69,10 +71,89 @@ _rmsd_over = _gen_mod._rmsd_over
 RefoldClient = _gen_mod.RefoldClient
 biophysical_score = _gen_mod.biophysical_score
 run_msa_conservation = _gen_mod.run_msa_conservation
+msa_rows_from_m8 = _gen_mod.msa_rows_from_m8
+henikoff_weights = _gen_mod.henikoff_weights
 detect_active_site = _gen_mod.detect_active_site
 
 
 AA20 = list("ACDEFGHIKLMNPQRSTVWY")
+_MI_ALPHABET = AA20 + ["-"]                 # gap is a 21st symbol, as in DCA
+_MI_IDX = {a: i for i, a in enumerate(_MI_ALPHABET)}
+
+
+def coevolution_matrix(msa_rows, weights, L, pseudocount=0.0, min_pair_cov=0.5):
+    """APC-corrected mutual information between every pair of query columns.
+
+    Returns ``(S, meta)`` where ``S`` is an (L, L) symmetric float array with a
+    zeroed diagonal, and ``meta`` carries the effective depth and the number of
+    column pairs that failed the coverage floor.
+
+    Why MI-APC and not mean-field DCA: DCA needs to invert a (L*20)^2 covariance
+    matrix and is only well conditioned when the effective alignment depth is
+    comfortably above the chain length.  At the depth this pipeline actually gets
+    from a UniRef50 search of a single enzyme (order 10^3 effective sequences for
+    L~300) the inverse is dominated by sampling noise, while MI with average
+    product correction is well behaved and is what the depth supports.  APC
+    subtracts the per-column background that makes conserved-but-uncoupled and
+    highly variable columns score high for reasons unrelated to pairing.
+
+    ``pseudocount`` defaults to 0 (empirical frequencies, as in Dunn's MIp) and
+    should stay there.  A flat additive pseudocount on the joint table does not
+    preserve independence, so it manufactures MI in proportion to how skewed the
+    two columns are -- and conserved columns are the most skewed ones in the
+    alignment, which is precisely the set this mask is deciding about.  Measured
+    on a synthetic alignment with a perfectly conserved, perfectly uncoupled
+    column: pseudocount 0.5 scores it 0.093 and opens it at the 99th percentile;
+    pseudocount 0 scores it 0.0000, which is its true value.
+
+    ``min_pair_cov`` guards the ragged-coverage problem specific to rebuilding an
+    MSA from *local* pairwise alignments: a hit that covers column i but not j
+    carries no information about the pair, and a pair covered by only a handful
+    of sequences will produce a large but meaningless MI.  Pairs whose jointly
+    covering weight falls below this fraction of total weight score 0.
+    """
+    q = len(_MI_ALPHABET)
+    N = len(msa_rows)
+    w = np.asarray(weights, dtype=np.float64)
+    # dense symbol matrix; absent columns -> gap, which is the honest encoding of
+    # "this homolog does not have this position"
+    X = np.full((N, L), _MI_IDX["-"], dtype=np.int8)
+    for n, row in enumerate(msa_rows):
+        for i, r in row.items():
+            X[n, i] = _MI_IDX.get(r, _MI_IDX["-"])
+    cov = (X != _MI_IDX["-"])                                   # (N, L) coverage
+    # one-hot (N, L*q) so all pairwise joint counts come from one BLAS matmul
+    OH = np.zeros((N, L * q), dtype=np.float64)
+    OH[np.arange(N)[:, None], np.arange(L)[None, :] * q + X] = 1.0
+    F = OH.T @ (w[:, None] * OH)                                # (L*q, L*q)
+    pair_w = (cov.astype(np.float64) * w[:, None]).T @ cov.astype(np.float64)
+    wtot = w.sum()
+    cov_ok = pair_w >= (min_pair_cov * wtot)
+
+    S = np.zeros((L, L), dtype=np.float64)
+    Fr = F.reshape(L, q, L, q)
+    for i in range(L):
+        Fi = Fr[i]                                              # (q, L, q)
+        for j in range(i + 1, L):
+            if not cov_ok[i, j]:
+                continue
+            fij = Fi[:, j, :] + pseudocount / q                 # (q, q)
+            fij /= fij.sum()
+            fi = fij.sum(axis=1)
+            fj = fij.sum(axis=0)
+            nz = fij > 0
+            mi = float((fij[nz] * np.log(fij[nz] / (fi[:, None] * fj[None, :])[nz])).sum())
+            S[i, j] = S[j, i] = mi
+    # average product correction
+    off = ~np.eye(L, dtype=bool)
+    col_mean = (S * off).sum(axis=1) / max(L - 1, 1)
+    grand = float((S * off).sum() / max(L * (L - 1), 1))
+    if grand > 0:
+        S = S - np.outer(col_mean, col_mean) / grand
+    np.fill_diagonal(S, 0.0)
+    return S, {"n_seqs": int(N), "eff_seqs": float(wtot),
+               "n_pairs_below_coverage": int((~cov_ok & np.triu(off, 1)).sum()),
+               "min_pair_cov": float(min_pair_cov)}
 
 
 def contact_graph_from_pdb(pdb_text, chain="A", cutoff=8.0, min_sep=6,
@@ -478,13 +559,30 @@ def main():
 
     # ---- Tier 1 gates ----
     ap.add_argument("--conservation-freeze", type=float, default=0.90)
-    ap.add_argument("--coupling-mask", choices=["off", "closure", "comutate"],
-                    default="closure",
+    ap.add_argument("--coupling-mask", choices=["off", "contact", "coevolution"],
+                    default="coevolution",
                     help="off = blanket freeze of every conserved position (legacy); "
-                         "closure = conserved positions that have a structural partner "
-                         "stay designable and their partners are opened too; "
-                         "comutate = closure, plus Tier 1a rejects a design that moved "
-                         "one member of a conserved contact pair and left the other")
+                         "coevolution = a conserved position is opened only if it "
+                         "coevolves with a specific partner, and Tier 1a then "
+                         "rejects any design that moves it without that partner; "
+                         "contact = legacy structural variant (conserved + in a WT "
+                         "contact), retained for ablation -- measured as close to a "
+                         "blanket unfreeze on a globular domain")
+    ap.add_argument("--coevolution-percentile", type=float, default=99.0,
+                    help="a conserved position is opened if it has a partner whose "
+                         "MI-APC score is at or above this percentile of all "
+                         "sequence-separated column pairs")
+    ap.add_argument("--coevolution-min-sep", type=int, default=6,
+                    help="minimum |i-j| for a coevolving pair; matches "
+                         "modeling.contact_min_sep and removes the local-backbone "
+                         "band that dominates raw MI")
+    ap.add_argument("--coevolution-max-open", type=int, default=20,
+                    help="cap on conserved positions coevolution may open, "
+                         "strongest-scoring first; -1 disables the cap")
+    ap.add_argument("--coevolution-min-cov", type=float, default=0.5,
+                    help="a column pair is scored only if homologs covering BOTH "
+                         "columns carry at least this fraction of total sequence "
+                         "weight; guards MI inflation from ragged local alignments")
     ap.add_argument("--contact-cutoff", type=float, default=8.0,
                     help="Cbeta-Cbeta distance defining a WT contact, in angstrom")
     ap.add_argument("--contact-plddt-min", type=float, default=70.0,
@@ -605,16 +703,35 @@ def main():
     #   conserved, no structural partner  -> frozen.  A lone conserved residue has
     #       nothing to compensate it, so any substitution there is unpaired by
     #       construction and the old reasoning still holds.
-    #   conserved, in a WT Cbeta-Cbeta contact -> designable, and its partners are
-    #       opened too (contact closure), so LigandMPNN resamples the pair jointly
-    #       instead of being handed one half pinned at wild type.
+    #   conserved, carrying a coevolution signature -> designable, paired with the
+    #       partner(s) that earned it the opening, so LigandMPNN may resample it
+    #       but the Tier-1a gate rejects any design that moves it alone.
     #
-    # Active-site and interface freezes are hard and always win over closure.
-    hard_frozen = frozen.copy()
-    cons_hi = {i for i in range(L) if cons[i] >= args.conservation_freeze}
+    # Earlier revisions used a structural criterion (conserved + in a WT contact).
+    # That was measured on 8WT6 and rejected: at an 8 A Cbeta cutoff essentially
+    # every residue in a globular domain has a long-range contact, so the rule
+    # degenerated to a blanket unfreeze.  Being in contact is not evidence of
+    # compensation; coevolving with a specific partner is.  The structural route
+    # survives behind --coupling-mask contact for ablation only.
+    #
+    # Active-site and interface freezes are hard and always win over opening.
+    #
+    # hard_frozen must exclude the conservation contribution, or "opening" is a
+    # no-op: detect_active_site already unions conserved columns into frozen[],
+    # so a position flagged as coupled would stay pinned at wild type and the
+    # mask would silently do nothing.  Re-deriving the structural set with the
+    # conservation source disabled (freeze_thresh > 1 can never fire) is the
+    # least invasive way to separate the two, and leaves the reported
+    # active-site list and source counts untouched.
+    _struct_frozen, _, _, _ = detect_active_site(
+        seq, cons, freeze_thresh=1.01, transferred=transferred)
+    _cons_mask = np.asarray(cons) >= args.conservation_freeze
+    hard_frozen = (frozen & ~_cons_mask) | _struct_frozen
+    cons_hi = {i for i in range(L) if _cons_mask[i]}
     comutate_with: dict[int, set[int]] = {}
     contact_g = {}
-    if args.coupling_mask != "off":
+    coev_meta = {}
+    if args.coupling_mask == "contact":
         _pred = wt_struct_prov["source"] == "predicted"
         _pdb_txt = Path(args.wt_pdb).read_text()
         _pl = _plddt_from_pdb(_pdb_txt, args.design_chain) if _pred else None
@@ -630,15 +747,60 @@ def main():
             partners = {p - 1 for p in contact_g.get(i + 1, ()) if 0 <= p - 1 < L}
             if partners:
                 comutate_with[i] = partners
+    elif args.coupling_mask == "coevolution" and cons_hi:
+        _m8 = workdir / "hits.m8"
+        if not _m8.exists():
+            print("[11B] WARNING: no hits.m8 from the conservation MSA; "
+                  "coevolution mask inert, falling back to blanket freeze", flush=True)
+        else:
+            _rows = msa_rows_from_m8(seq, _m8)
+            _w = henikoff_weights(_rows, L)
+            S, coev_meta = coevolution_matrix(_rows, _w, L,
+                                              min_pair_cov=args.coevolution_min_cov)
+            # Threshold on a percentile of the realised score distribution, not on
+            # an absolute MI: MI magnitudes do not transfer across alignments of
+            # different depth and composition, so an absolute cut would be loose
+            # on one target and vacuous on the next.
+            sep = np.abs(np.subtract.outer(np.arange(L), np.arange(L)))
+            elig = np.triu(sep >= args.coevolution_min_sep, 1)
+            vals = S[elig]
+            thr = float(np.percentile(vals, args.coevolution_percentile)) if vals.size else np.inf
+            cand = []
+            for i in sorted(cons_hi):
+                mask = (sep[i] >= args.coevolution_min_sep) & (S[i] >= thr)
+                partners = {int(j) for j in np.where(mask)[0]}
+                if partners:
+                    cand.append((float(S[i].max()), i, partners))
+            # Cap how many conserved positions coevolution may open, strongest
+            # first.  Without a cap a shallow or compositionally biased alignment
+            # can push the percentile cut low enough to open the whole conserved
+            # core at once.
+            cand.sort(reverse=True)
+            if args.coevolution_max_open >= 0:
+                cand = cand[:args.coevolution_max_open]
+            for _s, i, partners in cand:
+                comutate_with[i] = partners
+            coev_meta.update({"threshold": thr,
+                              "percentile": args.coevolution_percentile,
+                              "n_eligible_pairs": int(elig.sum()),
+                              "n_candidates": len(cand),
+                              "capped_at": args.coevolution_max_open})
+            print(f"[11B] coevolution: eff_seqs={coev_meta['eff_seqs']:.1f} "
+                  f"thr(p{args.coevolution_percentile})={thr:.4f} "
+                  f"pairs_below_coverage={coev_meta['n_pairs_below_coverage']}",
+                  flush=True)
+    # A hard position is never opened, however strong its coevolution signal.
+    comutate_with = {i: p for i, p in comutate_with.items() if not hard_frozen[i]}
+    frozen = hard_frozen.copy()
     for i in cons_hi:
         if i not in comutate_with:
             frozen[i] = True
-    for partners in comutate_with.values():
-        for p in partners:
-            if not hard_frozen[p]:
-                frozen[p] = False
+    # NOTE: partners are NOT dragged open.  Transitive opening is what made the
+    # contact variant collapse; a partner that is itself conserved stays frozen,
+    # and the gate then simply never admits a mutation at the opened position
+    # whose only partner cannot move.  That is the correct conservative outcome.
     print(f"[11B] coupling_mask={args.coupling_mask}: {len(cons_hi)} conserved "
-          f"positions, {len(comutate_with)} of them coupled (left designable), "
+          f"positions, {len(comutate_with)} of them opened as coupled, "
           f"{len(cons_hi) - len(comutate_with)} frozen as uncoupled", flush=True)
     fixed_positions_1b = sorted({int(i) + 1 for i in np.where(frozen)[0]})
     print(f"[11B] fixed_residues for MPNN: {len(fixed_positions_1b)}/{L} positions "
@@ -805,12 +967,14 @@ def main():
                 r_rejected.append({"round": r, "k": k, "reason": "conservation",
                                    "positions": bad_cons[:10]})
                 continue
-            if args.coupling_mask == "comutate":
-                # A conserved residue in a contact may move, but not alone: at least
-                # one of its structural partners must move with it.  This is the
-                # half-mutation guard -- breaking one side of a salt bridge and
-                # leaving the other is the failure mode the blanket freeze used to
-                # prevent by forbidding the move entirely.
+            if comutate_with:
+                # An opened conserved residue may move, but not alone: at least one
+                # of the partners that earned it the opening must move with it.
+                # This is the half-mutation guard -- breaking one side of a salt
+                # bridge and leaving the other is the failure mode the blanket
+                # freeze used to prevent by forbidding the move entirely.  It is
+                # what makes opening safe, so it is enforced whenever anything was
+                # opened, not gated behind a separate mode.
                 half = [i + 1 for i in muts
                         if i in comutate_with and not (comutate_with[i] & muts)]
                 if half:
@@ -930,6 +1094,10 @@ def main():
             "contact_cutoff_A": float(args.contact_cutoff),
             "source": wt_struct_prov["source"],
         },
+        coevolution=coev_meta,
+        conserved_opened={int(i) + 1: sorted(int(p) + 1 for p in ps)
+                          for i, ps in comutate_with.items()},
+        n_conserved=len(cons_hi),
         wt_contact_pairs=len(wt_pairs),
         designs=designs,
     )
