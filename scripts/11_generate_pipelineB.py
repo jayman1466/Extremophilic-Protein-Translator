@@ -74,6 +74,40 @@ detect_active_site = _gen_mod.detect_active_site
 AA20 = list("ACDEFGHIKLMNPQRSTVWY")
 
 
+def wt_contact_graph(pdb_path, chain="A", cutoff=8.0, min_sep=6):
+    """Cbeta-Cbeta contact graph of the wild type, read from the crystal structure.
+
+    Deliberately *not* taken from the language model's contact head.  The wild
+    type here is 8WT6 chain A, whose structure is experimentally known, so a
+    predicted map would only add noise -- and it would re-couple this gate to
+    the contact head that silently returned ``None`` through the whole first
+    production run (see ``docs/ranker_qc_and_recalibration.md``).
+
+    Glycine has no Cbeta, so CA stands in for it.  ``min_sep`` drops
+    sequence-local contacts, which carry no coupling information; it matches
+    ``modeling.contact_min_sep`` in config.yaml.
+    """
+    coords = {}
+    for line in Path(pdb_path).read_text().splitlines():
+        if not line.startswith("ATOM") or len(line) < 54 or line[21] != chain:
+            continue
+        name, res = line[12:16].strip(), line[17:20].strip()
+        if name == ("CA" if res == "GLY" else "CB"):
+            coords[int(line[22:26])] = (float(line[30:38]), float(line[38:46]),
+                                        float(line[46:54]))
+    keys = sorted(coords)
+    if not keys:
+        return {}
+    X = np.asarray([coords[k] for k in keys], dtype=float)
+    d = np.linalg.norm(X[:, None, :] - X[None, :, :], axis=-1)
+    idx = np.arange(len(keys))
+    near = (d < cutoff) & (np.abs(idx[:, None] - idx[None, :]) >= min_sep)
+    g = {k: set() for k in keys}
+    for a, b in zip(*np.where(np.triu(near, 1))):
+        g[keys[a]].add(keys[b]); g[keys[b]].add(keys[a])
+    return {k: v for k, v in g.items() if v}
+
+
 # =====================================================================
 # LigandMPNN subprocess wrapper
 # =====================================================================
@@ -348,9 +382,27 @@ def main():
     ap.add_argument("--interface-rmsd-cap", type=float, default=1.5)
     ap.add_argument("--core-rmsd-cap", type=float, default=1.0)
     ap.add_argument("--interfaces-json-out", default="")
+    # Adaptive caps, clamped.  --*-rmsd-cap stays the floor used when no
+    # calibration table is supplied; --*-rmsd-ceiling is a hard clamp that the
+    # calibrated cap may never exceed, so a wide null distribution cannot widen
+    # the gate without bound.
+    ap.add_argument("--rmsd-cap-table", default="",
+                    help="JSON written by 22_calibrate_rmsd_caps.py; makes the cap a "
+                         "function of mutation count")
+    ap.add_argument("--core-rmsd-ceiling", type=float, default=1.5)
+    ap.add_argument("--interface-rmsd-ceiling", type=float, default=2.0)
 
     # ---- Tier 1 gates ----
     ap.add_argument("--conservation-freeze", type=float, default=0.90)
+    ap.add_argument("--coupling-mask", choices=["off", "closure", "comutate"],
+                    default="closure",
+                    help="off = blanket freeze of every conserved position (legacy); "
+                         "closure = conserved positions that have a structural partner "
+                         "stay designable and their partners are opened too; "
+                         "comutate = closure, plus Tier 1a rejects a design that moved "
+                         "one member of a conserved contact pair and left the other")
+    ap.add_argument("--contact-cutoff", type=float, default=8.0,
+                    help="Cbeta-Cbeta distance defining a WT contact, in angstrom")
     ap.add_argument("--min-plddt", type=float, default=0.0,
                     help="if the refold worker returns pLDDT, drop designs below this "
                          "(default 0 disables)")
@@ -444,11 +496,47 @@ def main():
                 "contact_cutoff_A": args.interface_contact_cutoff,
             }, indent=2))
 
-    # Also mark high-conservation positions as frozen (belt-and-suspenders: Tier-1
-    # will reject any design that mutated them anyway).
-    for i, c in enumerate(cons):
-        if c >= args.conservation_freeze:
+    # ---- Coupling-aware handling of conserved positions ------------------------
+    #
+    # A blanket freeze of every conserved position forbids exactly the move class
+    # that adaptation most often uses: *paired* substitutions.  Salt bridges,
+    # aromatic stacking pairs and engineered disulfides are two-residue features,
+    # and a coevolving pair is by definition one where the compensating double
+    # mutant is viable although either single mutant is not.  A per-position mask
+    # cannot express that, and freezing the pair also forecloses strengthening an
+    # existing contact (D->E on one side, K->R on the other).
+    #
+    # So conservation decides *how* a position may move, not whether:
+    #
+    #   conserved, no structural partner  -> frozen.  A lone conserved residue has
+    #       nothing to compensate it, so any substitution there is unpaired by
+    #       construction and the old reasoning still holds.
+    #   conserved, in a WT Cbeta-Cbeta contact -> designable, and its partners are
+    #       opened too (contact closure), so LigandMPNN resamples the pair jointly
+    #       instead of being handed one half pinned at wild type.
+    #
+    # Active-site and interface freezes are hard and always win over closure.
+    hard_frozen = frozen.copy()
+    cons_hi = {i for i in range(L) if cons[i] >= args.conservation_freeze}
+    comutate_with: dict[int, set[int]] = {}
+    contact_g = {}
+    if args.coupling_mask != "off" and Path(args.wt_pdb).exists():
+        contact_g = wt_contact_graph(args.wt_pdb, args.design_chain,
+                                     args.contact_cutoff)
+        for i in cons_hi:
+            partners = {p - 1 for p in contact_g.get(i + 1, ()) if 0 <= p - 1 < L}
+            if partners:
+                comutate_with[i] = partners
+    for i in cons_hi:
+        if i not in comutate_with:
             frozen[i] = True
+    for partners in comutate_with.values():
+        for p in partners:
+            if not hard_frozen[p]:
+                frozen[p] = False
+    print(f"[11B] coupling_mask={args.coupling_mask}: {len(cons_hi)} conserved "
+          f"positions, {len(comutate_with)} of them coupled (left designable), "
+          f"{len(cons_hi) - len(comutate_with)} frozen as uncoupled", flush=True)
     fixed_positions_1b = sorted({int(i) + 1 for i in np.where(frozen)[0]})
     print(f"[11B] fixed_residues for MPNN: {len(fixed_positions_1b)}/{L} positions "
           f"(active-site + interfaces + conservation>={args.conservation_freeze})",
@@ -493,6 +581,25 @@ def main():
     for label, info in interfaces.items():
         protected_sets[label] = info["positions"]
         protected_caps[label] = args.interface_rmsd_cap
+
+    # Adaptive, clamped caps.  The calibration table maps mutation count -> the
+    # upper quantile of RMSD observed for structurally *neutral* variants at that
+    # count, so the gate asks "is this further than a conservative variant of the
+    # same size would land?" rather than comparing against a round number.  The
+    # ceiling clamps it so a wide null can never open the gate indefinitely.
+    _cap_table = (json.loads(Path(args.rmsd_cap_table).read_text()).get("caps", {})
+                  if args.rmsd_cap_table else {})
+    _ceiling = {lbl: (args.core_rmsd_ceiling if lbl == "active_site"
+                      else args.interface_rmsd_ceiling) for lbl in protected_sets}
+
+    def cap_for(label: str, n_mut: int) -> float:
+        base = protected_caps[label]
+        tb = _cap_table.get("active_site" if label == "active_site" else "interface")
+        if tb:
+            ks = sorted(int(k) for k in tb)
+            kk = max([x for x in ks if x <= n_mut], default=ks[0])
+            base = float(tb[str(kk)])
+        return min(base, _ceiling[label])
 
     refolder = RefoldClient(args.refold_workdir, args.wt_pdb)
     if not refolder.wait_ready():
@@ -589,17 +696,30 @@ def main():
                 continue
             # ---- Tier 1a: conservation guard (also enforced by --fixed_residues, but
             # keep as double-check in case MPNN respects fixed_residues loosely).
-            bad_cons = [i + 1 for i in range(L)
-                        if cons[i] >= args.conservation_freeze and s[i] != seq[i]]
+            muts = {i for i in range(L) if s[i] != seq[i]}
+            bad_cons = [i + 1 for i in muts if i in cons_hi and i not in comutate_with]
             if bad_cons:
                 r_rejected.append({"round": r, "k": k, "reason": "conservation",
                                    "positions": bad_cons[:10]})
                 continue
-            # ---- Tier 1b: refold + per-set RMSDs
+            if args.coupling_mask == "comutate":
+                # A conserved residue in a contact may move, but not alone: at least
+                # one of its structural partners must move with it.  This is the
+                # half-mutation guard -- breaking one side of a salt bridge and
+                # leaving the other is the failure mode the blanket freeze used to
+                # prevent by forbidding the move entirely.
+                half = [i + 1 for i in muts
+                        if i in comutate_with and not (comutate_with[i] & muts)]
+                if half:
+                    r_rejected.append({"round": r, "k": k, "reason": "half_mutation",
+                                       "positions": half[:10]})
+                    continue
+            # ---- Tier 1b: refold + per-set RMSDs (caps adapt to mutation count)
+            caps_now = {lbl: cap_for(lbl, len(muts)) for lbl in protected_sets}
             rmsds = refolder.refold_rmsd_multi(s, protected_sets)
-            fails = [(lbl, r_v, protected_caps[lbl])
+            fails = [(lbl, r_v, caps_now[lbl])
                      for lbl, r_v in rmsds.items()
-                     if r_v is None or r_v > protected_caps[lbl]]
+                     if r_v is None or r_v > caps_now[lbl]]
             if fails:
                 r_rejected.append({"round": r, "k": k, "reason": "rmsd",
                                    "fails": [(lbl, (None if v is None else round(v,3)),
