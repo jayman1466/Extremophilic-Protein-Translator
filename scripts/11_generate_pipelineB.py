@@ -48,6 +48,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -74,27 +75,32 @@ detect_active_site = _gen_mod.detect_active_site
 AA20 = list("ACDEFGHIKLMNPQRSTVWY")
 
 
-def wt_contact_graph(pdb_path, chain="A", cutoff=8.0, min_sep=6):
-    """Cbeta-Cbeta contact graph of the wild type, read from the crystal structure.
+def contact_graph_from_pdb(pdb_text, chain="A", cutoff=8.0, min_sep=6,
+                           plddt=None, plddt_min=None):
+    """Cbeta-Cbeta contact graph from PDB text.
 
-    Deliberately *not* taken from the language model's contact head.  The wild
-    type here is 8WT6 chain A, whose structure is experimentally known, so a
-    predicted map would only add noise -- and it would re-couple this gate to
-    the contact head that silently returned ``None`` through the whole first
-    production run (see ``docs/ranker_qc_and_recalibration.md``).
-
-    Glycine has no Cbeta, so CA stands in for it.  ``min_sep`` drops
+    Glycine has no Cbeta, so CA stands in for it -- as it does for
+    backbone-only files such as the LigandMPNN scaffolds.  ``min_sep`` drops
     sequence-local contacts, which carry no coupling information; it matches
     ``modeling.contact_min_sep`` in config.yaml.
+
+    When ``plddt`` is supplied (a predicted model), a contact is dropped unless
+    *both* residues clear ``plddt_min``.  A conserved residue whose only
+    partners are low-confidence therefore ends up with no partner, and the
+    caller freezes it -- the conservative direction.
     """
-    coords = {}
-    for line in Path(pdb_path).read_text().splitlines():
+    cb, ca = {}, {}
+    for line in pdb_text.splitlines():
         if not line.startswith("ATOM") or len(line) < 54 or line[21] != chain:
             continue
-        name, res = line[12:16].strip(), line[17:20].strip()
-        if name == ("CA" if res == "GLY" else "CB"):
-            coords[int(line[22:26])] = (float(line[30:38]), float(line[38:46]),
-                                        float(line[46:54]))
+        name = line[12:16].strip()
+        if name not in ("CA", "CB"):
+            continue
+        xyz = (float(line[30:38]), float(line[38:46]), float(line[46:54]))
+        (cb if name == "CB" else ca)[int(line[22:26])] = xyz
+    # CB where it exists, CA otherwise -- covers glycine and backbone-only PDBs
+    # such as the LigandMPNN scaffolds, which carry no side-chain atoms at all.
+    coords = {**ca, **cb}
     keys = sorted(coords)
     if not keys:
         return {}
@@ -102,10 +108,85 @@ def wt_contact_graph(pdb_path, chain="A", cutoff=8.0, min_sep=6):
     d = np.linalg.norm(X[:, None, :] - X[None, :, :], axis=-1)
     idx = np.arange(len(keys))
     near = (d < cutoff) & (np.abs(idx[:, None] - idx[None, :]) >= min_sep)
+    if plddt is not None and plddt_min is not None:
+        ok = np.asarray([float(plddt.get(k, 0.0)) >= float(plddt_min) for k in keys])
+        near &= ok[:, None] & ok[None, :]
     g = {k: set() for k in keys}
     for a, b in zip(*np.where(np.triu(near, 1))):
         g[keys[a]].add(keys[b]); g[keys[b]].add(keys[a])
     return {k: v for k, v in g.items() if v}
+
+
+def _plddt_from_pdb(pdb_text, chain="A"):
+    """Per-residue pLDDT from the B-factor column of a predicted model."""
+    out = {}
+    for line in pdb_text.splitlines():
+        if line.startswith("ATOM") and len(line) >= 66 and line[21] == chain \
+                and line[12:16].strip() == "CA":
+            try:
+                out[int(line[22:26])] = float(line[60:66])
+            except ValueError:
+                pass
+    return out
+
+
+def ensure_wt_structure(seq, wt_pdb, refold_workdir, ready_timeout=1200.0,
+                        fold_timeout=900.0):
+    """Guarantee a wild-type structure file, folding one if none is supplied.
+
+    ``--wt-pdb`` is load-bearing in three places -- the LigandMPNN backbone,
+    the CA-RMSD reference for every Tier-1a refold, and the Cbeta contact
+    graph behind the coupling-aware conservation mask -- so an input enzyme
+    with no experimental structure cannot simply skip it.  Rather than
+    degrade each consumer separately (the old behaviour silently dropped the
+    coupling mask back to a blanket conservation freeze), fold the wild type
+    once up front through the same persistent ESMFold worker the in-loop gate
+    uses, and hand that single model to all three.
+
+    Done here, before ``RefoldClient`` is constructed, because the client
+    reads the WT structure in ``__init__`` to cache its CA coordinates.
+
+    Returns ``(path, provenance)``.  Provenance is persisted to results.json
+    so a campaign run on a predicted backbone is never mistaken for one run
+    on a crystal structure: every RMSD in it is measured against a model.
+    """
+    if wt_pdb and Path(wt_pdb).exists():
+        return str(wt_pdb), {"source": "experimental", "path": str(wt_pdb)}
+    wd = Path(refold_workdir)
+    req, resp = wd / "requests", wd / "responses"
+    t0 = time.time()
+    while not (wd / "READY").exists():
+        if time.time() - t0 > ready_timeout:
+            raise SystemExit("[11B] no WT structure supplied and the refold "
+                             "worker never became READY -- cannot bootstrap")
+        time.sleep(0.5)
+    print("[11B] no experimental WT structure -- folding the wild type once "
+          "for backbone + RMSD reference + contact map", flush=True)
+    rid = uuid.uuid4().hex[:12]
+    tmp = req / f"{rid}.fasta.tmp"
+    tmp.write_text(seq)
+    tmp.rename(req / f"{rid}.fasta")                 # atomic submit
+    out, err = resp / f"{rid}.pdb", resp / f"{rid}.err"
+    t0 = time.time()
+    while True:
+        if out.exists():
+            pdb_text = out.read_text()
+            out.unlink(missing_ok=True)
+            break
+        if err.exists():
+            err.unlink(missing_ok=True)
+            raise SystemExit("[11B] WT fold failed; cannot bootstrap a structure")
+        if time.time() - t0 > fold_timeout:
+            raise SystemExit("[11B] WT fold timed out; cannot bootstrap a structure")
+        time.sleep(0.5)
+    dest = wd / "wt_predicted.pdb"
+    dest.write_text(pdb_text)
+    pl = _plddt_from_pdb(pdb_text, chain="A")
+    mean_pl = float(np.mean(list(pl.values()))) if pl else 0.0
+    print(f"[11B] WT folded: {dest} (mean pLDDT {mean_pl:.1f})", flush=True)
+    return str(dest), {"source": "predicted", "model": "esmfold",
+                       "path": str(dest), "mean_plddt": round(mean_pl, 2),
+                       "n_residues": len(pl)}
 
 
 # =====================================================================
@@ -373,8 +454,11 @@ def main():
                     help="comma-separated MPNN temperatures cycled across rounds")
 
     # ---- interfaces / active site (same semantics as Pipeline A) ----
-    ap.add_argument("--wt-pdb", required=True,
-                    help="cached WT structure for MPNN backbone + Tier-1 refolds")
+    ap.add_argument("--wt-pdb", default="",
+                    help="cached WT structure for MPNN backbone + Tier-1 refolds "
+                         "+ coupling-mask contact graph. If omitted or missing, "
+                         "the WT is folded once with ESMFold and that model is "
+                         "used for all three (recorded in results.json)")
     ap.add_argument("--additional-constraints", default="")
     ap.add_argument("--complex-cif", default="")
     ap.add_argument("--design-chain", default="A")
@@ -403,6 +487,11 @@ def main():
                          "one member of a conserved contact pair and left the other")
     ap.add_argument("--contact-cutoff", type=float, default=8.0,
                     help="Cbeta-Cbeta distance defining a WT contact, in angstrom")
+    ap.add_argument("--contact-plddt-min", type=float, default=70.0,
+                    help="when the WT structure is predicted rather than "
+                         "experimental, ignore contacts unless both residues "
+                         "clear this pLDDT; their conserved positions then stay "
+                         "frozen")
     ap.add_argument("--min-plddt", type=float, default=0.0,
                     help="if the refold worker returns pLDDT, drop designs below this "
                          "(default 0 disables)")
@@ -442,6 +531,11 @@ def main():
     L = len(seq)
     rng = np.random.default_rng(args.seed)
     workdir = Path(args.workdir); workdir.mkdir(parents=True, exist_ok=True)
+
+    # Resolve the WT structure before anything consumes it: MPNN backbone,
+    # Tier-1a RMSD reference, and the coupling-mask contact graph all read it.
+    args.wt_pdb, wt_struct_prov = ensure_wt_structure(
+        seq, args.wt_pdb, args.refold_workdir)
 
     import torch
     torch.manual_seed(args.seed)
@@ -520,9 +614,18 @@ def main():
     cons_hi = {i for i in range(L) if cons[i] >= args.conservation_freeze}
     comutate_with: dict[int, set[int]] = {}
     contact_g = {}
-    if args.coupling_mask != "off" and Path(args.wt_pdb).exists():
-        contact_g = wt_contact_graph(args.wt_pdb, args.design_chain,
-                                     args.contact_cutoff)
+    if args.coupling_mask != "off":
+        _pred = wt_struct_prov["source"] == "predicted"
+        _pdb_txt = Path(args.wt_pdb).read_text()
+        _pl = _plddt_from_pdb(_pdb_txt, args.design_chain) if _pred else None
+        contact_g = contact_graph_from_pdb(
+            _pdb_txt, chain=args.design_chain, cutoff=args.contact_cutoff,
+            plddt=_pl, plddt_min=args.contact_plddt_min if _pred else None)
+        if not contact_g:
+            # No coupling information -> blanket conservation freeze, which is
+            # the conservative direction, but say so rather than degrade quietly.
+            print("[11B] WARNING: empty WT contact graph; coupling mask inert, "
+                  "falling back to blanket conservation freeze", flush=True)
         for i in cons_hi:
             partners = {p - 1 for p in contact_g.get(i + 1, ()) if 0 <= p - 1 < L}
             if partners:
@@ -820,6 +923,13 @@ def main():
         n_survivors_total=len(all_survivors),
         round_stats=round_stats,
         bias_aa=bias_vec,
+        wt_structure_provenance=wt_struct_prov,
+        coupling_mask=args.coupling_mask,
+        coupling_contact_graph={
+            "n_residues_with_contacts": len(contact_g),
+            "contact_cutoff_A": float(args.contact_cutoff),
+            "source": wt_struct_prov["source"],
+        },
         wt_contact_pairs=len(wt_pairs),
         designs=designs,
     )
