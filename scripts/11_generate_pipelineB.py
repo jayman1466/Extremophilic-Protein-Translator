@@ -813,7 +813,17 @@ def main():
     ckpt = ESM2_CHECKPOINTS.get(args.backbone_size, ESM2_CHECKPOINTS[DEFAULT_BACKBONE])
     tok = AutoTokenizer.from_pretrained(ckpt)
     print(f"[11B] loading {ckpt} + adapter ...", flush=True)
-    base = EsmForMaskedLM.from_pretrained(ckpt)
+    # attn_implementation="eager" is REQUIRED, not a preference. ESM's
+    # predict_contacts() stacks the per-layer attention maps; SDPA (the
+    # transformers>=4.36 default) returns no attention weights, so the stack is
+    # empty and the call dies with "stack expects a non-empty TensorList".
+    # Verified on biotite 2026-10-26 (job 0c6f2d93), torch 2.6.0+cu124:
+    #   sdpa  -> RuntimeError: stack expects a non-empty TensorList
+    #   eager -> 499x499 map, 291 pairs > 0.8, max 1.0
+    # This is the SECOND of two causes of the dead coupling term; the first (the
+    # PEFT wrapper not exposing predict_contacts) was fixed 2026-10-12 in
+    # eptrans.modeling.data._predict_contacts. Both are needed.
+    base = EsmForMaskedLM.from_pretrained(ckpt, attn_implementation="eager")
     from peft import PeftModel
     model = PeftModel.from_pretrained(base, args.mlm_adapter, adapter_name="mlm")
     model.set_adapter("mlm")

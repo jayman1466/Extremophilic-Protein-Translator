@@ -570,7 +570,10 @@ def main():
     ckpt = ESM2_CHECKPOINTS.get(args.backbone_size, ESM2_CHECKPOINTS[DEFAULT_BACKBONE])
     tok = AutoTokenizer.from_pretrained(ckpt)
     print(f"[11] loading {ckpt} + adapter ...", flush=True)
-    base = EsmForMaskedLM.from_pretrained(ckpt)
+    # See the comment at the matching load site in 11_generate_pipelineB.py:
+    # eager attention is required for ESM predict_contacts() (SDPA returns no
+    # attention weights). Verified biotite job 0c6f2d93, 2026-10-26.
+    base = EsmForMaskedLM.from_pretrained(ckpt, attn_implementation="eager")
     from peft import PeftModel
     model = PeftModel.from_pretrained(base, args.mlm_adapter, adapter_name="mlm")
     model.set_adapter("mlm")
