@@ -20,7 +20,7 @@ Contrast with Pipeline A (scripts/11_generate.py):
            score = p_classifier * seqLL_ratio * p_coupling
              p_classifier: sigmoid(head(mean-pool(esm(design))))  in [0,1]
              seqLL_ratio : exp(seqLL(design) - seqLL(WT))         in ~[0,1]
-             p_coupling  : frac of WT strong-contact pairs preserved  in [0,1]
+             p_coupling  : mean contact prob over WT strong pairs   in [0,1]
        All four sub-scores are emitted per design so ranking can be re-run
        offline with different weight schemes.
 
@@ -480,9 +480,19 @@ def build_oracle(model, tok, head, device: str, wt_seq: str):
 
     @torch.no_grad()
     def coupling_preservation(s: str) -> float:
-        """Fraction of WT strong-contact pairs whose predicted contact prob in
-        the design's contact map >= 0.5. Equal identity => 1.0. Missing map
-        (fallback) => 1.0 (neutral)."""
+        """Mean predicted contact probability, in the design's map, over the
+        WT strong-contact pairs. Identity => 1.0. Missing map => 1.0 (neutral).
+
+        This was a hard-thresholded retention fraction (count of pairs with
+        prob >= 0.5). Measured on IS621 (job 4bb43cca, 128 WT pairs, CPU):
+        WT pair probabilities are min 0.980 / median 0.999, so at 60 random
+        mutations the thresholded count is 127/128 and at 100 -- the
+        production design regime -- it is 116/128, quantized in steps of
+        1/128 and therefore heavily tied across a design set. The continuous
+        mean carries the same 0-1 scale and the same dynamic range across
+        0-150 mutations (0.462 vs 0.469) with no quantization and no cliff at
+        the threshold, so it separates designs that the count ranks equal.
+        Both are reported; only the mean feeds the composite."""
         coupling_preservation.n_calls += 1
         if wt_contact_map is None or not wt_contact_pairs:
             return 1.0
@@ -500,14 +510,23 @@ def build_oracle(model, tok, head, device: str, wt_seq: str):
                 print(f"[11B-oracle] WARN design contact failed "
                       f"({type(e).__name__}: {e}); coupling=1.0", flush=True)
             return 1.0
+        tot = 0.0
         kept = 0
+        n = 0
         for i, j in wt_contact_pairs:
-            if 0 <= i < cm.shape[0] and 0 <= j < cm.shape[1] and float(cm[i, j]) >= 0.5:
-                kept += 1
-        return kept / max(1, len(wt_contact_pairs))
+            if 0 <= i < cm.shape[0] and 0 <= j < cm.shape[1]:
+                p = float(cm[i, j])
+                tot += p
+                kept += int(p >= 0.5)
+                n += 1
+        if n == 0:
+            return 1.0
+        coupling_preservation.last_retained_frac = kept / n
+        return tot / n
 
     coupling_preservation.n_failures = 0
     coupling_preservation.n_calls = 0
+    coupling_preservation.last_retained_frac = None
 
     return score_classifier, seq_loglik, coupling_preservation, wt_contact_pairs
 
@@ -1075,6 +1094,11 @@ def main():
                     "seqLL_wt": round(wt_ll, 4),
                     "seqLL_ratio": round(ll_ratio, 4),
                     "p_coupling": round(p_cpl, 4),
+                    # the old thresholded statistic, kept for comparability
+                    # with runs made before 4bb43cca; not in the composite
+                    "coupling_retained_frac": (
+                        None if coupling_preservation.last_retained_frac is None
+                        else round(coupling_preservation.last_retained_frac, 4)),
                 },
                 score_product=round(product, 6),
                 rmsds={k: (None if v is None else round(v, 3)) for k, v in rmsds.items()},
@@ -1185,6 +1209,7 @@ def main():
         n_survivors_total=len(all_survivors),
         round_stats=round_stats,
         coupling_health=dict(
+            statistic="mean_contact_prob_over_wt_pairs",
             wt_contact_pairs=len(wt_pairs),
             n_calls=int(getattr(coupling_preservation, "n_calls", 0)),
             n_failures=int(getattr(coupling_preservation, "n_failures", 0)),
