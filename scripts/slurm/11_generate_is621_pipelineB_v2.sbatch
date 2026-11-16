@@ -102,6 +102,7 @@ export GEN_COUPLING=${GEN_COUPLING:-both}
 echo "[is621Bv2] jobdir=$GEN_JOBDIR"
 echo "[is621Bv2] phenos=$GEN_PHENOS n_designs=$GEN_NDESIGNS rounds=$GEN_B_ROUNDS batch=$GEN_B_BATCH temps=$GEN_B_TEMPERATURES"
 echo "[is621Bv2] survivor topk=$GEN_B_SURVIVOR_TOPK min_agree=$GEN_B_SURVIVOR_MIN_AGREE strength=$GEN_B_SURVIVOR_BIAS_STRENGTH warmup=$GEN_B_SURVIVOR_WARMUP"
+echo "[is621Bv2] barren backoff: patience=${GEN_B_SURVIVOR_BARREN_PATIENCE:-1} decay=${GEN_B_SURVIVOR_BIAS_DECAY:-0.4} min_strength=${GEN_B_SURVIVOR_BIAS_MIN_STRENGTH:-0.25}"
 echo "[is621B] core_cap=$GEN_CORE_RMSD_CAP iface_cap=$GEN_INTERFACE_RMSD_CAP conservation_freeze=$GEN_B_CONS_FREEZE"
 echo "[is621B] additional_constraints='$GEN_ADDITIONAL_CONSTRAINTS'"
 echo "[is621B] complex_cif=$GEN_COMPLEX_CIF"

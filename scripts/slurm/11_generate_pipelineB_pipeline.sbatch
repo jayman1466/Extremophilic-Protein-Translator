@@ -39,6 +39,12 @@
 #   GEN_MLM_ADAPTER         PLM LoRA adapter dir (default mhk32)
 #   GEN_HEADDIR / GEN_HEAD_LAYOUT  same convention as Pipeline A
 #   GEN_COUPLING            mask-unit mode for scoring (default both)
+#   GEN_B_SURVIVOR_BARREN_PATIENCE  barren conditioned rounds tolerated before the
+#                           bias is relaxed (default 1)
+#   GEN_B_SURVIVOR_BIAS_DECAY       multiplier applied to bias strength on each
+#                           relaxation (default 0.4)
+#   GEN_B_SURVIVOR_BIAS_MIN_STRENGTH  below this the round resamples unbiased
+#                           (default 0.25)
 set -euo pipefail
 
 # H200 late-run allocator smoothing (matched to Pipeline A wrapper)
@@ -61,6 +67,13 @@ SURVIVOR_TOPK=${GEN_B_SURVIVOR_TOPK:-0}
 SURVIVOR_MIN_AGREE=${GEN_B_SURVIVOR_MIN_AGREE:-2}
 SURVIVOR_BIAS_STRENGTH=${GEN_B_SURVIVOR_BIAS_STRENGTH:-5.0}
 SURVIVOR_WARMUP=${GEN_B_SURVIVOR_WARMUP:-2}
+# Barren-round backoff (added after the 2026-10 alkaliphile deadlock: a conditioned
+# round with zero survivors leaves the survivor pool -- and therefore the bias --
+# unchanged, so the next round re-proposes under the same constraint that just
+# failed). Defaults escape to unbiased resampling by round 4 of an 8-round run.
+SURVIVOR_BARREN_PATIENCE=${GEN_B_SURVIVOR_BARREN_PATIENCE:-1}
+SURVIVOR_BIAS_DECAY=${GEN_B_SURVIVOR_BIAS_DECAY:-0.4}
+SURVIVOR_BIAS_MIN_STRENGTH=${GEN_B_SURVIVOR_BIAS_MIN_STRENGTH:-0.25}
 MPNN_REPO=${GEN_B_MPNN_REPO:-$SW/LigandMPNN}
 MPNN_ENV=${GEN_B_MPNN_ENV:-ligandmpnn}
 MPNN_MODEL=${GEN_B_MPNN_MODEL:-ligand_mpnn}
@@ -176,6 +189,9 @@ for PH in $PHENOS; do
     --survivor-min-agreement "$SURVIVOR_MIN_AGREE" \
     --survivor-bias-strength "$SURVIVOR_BIAS_STRENGTH" \
     --survivor-warmup-rounds "$SURVIVOR_WARMUP" \
+    --survivor-barren-patience "$SURVIVOR_BARREN_PATIENCE" \
+    --survivor-bias-decay "$SURVIVOR_BIAS_DECAY" \
+    --survivor-bias-min-strength "$SURVIVOR_BIAS_MIN_STRENGTH" \
     --wt-pdb "$STRUCT/wt.pdb" \
     --conservation-freeze "$CONS_FREEZE" \
     --core-rmsd-cap "$CORE_CAP" \
