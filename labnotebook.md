@@ -4731,8 +4731,11 @@ seed 1466. Commit `99b7f51`. Log pattern:
       where `p_classifier = σ(head(mean-pool(esm(design))))`, `seqLL` is
       single-forward `Σ log P(x_i)/L` (NOT true pseudo-LL; L-fold masking
       cost prohibitive for K designs × R rounds — ratio only), and
-      `p_coupling` = fraction of WT strong-contact pairs (contact prob ≥
-      0.5, min sep 6, top-k 128) whose contact prob ≥ 0.5 in the design.
+      `p_coupling` = mean contact prob, in the design's map, over the WT
+      strong-contact pairs (contact prob ≥ 0.5, min sep 6, top-k 128).
+      *(Was the ≥0.5 retention fraction over those pairs through
+      2026-11-16; superseded for saturation — see the entry of that date.
+      The old statistic is still emitted as `coupling_retained_frac`.)*
       All 4 sub-scores emitted per design so ranking can be re-run
       offline with different weights.
   - **Loop**: R rounds × K candidates. Temperature cycles through
@@ -5056,3 +5059,208 @@ doesn't dominate on 90-mut redesigns; (b) reconsider hyperthermophile
 — either shorter B trajectories (2 rounds max) or a mutation budget
 cap; (c) save best B-v2 PDBs + `results.json` per phenotype as
 claude-science artifacts for the webapp.
+
+## 2026-10-26 — Production head retrain: grouping-rank sweep, hyperthermophile 20x CV, cache provenance verified
+
+Three retraining arms finished. Net effect: **five of six phenotypes now have a
+locked production head**, the grouping-rank criterion is changed for one phenotype
+and explicitly *kept* for another, and the embedding-cache provenance question is
+closed.
+
+### 1. Embedding cache is adapter-applied (closed)
+
+`runs/mhk32/embeddings/secretome_mhk32` was built with the **mhk32 M+H-only
+adapter**, not the r232 scoped baseline and not stock ESM2-3B. Build-time
+assertion recorded at notebook L4008: *288 LoRA tensors, 0 unmatched*.
+
+| adapter | val_ppl ep0 -> ep1 -> ep2 |
+|---|---|
+| r232 scoped baseline (superseded) | 6.237 -> 6.217 -> 6.2168 |
+| mhk32 M+H-only (job 1174115, in cache) | 6.1659 -> 6.1657 -> **6.1548** |
+
+Every head in this project is therefore a probe on domain-adapted features, and
+all scope / tier / lambda / rank numbers share one 17,700,477-row cache, so they
+are mutually comparable. No adapter is unused.
+
+Cache retention on psychrophile positives, from the same entry: high 100%
+(41,249), medium 100% (969,267), low **14.9%** (594,424 of 3,989,593); overall
+32.1%. Part of psychrophile's thin validation set is attrition at cache build,
+upstream of pairing.
+
+### 2. Grouping-rank sweep (acidophile, alkaliphile) — the first matched rank test
+
+Prior arms each ran at exactly one grouping rank, so the apparent
+rank-vs-leakage trend was fully confounded with phenotype. A group-count
+feasibility pass showed every phenotype clears `--min-groups 20` at phylum, so
+the finer ranks were not forced by feasibility. Matched re-run (job
+`be2ae918`, same seed/scope, phylum instead of order):
+
+| phenotype | rank | val_pos | val_pairs | AUROC | AUPRC | pair-AUC | ECE | cluster overlap |
+|---|---|---|---|---|---|---|---|---|
+| acidophile | order | 28,377 | 610 | 0.9616 | 0.6407 | 0.7606 | 0.0124 | 0.1114 |
+| acidophile | phylum | 8,931 | **49** | 0.9798 | 0.7767 | 0.7663 | 0.0031 | 0.0288 |
+| alkaliphile | order | 16,638 | 854 | 0.9511 | 0.4880 | 0.6577 | 0.0105 | 0.1113 |
+| alkaliphile | phylum | 14,637 | 656 | 0.9220 | 0.3761 | **0.7187** | 0.0426 | 0.0290 |
+
+Coarsening cut cluster overlap ~4x in both. The arms then diverge:
+
+- **Alkaliphile: move to phylum.** AUROC and AUPRC fall (0.951->0.922,
+  0.488->0.376) while pair-AUC rises (0.658->0.719) on 656 pairs. That is the
+  leakage signature exactly: the global metrics were partly reading lineage,
+  the congener-matched metric was suppressed by shared clusters, and the
+  stricter split moves them in opposite directions.
+- **Acidophile: keep order.** Validation pairs collapse 610 -> 49 (-92%)
+  because the phylum split sends most positives to the training side (val_pos
+  28,377 -> 8,931, base rate halves 0.0276 -> 0.0118). The +0.006 pair-AUC
+  "gain" rests on 49 pairs and is noise; the AUPRC rise is against a halved
+  base rate and is not comparable either.
+
+### 3. Hyperthermophile 20x grouped CV (job `c1f3c977`, 8h24m, family rank)
+
+Single-split training cannot give this phenotype a usable lock metric: median
+20 validation pairs per replicate and **6 of 20 draws yield zero pairs**, where
+pair-AUC is undefined. Replication is the fix.
+
+| statistic | value |
+|---|---|
+| replicates | 20 (family rank, secreted) |
+| zero-pair replicates | 6 — excluded, pair-AUC undefined |
+| 1-4 pair replicates | 3 — all report exactly 1.0000, degenerate |
+| pooled validation pairs | **774** |
+| **pair-AUC, pair-weighted** | **0.8695**, bootstrap 95% CI [0.8542, 0.8834] |
+| pair-AUC, unweighted over usable reps | 0.8902 — inflated by the 1.0000s, NOT the estimate |
+| AUROC | 0.9973 +/- 0.0016 (base rate 0.0020) |
+| AUPRC | 0.7975 +/- 0.0520 |
+| cluster overlap | 0.137 +/- 0.011 |
+
+Two independent aggregations agree: the four replicates with >=100 pairs (582 of
+774) give 0.8690 / 0.8847 / 0.8699 / 0.8641 = **0.8719 +/- 0.0089**, against the
+pair-weighted 0.8695 over all usable replicates. A 0.002 gap means the estimate
+is not driven by the sparse replicates. Hyperthermophile is the highest pair-AUC
+of any phenotype, consistent with it being the most phenotypically distinct
+class — and it is the congener-matched metric, so it is not lineage identity.
+
+**Correction to an earlier in-session claim:** I had stated hyperthermophile
+pools to "68 pairs across 15 replicates" and used it to argue the phenotype fails
+a pair floor structurally. That figure has no source in the job output or the
+archive and was wrong — the 14-replicate read already summed to 572 pairs.
+
+### 4. Grouping-rank criterion — amended
+
+Current code (`20_train_calibrated_heads.py`) gates on group count only:
+
+    group_rank = coarsest rank with n_groups >= min_groups
+
+Amended rule, with evidence on both clauses:
+
+    group_rank = coarsest rank satisfying
+        n_groups  >= min_groups      AND   val_pairs >= pair_floor
+    where val_pairs may be POOLED across CV replicates
+
+`pair_floor` ~ 200-300. Acidophile@phylum fails it (49, single split);
+alkaliphile@phylum passes (656); hyperthermophile@family passes only via pooling
+(774 over 20 reps, median 20 each). The second clause does not exist in the code
+today; adding it would have blocked the acidophile phylum arm before it consumed
+a node.
+
+### 5. Locked production heads
+
+| phenotype | rank | split | val_pairs | AUROC | AUPRC | pair-AUC | ECE | overlap | status |
+|---|---|---|---|---|---|---|---|---|---|
+| thermophile | phylum | single | 709 | 0.9201 | 0.6482 | 0.8786 | 0.0411 | 0.0308 | production |
+| halophile | phylum | single | 9,913 | 0.8947 | 0.7825 | 0.7243 | 0.0143 | 0.0271 | production |
+| alkaliphile | phylum | single | 656 | 0.9220 | 0.3761 | 0.7187 | 0.0426 | 0.0290 | production (moved from order) |
+| acidophile | order | single | 610 | 0.9616 | 0.6407 | 0.7606 | 0.0124 | 0.1114 | production (phylum rejected) |
+| hyperthermophile | family | 20x CV | 774 | 0.9973 | 0.7975 | **0.8695** [0.854, 0.883] | 0.0008 | 0.1370 | production (pooled) |
+| psychrophile | phylum | single | 45 | 0.6757 | 0.0063 | 0.8336 | 0.0108 | 0.0288 | **NOT production** |
+
+Psychrophile stays closed. AUROC 0.6757 is near chance and AUPRC 0.0063 against
+a 0.00348 base rate is ~1.8x lift; its pair-AUC 0.8336 rests on 45 pairs and
+contradicts its own AUROC, so it is not usable. Consistent with the earlier
+~0.60 pair-AUC ceiling finding.
+
+**Harvest note.** All three arms exited 0 with "harvested 0 files" because the
+trainer writes to `$PERSIST/runs/mhk32/heads_production/`, not the job workdir.
+This is a recurring output-pattern mismatch, not a failure — read metrics from
+the persist tree, not from harvested files.
+
+## 2026-11-16 — `p_coupling` was inert, then saturated; now continuous. Retracts one B-v2 conclusion.
+
+Two CPU jobs on `standard` closed the coupling thread. The headline is that
+**observation 4 of the A vs B-v2 comparison above is retracted**, and the
+"Next (a)" item it generated was malformed.
+
+### 1. The term was inert in every shipped B-v2 run
+
+Two independent faults stacked. `PeftModel` does not expose `predict_contacts`,
+fixed earlier by unwrapping to the base model; and the model was being loaded
+under the default SDPA attention implementation, which returns no attention
+weights, so the contact head stacked an empty list and raised. The design-side
+`except` then returned a neutral 1.0 per design. Fixed by passing
+`attn_implementation="eager"` at both generation entry points (`11_generate.py`,
+`11_generate_pipelineB.py`).
+
+Confirmation job `ce8c83fa` — real adapter, real head, oracle built through
+`build_oracle` exactly as production does: **128 WT contact pairs, 0 design-side
+failures**. The term is live.
+
+**Consequence for shipped results.** Every B-v2 run in the entry above scored
+`p_coupling = 1.0` for every design. It therefore cannot have "dominated" the
+biophysical composite, and the composite was effectively a `p_classifier ×
+seqLL_ratio` ranking. Observation 4's mechanism is wrong, and re-weighting a
+composite in which one factor was a constant is not a meaningful fix. The
+underlying worry — that a 90-mut redesign should pay a contact-map penalty — is
+untested, not confirmed: the term that would have tested it never ran.
+
+### 2. Live, but saturated at the production mutation load
+
+`ce8c83fa` also returned exactly 1.0 for every mutant it scored, up to 60
+mutations. Job `4bb43cca` measured why. Over the 128 WT pairs, WT contact
+probabilities are min 0.980 / median 0.999 / max 1.000, so the ≥0.5 retention
+count barely moves:
+
+| mutations | retained ≥0.5 | retained ≥0.9 | mean prob | min prob | r(full map) |
+|---|---|---|---|---|---|
+| 0 | 1.000 | 1.000 | 0.9969 | 0.980 | 1.000 |
+| 5 | 1.000 | 1.000 | 0.9970 | 0.977 | 0.998 |
+| 20 | 1.000 | 1.000 | 0.9964 | 0.941 | 0.988 |
+| 60 | 0.992 | 0.961 | 0.9826 | 0.380 | 0.960 |
+| 100 | 0.906 | 0.891 | 0.9139 | 0.014 | 0.875 |
+| 150 | 0.531 | 0.469 | 0.5345 | 0.005 | 0.590 |
+
+Production designs carry ~90–100 mutations, where the count reads 116/128 —
+quantized in 1/128 steps and therefore heavily tied across a design set. A
+constant-1.0 term and a term that assigns the same value to most of the field
+fail the same way.
+
+### 3. Change: continuous mean over the same pairs
+
+Dynamic range across 0–150 mutations: retention-at-0.5 **0.469**, mean prob
+**0.462**, mean ratio to WT 0.464, Pearson r on the full map 0.410. The mean
+matches the count's range with no quantization and no cliff at the threshold, so
+it separates designs the count ranks equal; full-map correlation is worse and is
+dominated by the near-zero bulk. Composite now uses the mean. The old statistic
+is still emitted per design as `coupling_retained_frac` so pre- and post-change
+runs stay comparable, and `coupling_health.statistic` names the active one.
+
+Commits `c0b9516` (coupling-failure counters + health block), `49837ac` (this
+change). Nothing re-ranked retrospectively — the shipped runs have no usable
+coupling signal to re-rank *with*.
+
+### 4. Not the same thing as `--coupling-mask`
+
+Name collision worth stating once. `--coupling-mask` decides which conserved
+positions MPNN may mutate, via APC-corrected MI with pseudocount pinned at 0, a
+p99 threshold on the realised score distribution, a cap of 20 openings, and **no
+transitive opening of partners**. That design exists because the structural
+criterion (conserved + in a WT contact) was measured on 8WT6 and degenerated to
+a blanket unfreeze — at an 8 Å Cβ cutoff essentially every residue in a globular
+domain has a long-range contact. `p_coupling` here is a scoring term over a
+finished design and shares nothing with it but the word.
+
+### 5. Still open
+
+The full GPU re-run with a live coupling term has **not** happened. `gpu_h200`
+has been drained by root since Nov 13 for a faulty GPU; the `gpu` partition's
+QOS caps a job at 12 G, far under what ESM2-3B needs, and the account
+association grants no alternate QOS. Blocked on hardware, not code.
