@@ -616,6 +616,28 @@ def main():
     ap.add_argument("--survivor-warmup-rounds", type=int, default=2,
                     help="draw survivors from all rounds >= this; earlier "
                          "rounds are iid warmup so we have a survivor pool")
+    # ---- barren-round backoff (added 2026-10-27) ----
+    # Without this the loop can deadlock: build_survivor_bias() refits from
+    # all_survivors, so a round that yields no survivor leaves the pool, and
+    # therefore the bias, byte-identical next round. The alkaliphile B-v2
+    # production run hit exactly this -- biased_positions pinned at 93 for six
+    # consecutive rounds, zero survivors in every one, and the run still exited
+    # 0 having spent 1/4 of its nominal proposal budget. See
+    # results/bv2_round_survival.csv.
+    # Defaults are tuned for the production shape (8 rounds, 2 warmup => only 6
+    # conditioned rounds). patience=1 with decay=0.25 escapes a true deadlock
+    # after two barren rounds; a gentler schedule burns the whole run before it
+    # reaches the floor. A single unlucky barren round is not punished
+    # permanently because a productive round restores one step (see loop).
+    ap.add_argument("--survivor-barren-patience", type=int, default=1,
+                    help="consecutive conditioned rounds yielding zero "
+                         "survivors before the bias strength is relaxed")
+    ap.add_argument("--survivor-bias-decay", type=float, default=0.25,
+                    help="multiplicative backoff applied to bias strength each "
+                         "time --survivor-barren-patience is exhausted")
+    ap.add_argument("--survivor-bias-min-strength", type=float, default=0.5,
+                    help="once backoff drops effective strength below this, "
+                         "the round resamples unbiased instead of biased")
 
     # ---- misc ----
     ap.add_argument("--coupling-mode", default="both",
@@ -934,6 +956,15 @@ def main():
 
     all_survivors: list[dict] = []
     round_stats: list[dict] = []
+    # Barren-round backoff state (multiplicative decrease / one-step increase).
+    # A barren conditioned round multiplies bias_relax by --survivor-bias-decay;
+    # a productive one restores a single step (capped at 1.0) rather than
+    # snapping straight back to full strength. The asymmetry matters: a true
+    # deadlock is consecutive and decays geometrically to the floor, while one
+    # unlucky round on a healthy target recovers immediately.
+    bias_relax = 1.0
+    barren_streak = 0
+    n_barren_conditioned = 0
     for r in range(args.n_rounds):
         T = temp_for_round(r)
         round_dir = mpnn_root / f"r{r:02d}"
@@ -941,17 +972,32 @@ def main():
         # Build survivor-conditioned per-residue bias for rounds past warmup.
         per_res_bias: dict = {}
         bias_diag: dict = {"topk_used": 0, "biased_positions": 0}
-        if (args.survivor_topk > 0
-                and r >= args.survivor_warmup_rounds
-                and len(all_survivors) > 0):
+        conditioned = (args.survivor_topk > 0
+                       and r >= args.survivor_warmup_rounds
+                       and len(all_survivors) > 0)
+        eff_strength = args.survivor_bias_strength * bias_relax
+        if conditioned and eff_strength >= args.survivor_bias_min_strength:
             per_res_bias, bias_diag = build_survivor_bias(
                 all_survivors,
                 K=args.survivor_topk,
                 min_agree=args.survivor_min_agreement,
-                strength=args.survivor_bias_strength,
+                strength=eff_strength,
             )
             print(f"[11B] round {r} survivor-bias: topK={bias_diag['topk_used']} "
-                  f"biased_positions={bias_diag['biased_positions']}", flush=True)
+                  f"biased_positions={bias_diag['biased_positions']} "
+                  f"strength={eff_strength:.3f} (relax={bias_relax:.3f})",
+                  flush=True)
+        elif conditioned:
+            # Backoff has driven the bias below the useful floor: resample
+            # unbiased this round rather than carry a stalled bias forward.
+            bias_diag = {"topk_used": 0, "biased_positions": 0,
+                         "relaxed_to_unbiased": True}
+            print(f"[11B] round {r} survivor-bias RELAXED TO UNBIASED "
+                  f"(strength {eff_strength:.3f} < floor "
+                  f"{args.survivor_bias_min_strength})", flush=True)
+        bias_diag["effective_strength"] = round(float(eff_strength), 4)
+        bias_diag["bias_relax"] = round(float(bias_relax), 4)
+        bias_diag["conditioned"] = bool(conditioned)
 
         recs, _tail = mpnn_propose(
             mpnn_repo=args.mpnn_repo, mpnn_env=args.mpnn_env,
@@ -1024,11 +1070,42 @@ def main():
                 n_mutations=n_mut(s),
             ))
         all_survivors.extend(r_survivors)
+
+        # ---- barren-round backoff ----
+        # Only conditioned rounds can deadlock; an unproductive warmup round is
+        # just a hard target, not a stalled feedback loop.
+        relaxed_this_round = False
+        if conditioned:
+            if len(r_survivors) == 0:
+                barren_streak += 1
+                n_barren_conditioned += 1
+                if barren_streak >= args.survivor_barren_patience:
+                    bias_relax *= args.survivor_bias_decay
+                    barren_streak = 0
+                    relaxed_this_round = True
+                    print(f"[11B] round {r}: {args.survivor_barren_patience} "
+                          f"consecutive barren conditioned rounds -> relaxing "
+                          f"bias to {args.survivor_bias_strength * bias_relax:.3f} "
+                          f"(relax={bias_relax:.3f})", flush=True)
+            elif bias_relax < 1.0:
+                # Productive round: restore one backoff step, capped at full
+                # strength. Prevents one unlucky round from permanently
+                # weakening conditioning on an otherwise healthy target.
+                barren_streak = 0
+                bias_relax = min(1.0, bias_relax / args.survivor_bias_decay)
+                print(f"[11B] round {r}: productive -> bias restored to "
+                      f"{args.survivor_bias_strength * bias_relax:.3f} "
+                      f"(relax={bias_relax:.3f})", flush=True)
+            else:
+                barren_streak = 0
+
         round_stats.append(dict(
             round=r, temperature=T,
             proposed=len(recs), survivors=len(r_survivors),
             rejected=len(r_rejected), reject_breakdown=r_rejected,
             survivor_bias=bias_diag,
+            barren_streak=barren_streak,
+            relaxed_this_round=relaxed_this_round,
         ))
         print(f"[11B] round {r} T={T:.3f}: {len(r_survivors)}/{len(recs)} survived "
               f"(cum {len(all_survivors)})", flush=True)
@@ -1096,6 +1173,16 @@ def main():
         n_designs=args.n_designs,
         n_survivors_total=len(all_survivors),
         round_stats=round_stats,
+        conditioning_health=dict(
+            n_conditioned_rounds=sum(1 for rs in round_stats
+                                     if rs["survivor_bias"].get("conditioned")),
+            n_barren_conditioned_rounds=n_barren_conditioned,
+            final_bias_relax=round(float(bias_relax), 4),
+            n_relaxations=sum(1 for rs in round_stats if rs["relaxed_this_round"]),
+            barren_patience=args.survivor_barren_patience,
+            bias_decay=args.survivor_bias_decay,
+            bias_min_strength=args.survivor_bias_min_strength,
+        ),
         bias_aa=bias_vec,
         wt_structure_provenance=wt_struct_prov,
         coupling_mask=args.coupling_mask,
@@ -1112,6 +1199,27 @@ def main():
         designs=designs,
     )
     Path(args.out).write_text(json.dumps(out, indent=2))
+
+    # Persist the FULL survivor pool, not just the top-N picks. Without this the
+    # pool is sorted, sliced and discarded, which makes any offline re-rank or
+    # score-reweighting study impossible after the fact -- the exact gap that
+    # blocked the 2026-10-26 composite re-weighting analysis.
+    surv_path = Path(args.out).with_suffix("").as_posix() + "_survivors.jsonl"
+    with open(surv_path, "w") as fh:
+        for d in all_survivors:
+            fh.write(json.dumps(d) + "\n")
+    print(f"[11B] wrote {surv_path} ({len(all_survivors)} survivors)", flush=True)
+
+    ch = out["conditioning_health"]
+    if ch["n_conditioned_rounds"] and ch["n_barren_conditioned_rounds"]:
+        frac = ch["n_barren_conditioned_rounds"] / ch["n_conditioned_rounds"]
+        if frac >= 0.5:
+            print(f"[11B] WARNING: {ch['n_barren_conditioned_rounds']}/"
+                  f"{ch['n_conditioned_rounds']} conditioned rounds produced no "
+                  f"survivors ({frac:.0%}). Survivor conditioning was largely "
+                  f"unproductive for this target; treat this run as closer to "
+                  f"iid than to a hill-climb.", flush=True)
+
     print(f"[11B] wrote {args.out} ({len(designs)} designs, "
           f"{len(all_survivors)} survivors from {sum(r['proposed'] for r in round_stats)} proposals)",
           flush=True)
