@@ -483,20 +483,31 @@ def build_oracle(model, tok, head, device: str, wt_seq: str):
         """Fraction of WT strong-contact pairs whose predicted contact prob in
         the design's contact map >= 0.5. Equal identity => 1.0. Missing map
         (fallback) => 1.0 (neutral)."""
+        coupling_preservation.n_calls += 1
         if wt_contact_map is None or not wt_contact_pairs:
             return 1.0
         try:
             from eptrans.modeling.data import _predict_contacts
             cm = _predict_contacts(model, tok, s)
         except Exception as e:
-            print(f"[11B-oracle] WARN design contact failed ({type(e).__name__}); "
-                  f"coupling=1.0", flush=True)
+            # Count these. Returning a neutral 1.0 per design is the same
+            # silent-degradation failure the WT-side guard above exists to
+            # prevent, just spread one design at a time instead of all at once.
+            # Raising mid-run would throw away a multi-hour job, so the run
+            # continues and reports the count in coupling_health.
+            coupling_preservation.n_failures += 1
+            if coupling_preservation.n_failures <= 3:
+                print(f"[11B-oracle] WARN design contact failed "
+                      f"({type(e).__name__}: {e}); coupling=1.0", flush=True)
             return 1.0
         kept = 0
         for i, j in wt_contact_pairs:
             if 0 <= i < cm.shape[0] and 0 <= j < cm.shape[1] and float(cm[i, j]) >= 0.5:
                 kept += 1
         return kept / max(1, len(wt_contact_pairs))
+
+    coupling_preservation.n_failures = 0
+    coupling_preservation.n_calls = 0
 
     return score_classifier, seq_loglik, coupling_preservation, wt_contact_pairs
 
@@ -1173,6 +1184,13 @@ def main():
         n_designs=args.n_designs,
         n_survivors_total=len(all_survivors),
         round_stats=round_stats,
+        coupling_health=dict(
+            wt_contact_pairs=len(wt_pairs),
+            n_calls=int(getattr(coupling_preservation, "n_calls", 0)),
+            n_failures=int(getattr(coupling_preservation, "n_failures", 0)),
+            live=bool(len(wt_pairs) > 0
+                      and getattr(coupling_preservation, "n_failures", 0) == 0),
+        ),
         conditioning_health=dict(
             n_conditioned_rounds=sum(1 for rs in round_stats
                                      if rs["survivor_bias"].get("conditioned")),
