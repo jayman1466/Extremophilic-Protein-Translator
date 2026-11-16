@@ -189,7 +189,12 @@ def main():
     tax["acc"] = tax["accession"].map(bare)
     tax = tax.drop_duplicates("acc").set_index("acc")
 
-    RANKS = ["family", "genus", "order", "class", "phylum"]
+    # Ordered fine -> coarse. The auto-coarsen loop below steps forward in this
+    # list, so a mis-ordered entry would step to a FINER rank and make the group
+    # shortage worse. Previously began ["family", "genus", ...], which coarsened
+    # family -> genus; no shipped head was affected because every production run
+    # passed an explicit --group-rank with enough groups to skip the loop.
+    RANKS = ["genus", "family", "order", "class", "phylum"]
     rank = args.group_rank
     gmap = tax[rank].reindex(df["acc"].unique())
     ngroups = int(gmap.dropna().nunique())
